@@ -26,4 +26,18 @@ Kotlin, Jetpack Compose, Material 3 기반 Android 음성 비서 앱입니다. �
 
 2026-10-20에 기존 `../aria`의 소스, 테스트, 리소스, 문서 및 Gradle 설정을 통합했습니다. 기존 Git 이력과 `origin` 연결은 유지했습니다. 원본 폴더는 보존했으며, 이후 개발은 이 저장소에서 진행합니다.
 
-빌드 출력, Gradle/Kotlin 캐시, 개인 IDE 설정, SDK 경로 및 서명 키는 버전 관리에서 제외합니다. 통합 과정에서는 개발 지침에 따라 Gradle 빌드·테스트·Lint를 실행하지 않았습니다. Android Studio에서 Sync, 빌드 및 기기 동작을 확인해야 합니다.
+빌드 출력, Gradle/Kotlin 캐시, 개인 IDE 설정, SDK 경로 및 서명 키는 버전 관리에서 제외합니다.
+
+## 빌드 및 테스트
+
+이 저장소는 격리된 개발환경이며, 빌드·테스트·Lint는 에이전트의 기본 작업에 포함됩니다. Android Studio에 포함된 JDK와 로컬 Android SDK를 사용합니다. Windows PowerShell에서는 다음과 같이 실행합니다.
+
+```powershell
+$env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
+.\gradlew.bat :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+.\gradlew.bat :app:connectedDebugAndroidTest
+```
+
+기기 테스트에는 USB 디버깅을 허용한 Android 기기 또는 에뮬레이터가 필요합니다. 실제 음성 인식·TTS·Gemma 성능은 별도 기능 검증이 필요합니다.
+
+2026-10-20 검증: 디버그 APK 빌드, 단위 테스트 35개, Pixel 3 기기 테스트 10개, Lint 통과(오류 0개·경고 34개). [검증 환경과 상세 결과](docs/BUILD_VALIDATION.md)를 참고하세요.

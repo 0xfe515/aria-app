@@ -29,4 +29,4 @@ This checkout is connected to https://github.com/0xfe515/aria-app.git on the mai
 Keep SDK paths in ignored `local.properties`. Do not commit credentials, signing keys, or generated build output.
 
 ## Agent Workflow
-The user builds and verifies the app directly in Android Studio. Do not run Gradle builds, tests, or lint unless explicitly requested. Review code statically and report any checks the user should perform in Android Studio.
+This is an isolated development environment. Builds, tests, and lint are part of the agent's work and do not require a separate request. Use the installed Android Studio JDK and Android SDK with the repository's Gradle wrapper. For code or build configuration changes, run `:app:assembleDebug`, `:app:testDebugUnitTest`, and `:app:lintDebug` as appropriate. Run instrumented tests when a compatible device or emulator is available. Fix failures within the task's scope and report the commands, results, and any remaining environment or device limitations. Static review alone does not establish that the app builds or its tests pass. Keep machine-specific SDK paths in ignored `local.properties`.

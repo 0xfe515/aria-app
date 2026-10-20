@@ -1,5 +1,7 @@
 # 팀원 UI 통합
 
+> 2026-10-20 업데이트: 빌드·테스트 실행 금지는 철회되었습니다. APK 빌드, 단위 테스트 35개, Pixel 3 기기 테스트 10개와 Lint가 통과했습니다. 아래의 미실행 기록은 이전 작업 당시의 상태이며, 현재 결과와 검증 범위는 [BUILD_VALIDATION.md](BUILD_VALIDATION.md)를 참고하세요.
+
 2026-10-16 `prj_test.zip`의 `activity_main.xml`, `MainActivity.kt`, 전원 버튼 배경을 참고해 기존 Compose 홈 화면에 적용했다.
 
 - 남색 배경(#0F172A), 패널(#1E293B), 녹색 실행 상태와 빨간색 OFF, 원형 전원 버튼, 상단 AI GLASS ARIA 타이틀을 반영했다. 앱 기본 테마는 시안의 다크 스타일이다.
