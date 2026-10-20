@@ -1,12 +1,13 @@
 # 음성 명령과 Gemma 통합
 
-> 2026-10-20 업데이트: 빌드·테스트 실행 금지는 철회되었습니다. APK 빌드, 단위 테스트 35개, Pixel 3 기기 테스트 10개와 Lint가 통과했습니다. 아래의 미실행 기록은 이전 작업 당시의 상태이며, 현재 결과와 검증 범위는 [BUILD_VALIDATION.md](BUILD_VALIDATION.md)를 참고하세요.
+> 2026-10-20 검증 업데이트: 최종 APK 빌드, 단위 테스트 61개, Pixel 3 계측 테스트 15개(실제 Gemma 추론 포함)와 Lint 오류 검사를 통과했습니다. 한국어 코퍼스 WAV는 번들 Sherpa-ONNX 엔진으로 오프라인 디코딩했지만, 실제 사용자 발화의 호출어 인식 정확도와 장시간 감지는 아직 별도 확인이 필요합니다. 자세한 계측값은 [BUILD_VALIDATION.md](BUILD_VALIDATION.md)를 참고하세요.
 
 ## 구현 상태
 
 룰 기반 실행, 앱 내 모델 다운로드/검증, 별도 프로세스 Gemma 추론, 한국어 오프라인 TTS,
-백그라운드 결과 알림을 구현했다. 에이전트는 Gradle Sync·빌드·테스트·Lint·기기 측정을
-실행하지 않았다. **Pixel 3에서의 구동과 성능을 통과한 것으로 간주하지 않는다.**
+백그라운드 결과 알림과 Sherpa-ONNX 기반 오프라인 한국어 음성 인식을 구현했다.
+Pixel 3에서 앱 빌드와 계측 테스트, Gemma 추론, 한국어 WAV 디코딩을 검증했다.
+실제 마이크에 대한 사람 발화 호출어 정확도와 장시간 백그라운드 감지는 아직 검증하지 않았다.
 
 완료 판정은 두 단계다.
 
@@ -53,7 +54,7 @@
 - 약 2.59GB와 여유 공간이 필요하다. 모델 파일/다운로드 ID는 백업·기기 이전 대상에서 제외한다.
 - 설치 완료 후 음성 대기 중이면 모델을 준비한다. 중지 상태면 다음 대기 시작 때 준비한다.
 - 모델 삭제는 진행 중 해석을 무효화하고 언어 프로세스를 해제한다.
-- 추론/준비 실패 후 재시도는 음성 대기를 중지하고 다시 시작한다. 자동 재시작 루프는 없다.
+- 추론/준비 시간 초과나 연결 오류가 발생하면 전용 `:language` 프로세스를 종료·언바인드하고, 이전 프로세스 Binder 종료가 확인된 뒤에만 다음 명시적 명령 또는 대기 재시작에서 다시 준비한다. 자동 백그라운드 재시작 루프는 없다.
 - 한국어 오프라인 TTS 음성을 시스템 설정에서 미리 설치한다. 없으면 진동과 화면/알림으로 대체한다.
 
 ## 구조와 제한
@@ -67,22 +68,29 @@
 UI 콜백 Binder가 죽으면 백그라운드로 판정해 결과를 알림으로 전달한다.
 안내 소리 설정의 저장과 변경은 `:wakeword` 서비스 한 곳이 소유한다. 인식 상태는 Waiting/Reconnecting/Speaking으로 구분한다.
 
-LiteRT-LM 0.16.1, CPU 두 스레드, 최대 컨텍스트 2048토큰, 응답 96토큰,
+LiteRT-LM 0.16.1, CPU 2~4스레드(Pixel 3 기준 4스레드), 최대 컨텍스트 2048토큰(모델 최소 호환 용량 2048토큰), 응답 최대 32토큰,
+발화 입력 120자(프롬프트 320자, 시스템 프롬프트 423자, 응답 256자) 제한, 요청별 단일 턴 대화(이전 발화 미보관),
 thinking/MTP/자동 도구 실행 비활성, 텍스트 입력만 사용한다.
+고정된 `gemma-4-E2B-it.litertlm` 모델에서 `EngineConfig.maxNumTokens`를 512로 줄이면 첫 추론(822ms) 시점에 네이티브 TFLite/LiteRT 그래프의
+프리필 KV 캐시 슬라이스 크기 불일치(`dynamic_update_slice.cc:65 SizeOfDimension(update, i) <= SizeOfDimension(operand, i) was not true`,
+`Node number 1164 (DYNAMIC_UPDATE_SLICE) failed to prepare`, `Failed to allocate tensors`)로 텐서 할당이 실패한다(메모리 OOM이 아닌 구조적 컨텍스트 용량 제약).
+따라서 컨텍스트 버퍼는 호환 용량인 2048토큰을 유지한다.
 비전·오디오 인코더를 로드하지 않는다. 호출어와 명령 모두 Android 기본 음성 인식 서비스가 담당한다.
 한국어 언어팩·오프라인/네트워크 정책은 기기 기본 서비스를 따른다. 정식 호출어가 문장 시작에 있을 때만 활성화한다.
 한 호흡 입력과 호출어만 말한 뒤 이어 말하기를 지원한다. [OFFLINE_WAKEWORD.md](OFFLINE_WAKEWORD.md)를 참고한다.
 공식 API: https://developers.google.com/edge/litert-lm/android
 
-`:language`의 네이티브 초기화/추론은 직렬 실행한다. 준비 60초/해석 15초에 사용자 대기를
-끝내고 실행을 포기한다. 네이티브 호출이 아직 반환하지 않았다면 추가 추론을 겹치지 않는다.
-전체 중지/삭제는 전용 언어 프로세스를 종료해 멈춘 네이티브 호출의 자원도 회수한다.
+`:language`의 네이티브 초기화/추론은 직렬 실행한다. 준비 60초, 첫(콜드) 해석 30초, 이후(웜) 해석 20초에
+사용자 대기를 끝내고 실행을 포기한다. 네이티브 호출이 아직 반환하지 않은 상태에서 중복 추론 요청은 즉시 거부하며,
+시간 초과·초기화 실패·전체 중지·삭제 시에는 전용 언어 프로세스를 즉시 종료·언바인드해 멈춘 네이티브 호출의 자원을 회수한다.
+이전 `:language` 프로세스의 Binder 사망(`linkToDeath`/`isBinderAlive`)이 확인되기 전에는 새 바인딩을 시작하지 않아,
+지연된 `release()`가 새 엔진을 종료하거나 네이티브 호출이 겹치는 일을 방지한다.
 음성 디코딩 스레드에서 LLM이나 파일 해시 계산을 하지 않는다.
 
 모델은 명령 하나만 담은 JSON을 반환한다. 알려진 enum 외 명령·추가 인자·복수 결과는
 실행하지 않는다. 결과 TTS는 코드의 고정 문구이며 모델 자유 응답을 읽지 않는다.
-발화·컨텍스트·모델 출력은 메모리에만 보관하며 로그/파일에 기록하지 않는다.
-설정에는 마지막 준비/해석 시간을 표시한다. 메모리·배터리·온도는 기기 프로파일러로 측정한다.
+발화·컨텍스트·모델 출력은 메모리에만 보관하며 로그/파일에 기록하지 않는다(로그에는 단계·소요 시간·오류 범주만 기록).
+설정과 홈 화면에는 준비/해석 진행 상태와 응답 시간 초과·복구 안내를 표시한다. 메모리·배터리·온도는 기기 프로파일러로 측정한다.
 TTS 동안 Android 인식기를 취소·해제한다. 완료/오류 후 기존 500ms 대기와 300ms 재시작 정책으로 복귀한다.
 음성으로 TTS를 끼어들어 중단하는 기능은 제공하지 않으며 화면/알림의 중지 버튼은 동작한다.
 듣기 중지 명령은 안내 완료 또는 최대 5초 뒤 정리하므로 TTS 완료 콜백이 없어도 중지한다.
@@ -90,8 +98,8 @@ TTS 동안 Android 인식기를 취소·해제한다. 완료/오류 후 기존 5
 ## Android Studio 검증 순서
 
 1. Gradle Sync, debug 빌드 후 Pixel 3 / Android 12에 설치한다. 모델 다운로드 전 기본 명령을 먼저 확인한다.
-2. `RuleCommandInterpreterTest`, `ModelCommandParserTest`, `VoiceListeningSessionTest`, `KoreanWakePhraseMatcherTest`, 기존 생명주기 테스트, Compose UI 테스트,
-   `ModelCommandValidationTest`를 실행한다. 에이전트는 테스트 코드를 작성했으나 실행하지 않았다.
+2. `RuleCommandInterpreterTest`, `ModelCommandParserTest`, `LanguageClientTest`, `VoiceListeningSessionTest`, `KoreanWakePhraseMatcherTest`, 기존 생명주기 테스트, Compose UI 테스트,
+   `ModelCommandValidationTest`를 실행한다. 단위 테스트(`LanguageClientTest` 등)는 생명주기·타임아웃·재시도 정책만 검증하며, 실제 기기에서의 Gemma 추론 지연 시간 통과를 대체하지 않는다. 실제 모델 준비·추론 측정은 검증된 모델 파일(`2,588,147,712` bytes)이 기기에 배치된 상태에서 선택적 계측 프로브(`ModelCommandValidationTest#realGemmaColdPrepareAndShortInferenceProbe`, `-e runRealGemmaProbe true`)로 수행하며, 모델이 없으면 명시적으로 건너뛴다(`skipped`).
 3. 설정에서 Wi-Fi 다운로드, 취소/재시도, 앱 종료 후 복귀, 저장 공간 부족, 네트워크 단절을 확인한다.
    디버거로 내려받은 중간 파일을 손상시켜 설치 완료로 표시되지 않는지 확인한다.
 4. Gemma 설치 뒤 준비 시간과 메모리를 기록한다. 비행기 모드에서 “소리가 좀 거슬려” 같은
@@ -112,3 +120,17 @@ TTS 동안 Android 인식기를 취소·해제한다. 완료/오류 후 기존 5
 기기 검증 기록에는 APK 식별값, 기기/OS, 모델 revision, TTS 엔진/오프라인 음성 설치 여부,
 명령별 정답·지연, 초기화 시간, PSS와 30분 대기 결과를 남긴다. 실제 사용자 발화 대신
 사전에 정한 테스트 문장 번호를 사용한다.
+
+## Pixel 3 실모델 계측 프로브 결과 (`realGemmaColdPrepareAndShortInferenceProbe`)
+
+- 대상 기기 및 모델: Pixel 3 (Android 12 / API 31), `gemma-4-E2B-it.litertlm` (`2,588,147,712` bytes, SHA-256 `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c`, `/sdcard/Android/data/com.ariateam.aria/files/Download/gemma-e2b.litertlm`).
+- `maxNumTokens = 512` 축소 시 실패 기록 (수정 전):
+  - 파일시스템 콜드 상태의 `prepare`는 클라이언트 `14,574ms`(서비스 `14,157ms`)에 성공했다.
+  - 첫 추론은 타임아웃이나 OOM이 아니라 `822ms` 만에 `FailureReason.InferenceError`로 실패했으며, 네이티브 로그에서 `tflite/kernels/dynamic_update_slice.cc:65 SizeOfDimension(update, i) <= SizeOfDimension(operand, i) was not true`, `Node number 1164 (DYNAMIC_UPDATE_SLICE) failed to prepare`, `litert: Failed to allocate tensors`가 확인되었다.
+- `maxNumTokens = 2048` 복원 후 통과 기록 (`OK (1 test)`):
+  - 구성: `MAX_CONTEXT_TOKENS = 2048`(`MIN_COMPATIBLE_CONTEXT_TOKENS = 2048`), CPU 4스레드, 423자 시스템 프롬프트, `maxOutputToken = 32`, thinking 비활성, 타임아웃 분리(준비 60초 / 콜드 첫 추론 30초 / 웜 추론 20초).
+  - 엔진 재준비(`gemma_prepare_ms`): `1,175ms`. 직전 실행으로 OS 파일 캐시가 데워진 상태의 수치이므로, 파일시스템 콜드 준비 지연(`14,574ms` 클라이언트 / `14,157ms` 서비스)이 항상 1.2초로 단축된다고 간주하지 않는다.
+  - 첫 추론(콜드, `"소리가 좀 거슬려"`): 클라이언트 `15,011ms` / 서비스 `14,998ms`, 파싱 결과 `Execute(SoundOff)`. 이전의 단일 `15,000ms` 타임아웃이 실제 첫 추론 경계선에서 조기 만료될 수 있었음을 실측으로 입증한다.
+  - 두 번째 추론(웜, `"설정 화면 보여줘"`): 클라이언트 `12,190ms` / 서비스 `12,184ms`, 파싱 결과 `Execute(Settings)`.
+- 남은 기기 변동성 및 추가 검증 범위:
+  - 단건 계측 프로브(콜드 1회 + 웜 1회)는 통과했으나, 콜드 첫 추론(`15.01초`)이 15초 경계에 위치하며 OS 페이지 캐시 상태·발열(스로틀링)·번들 오프라인 ASR/TTS 동시 실행 여부에 따라 지연 시간이 달라질 수 있다. 20개 변형 문장 정확도/지연 및 30분 장기 대기 내구성 검증은 별도 실기기 시나리오로 계속 확인한다.

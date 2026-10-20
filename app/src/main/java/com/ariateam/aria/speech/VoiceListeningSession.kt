@@ -122,6 +122,11 @@ internal class VoiceListeningSession(
         publish(VoicePhase.Stopped)
     }
 
+    fun shutdown() {
+        stop()
+        driver.shutdown()
+    }
+
     private fun announceInput() {
         if (inputAnnounced) return
         inputAnnounced = true
@@ -213,10 +218,11 @@ internal class VoiceListeningSession(
                 ending = true
                 timer(VoiceLimits.FINAL_MILLIS) { failure(RecognitionFailure.Timeout) }
             }
-            override fun partial(text: String) {
+            override fun partial(text: String) = partial(if (text.isBlank()) emptyList() else listOf(text))
+            override fun partial(candidates: List<String>) {
                 if (!live()) return
                 if (mode == Mode.Wake) {
-                    val after = matcher.afterWakePhrase(text) ?: return
+                    val after = matcher.selectWakeAfterPhrase(candidates) ?: return
                     if (!activated) {
                         activated = true
                         announceInput()
@@ -224,13 +230,15 @@ internal class VoiceListeningSession(
                     }
                     draft = after.take(VoiceLimits.MAX_TEXT_CHARS)
                 } else {
+                    val text = candidates.firstOrNull { it.isNotBlank() }.orEmpty()
                     beganSpeech = beganSpeech || text.isNotBlank()
                     val after = matcher.afterWakePhrase(text) ?: text.trim()
                     if (after.isNotBlank()) draft = after.take(VoiceLimits.MAX_TEXT_CHARS)
                 }
                 publish(VoicePhase.Dictating)
             }
-            override fun result(text: String) { if (live()) finalResult(text) }
+            override fun result(text: String) = result(if (text.isBlank()) emptyList() else listOf(text))
+            override fun result(candidates: List<String>) { if (live()) finalResult(candidates) }
             override fun failed(failure: RecognitionFailure) { if (live()) this@VoiceListeningSession.failure(failure) }
         })
     }
@@ -257,9 +265,9 @@ internal class VoiceListeningSession(
         catch (_: Exception) { failure(RecognitionFailure.Client) }
     }
 
-    private fun finalResult(text: String) {
-        val afterWake = matcher.afterWakePhrase(text)
+    private fun finalResult(candidates: List<String>) {
         if (mode == Mode.Wake) {
+            val afterWake = matcher.selectWakeAfterPhrase(candidates)
             if (afterWake == null) {
                 normalWakeRestart() // A partial wake may have been withdrawn in the final result.
                 return
@@ -280,6 +288,8 @@ internal class VoiceListeningSession(
             }
             confirmed(afterWake)
         } else {
+            val text = candidates.firstOrNull { it.isNotBlank() }.orEmpty()
+            val afterWake = matcher.afterWakePhrase(text)
             val command = (afterWake ?: text).trim()
             if (command.isBlank()) {
                 normalEmptyResult()

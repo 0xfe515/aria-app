@@ -286,6 +286,78 @@ class VoiceListeningSessionTest {
         assertTrue(h.commands.isEmpty())
     }
 
+    @Test fun truncatedSingleSyllableAndPartialWakeFormsNeverWakeOrExecuteAcrossSessions() {
+        val h = Harness()
+        h.start()
+        listOf("헤", "헤이", "헤이 아리", "헤뤼", "헤뤼이").forEach { fragment ->
+            h.driver.current.partial(fragment)
+            assertEquals(VoicePhase.Waiting, h.session.snapshot.phase)
+            h.driver.current.result(listOf(fragment))
+            assertEquals(0, h.wakes)
+            assertEquals(0, h.inputs)
+            assertTrue(h.commands.isEmpty())
+            h.time.advance(300)
+            h.driver.current.ready()
+        }
+        // A subsequent session starting with "아리아 설정 열어" must not concatenate with prior "헤".
+        h.driver.current.result(listOf("아리아 설정 열어"))
+        assertEquals(0, h.wakes)
+        assertTrue(h.commands.isEmpty())
+    }
+
+    @Test fun observedPhoneticWakeAndAgreedNBestCandidatesWakeAndPreserveTopResultForCommands() {
+        val h = Harness()
+        h.start()
+        // Observed full phonetic form "헤뤼이아" opens the command window without executing wake text.
+        h.driver.current.partial(listOf("헤", "헤뤼이아"))
+        assertEquals(1, h.wakes)
+        assertEquals(1, h.inputs)
+        assertEquals(VoicePhase.Dictating, h.session.snapshot.phase)
+        h.driver.current.result(listOf("헤", "헤뤼이아"))
+        assertTrue(h.commands.isEmpty())
+        h.time.advance(300)
+        h.driver.current.ready()
+        // In Command mode, top-result semantics are preserved (lower N-best candidates are ignored).
+        h.driver.current.result(listOf("설정 열어", "홈으로 가"))
+        assertEquals(listOf("설정 열어"), h.commands)
+        h.time.advance(300)
+        h.driver.current.ready()
+        // Same-utterance N-best wake+command executes when top fragment agrees on the command suffix.
+        h.driver.current.result(listOf("헤이 아리 도움말", "헤이 아리아 도움말"))
+        assertEquals(listOf("설정 열어", "도움말"), h.commands)
+    }
+
+    @Test fun partialWakeWithdrawnToTruncatedFragmentInFinalNeverExecutes() {
+        val h = Harness()
+        h.start()
+        h.driver.current.partial(listOf("헤이 아리아 설정 열어"))
+        assertEquals(1, h.wakes)
+        h.driver.current.result(listOf("헤"))
+        assertTrue(h.commands.isEmpty())
+        assertEquals("", h.session.snapshot.transcript)
+        h.time.advance(300)
+        h.driver.current.ready()
+        assertEquals(VoicePhase.Waiting, h.session.snapshot.phase)
+    }
+
+    @Test fun listenerListDefaultDelegatesToStringMethodWithoutRecursion() {
+        val partials = mutableListOf<String>()
+        val results = mutableListOf<String>()
+        val listener = object : RecognitionDriver.Listener {
+            override fun ready() = Unit
+            override fun speechStarted() = Unit
+            override fun speechEnded() = Unit
+            override fun partial(text: String) { partials += text }
+            override fun result(text: String) { results += text }
+            override fun failed(failure: RecognitionFailure) = Unit
+        }
+        listener.partial(listOf("첫 후보", "두번째 후보"))
+        listener.result(listOf("최종 첫 후보", "최종 두번째 후보"))
+        listener.partial(emptyList())
+        assertEquals(listOf("첫 후보", ""), partials)
+        assertEquals(listOf("최종 첫 후보"), results)
+    }
+
     private class Harness {
         val time = FakeScheduler()
         val driver = FakeDriver()

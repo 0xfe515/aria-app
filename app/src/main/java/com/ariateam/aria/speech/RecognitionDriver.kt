@@ -6,12 +6,27 @@ internal interface RecognitionDriver {
         fun speechStarted()
         fun speechEnded()
         fun partial(text: String)
+        fun partial(candidates: List<String>) = partial(candidates.firstOrNull().orEmpty())
         fun result(text: String)
+        fun result(candidates: List<String>) = result(candidates.firstOrNull().orEmpty())
         fun failed(failure: RecognitionFailure)
     }
     fun start(listener: Listener)
     fun finish()
     fun close()
+    fun shutdown() = close()
+}
+
+internal enum class RecognitionBackend(val guaranteedOffline: Boolean) {
+    OnDevice(guaranteedOffline = true),
+    DefaultPreferOffline(guaranteedOffline = false),
+    Unavailable(guaranteedOffline = false),
+}
+
+internal enum class BackendPreference {
+    PreferOnDeviceWithFallback,
+    OnDeviceOnly,
+    DefaultPreferOfflineOnly,
 }
 
 internal enum class RecognitionFailure(val errorCode: Int, val retryable: Boolean) {
@@ -31,6 +46,10 @@ internal interface RecognitionScheduler {
 
 internal object VoiceLimits {
     const val MAX_TEXT_CHARS = 4_096
+    const val MAX_RECOGNITION_CANDIDATES = 5
+    const val MIN_SPEECH_INPUT_MILLIS = 1_500L
+    const val POSSIBLY_COMPLETE_SILENCE_MILLIS = 1_000L
+    const val COMPLETE_SILENCE_MILLIS = 1_500L
     const val STARTUP_MILLIS = 8_000L
     const val NO_SPEECH_MILLIS = 8_000L
     const val CAPTURE_MILLIS = 60_000L

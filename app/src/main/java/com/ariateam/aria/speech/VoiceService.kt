@@ -59,7 +59,7 @@ class VoiceService : Service() {
         feedback = VoiceFeedback(this)
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aria:Voice").apply { setReferenceCounted(false) }
-        session = VoiceListeningSession(AndroidRecognitionDriver(this), MainRecognitionScheduler(),
+        session = VoiceListeningSession(SherpaRecognitionDriver(this), MainRecognitionScheduler(),
             object : VoiceListeningSession.Listener {
                 override fun state(snapshot: ListeningSnapshot) {
                     if (!destroyed) publish(state.copy(phase = snapshot.phase, transcript = snapshot.transcript,
@@ -171,7 +171,7 @@ class VoiceService : Service() {
 
     override fun onDestroy() {
         destroyed = true
-        session.stop()
+        session.shutdown()
         coordinator.close()
         releaseResources()
         feedback.close()

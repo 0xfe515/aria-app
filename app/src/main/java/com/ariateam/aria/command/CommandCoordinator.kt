@@ -143,18 +143,44 @@ class CommandCoordinator(
         val now = SystemClock.elapsedRealtime()
         val result = rules.interpret(text, commandContext, now)
         if (result != Interpretation.Unknown) { handle(result); return }
-        if (!language.ready) {
+        if (!store.installed()) {
             announce("지원하는 명령을 확인해 주세요. 홈, 설정, 안내 소리, 현재 상태, 도움말을 사용할 수 있어요.")
             return
         }
+        if (!language.ready) {
+            if (language.preparing) {
+                announce("Gemma 모델을 준비 중이에요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요.")
+            } else {
+                prepareModel()
+                announce("Gemma 모델을 다시 준비하고 있어요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요.")
+            }
+            return
+        }
+        if (language.busy) {
+            announce("이전 명령을 아직 처리 중이에요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요.")
+            return
+        }
         emit(snapshot.copy(message = "명령 해석 중", processing = true))
-        val prompt = JSONObject().put("utterance", text.take(1000))
-            .put("lastTarget", commandContext.target(now) ?: JSONObject.NULL)
-            .put("audible", snapshot.audible).put("foreground", visible).put("screen", screen).toString()
-        language.interpret(prompt) { output ->
-            if (!active || !generation.accepts(ticket)) return@interpret
-            if (output == null) announce("Gemma 응답 실패 또는 시간 초과예요. 기본 명령으로 다시 말해 주세요.")
-            else handle(parseModelResult(output))
+        val prompt = buildModelPrompt(text, commandContext.target(now))
+        language.interpretOutcome(prompt) { outcome ->
+            if (!active || !generation.accepts(ticket)) return@interpretOutcome
+            when (outcome) {
+                is LanguageOutcome.Success -> handle(parseModelResult(outcome.output))
+                is LanguageOutcome.Failure -> announce(
+                    when (outcome.reason) {
+                        FailureReason.ResponseTimeout ->
+                            "Gemma 응답 시간이 초과되어 언어 엔진을 정리했어요. 다음 명령에 다시 준비하며, 지금은 기본 명령을 사용할 수 있어요."
+                        FailureReason.MemoryError ->
+                            "기기 메모리가 부족해 Gemma 해석을 중단했어요. 기본 명령으로 다시 말해 주세요."
+                        FailureReason.Busy ->
+                            "이전 명령을 아직 처리 중이에요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요."
+                        FailureReason.NotReady, FailureReason.PreparationTimeout ->
+                            "Gemma 모델이 아직 준비되지 않았어요. 기본 명령으로 다시 말해 주세요."
+                        FailureReason.ConnectionError, FailureReason.InferenceError ->
+                            "Gemma 해석 오류가 발생했어요. 기본 명령으로 다시 말해 주세요."
+                    }
+                )
+            }
         }
     }
 
@@ -273,5 +299,10 @@ class CommandCoordinator(
         private const val CHANNEL = "aria_commands"
         private const val NAVIGATION_NOTIFICATION = 12
         fun parseModelResult(text: String): Interpretation = ModelCommandParser.parse(text)
+        internal fun buildModelPrompt(text: String, lastTarget: String?): String =
+            JSONObject()
+                .put("utterance", text.trim().take(LanguageLimits.MAX_UTTERANCE_CHARS))
+                .put("lastTarget", lastTarget ?: JSONObject.NULL)
+                .toString()
     }
 }
