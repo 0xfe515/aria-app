@@ -1,0 +1,6 @@
+--------- beginning of main
+10-24 21:06:56.066 I/tflite  ( 1536): Created TensorFlow Lite delegate for GPU.
+10-24 21:06:56.078 I/tflite  ( 1536): Replacing 64 out of 204 node(s) with delegate (TfLiteGpuDelegateV2) node, yielding 3 partitions for subgraph 0.
+10-24 21:07:00.500 I/tflite  ( 1536): Initialized OpenCL-based API.
+10-24 21:07:00.643 I/tflite  ( 1536): Created 1 GPU delegate kernels.
+10-24 21:07:00.648 I/tflite  ( 1536): Replacing 140 out of 141 node(s) with delegate (TfLiteXNNPackDelegate) node, yielding 3 partitions for subgraph 0.

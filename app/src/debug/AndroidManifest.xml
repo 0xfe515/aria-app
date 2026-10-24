@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <activity
+            android:name="com.ariateam.aria.vision.debug.GpuDiagnosticOverlayActivity"
+            android:exported="true"
+            android:label="GPU Benchmark Diagnostic"
+            android:theme="@style/Theme.Aria"
+            android:screenOrientation="portrait" />
+    </application>
+
+</manifest>
