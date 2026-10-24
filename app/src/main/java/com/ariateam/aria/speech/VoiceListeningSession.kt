@@ -1,11 +1,14 @@
 package com.ariateam.aria.speech
 
+import android.util.Log
+
 internal data class ListeningSnapshot(
     val phase: VoicePhase = VoicePhase.Stopped,
     val transcript: String = "",
     val errorCode: Int = VoiceError.NONE,
     val retryCount: Int = 0,
     val retryAtMillis: Long = 0,
+    val wakeFallback: Boolean = false,
 )
 
 /** Pure, serialized session policy. Android, time and all external effects are injected. */
@@ -13,6 +16,8 @@ internal class VoiceListeningSession(
     private val driver: RecognitionDriver,
     private val scheduler: RecognitionScheduler,
     private val listener: Listener,
+    private val wakeDetector: WakeWordDetector? = null,
+    private val wakeCooldownMillis: Long = DEFAULT_WAKE_COOLDOWN_MILLIS,
 ) {
     interface Listener {
         fun state(snapshot: ListeningSnapshot)
@@ -43,12 +48,28 @@ internal class VoiceListeningSession(
     private var beganSpeech = false
     private var restart: ScheduledRecognitionTask? = null
     private val timers = mutableListOf<ScheduledRecognitionTask>()
+
+    private var wakeDetectorActive = false
+    private var wakeTicket = 0L
+    private var lastWakeDetectedAt: Long? = null
+    private var wakeFallback = (wakeDetector == null || !wakeDetector.isAvailable)
+
     var snapshot = ListeningSnapshot()
         private set
 
+    private fun logWarn(message: String, error: Throwable? = null) {
+        runCatching { Log.w(TAG, message, error) }
+    }
+
     private fun publish(phase: VoicePhase, error: Int = VoiceError.NONE, retryAt: Long = 0) {
-        snapshot = ListeningSnapshot(phase, if (mode == Mode.Wake && !activated) lastFinal else draft,
-            error, failures, retryAt)
+        snapshot = ListeningSnapshot(
+            phase = phase,
+            transcript = if (mode == Mode.Wake && !activated) lastFinal else draft,
+            errorCode = error,
+            retryCount = failures,
+            retryAtMillis = retryAt,
+            wakeFallback = wakeFallback,
+        )
         listener.state(snapshot)
     }
 
@@ -124,6 +145,7 @@ internal class VoiceListeningSession(
 
     fun shutdown() {
         stop()
+        wakeDetector?.release()
         driver.shutdown()
     }
 
@@ -147,6 +169,7 @@ internal class VoiceListeningSession(
         restart?.cancel()
         restart = null
         closeAttempt()
+        stopWakeDetector()
     }
 
     private fun closeAttempt() {
@@ -182,8 +205,69 @@ internal class VoiceListeningSession(
         }
     }
 
+    private fun shouldUseWakeDetector(): Boolean =
+        mode == Mode.Wake && wakeDetector != null && wakeDetector.isAvailable && !wakeFallback
+
+    private fun startWakeListening() {
+        if (!running || speaking || mode != Mode.Wake) return
+        closeAttempt()
+        val ticket = ++wakeTicket
+        wakeDetectorActive = true
+        publish(VoicePhase.Waiting)
+        try {
+            wakeDetector?.start(object : WakeWordDetector.Listener {
+                override fun onWakeWordDetected(keyword: String) {
+                    if (!running || speaking || mode != Mode.Wake || !wakeDetectorActive || wakeTicket != ticket) {
+                        return
+                    }
+                    val now = scheduler.now()
+                    val lastWake = lastWakeDetectedAt
+                    if (lastWake != null && now - lastWake < wakeCooldownMillis) {
+                        stopWakeDetector()
+                        scheduleAttempt(wakeCooldownMillis - (now - lastWake))
+                        return
+                    }
+                    lastWakeDetectedAt = now
+                    stopWakeDetector()
+                    resetInput(Mode.Command)
+                    activated = true
+                    announceInput()
+                    listener.wakeDetected()
+                    beginAttempt()
+                }
+
+                override fun onError(error: Throwable) {
+                    if (!running || !wakeDetectorActive || wakeTicket != ticket) return
+                    logWarn("WakeWordDetector error; falling back to Android SpeechRecognizer wake path", error)
+                    stopWakeDetector()
+                    wakeFallback = true
+                    if (mode == Mode.Wake) {
+                        scheduleAttempt(VoiceLimits.RESTART_MILLIS)
+                    }
+                }
+            })
+        } catch (e: Throwable) {
+            logWarn("Failed to start WakeWordDetector; falling back to Android SpeechRecognizer wake path", e)
+            stopWakeDetector()
+            wakeFallback = true
+            scheduleAttempt(VoiceLimits.RESTART_MILLIS)
+        }
+    }
+
+    private fun stopWakeDetector() {
+        wakeDetectorActive = false
+        wakeTicket++
+        wakeDetector?.stop()
+    }
+
     private fun beginAttempt(initial: Boolean = false) {
         if (!running || speaking) return
+
+        if (shouldUseWakeDetector()) {
+            startWakeListening()
+            return
+        }
+
         // Do not extend a confirmed command's original input window across retries.
         val sinceReady = inputReadyAt?.let { scheduler.now() - it }
         if (mode != Mode.Wake && sinceReady != null &&
@@ -350,6 +434,8 @@ internal class VoiceListeningSession(
     }
 
     companion object {
+        const val DEFAULT_WAKE_COOLDOWN_MILLIS = 1_500L
+        private const val TAG = "VoiceListeningSession"
         private val RETRY_DELAYS = longArrayOf(1_000, 2_000, 4_000, 8_000, 15_000)
     }
 }

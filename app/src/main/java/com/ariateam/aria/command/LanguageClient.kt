@@ -11,6 +11,17 @@ import android.os.SystemClock
 import com.ariateam.aria.speech.ILanguageCallback
 import com.ariateam.aria.speech.ILanguageService
 
+enum class LanguageStatus(val wireValue: Int) {
+    Missing(0),
+    Preparing(1),
+    Ready(2),
+    Failed(3);
+
+    companion object {
+        fun fromWire(value: Int): LanguageStatus = entries.firstOrNull { it.wireValue == value } ?: Missing
+    }
+}
+
 internal object LanguageLimits {
     const val PREPARE_TIMEOUT_MILLIS = 60_000L
     const val COLD_INTERPRET_TIMEOUT_MILLIS = 30_000L
@@ -285,11 +296,17 @@ class LanguageClient internal constructor(
     private val prepareTimeoutMillis: Long = LanguageLimits.PREPARE_TIMEOUT_MILLIS,
     private val coldInterpretTimeoutMillis: Long = LanguageLimits.COLD_INTERPRET_TIMEOUT_MILLIS,
     private val warmInterpretTimeoutMillis: Long = LanguageLimits.WARM_INTERPRET_TIMEOUT_MILLIS,
+    private val statusChanged: ((status: LanguageStatus, description: String) -> Unit)? = null,
     private val changed: (String) -> Unit,
 ) {
-    constructor(context: Context, changed: (String) -> Unit) : this(
+    constructor(
+        context: Context,
+        statusChanged: ((status: LanguageStatus, description: String) -> Unit)? = null,
+        changed: (String) -> Unit,
+    ) : this(
         transport = AndroidLanguageTransport(context),
         scheduler = MainLanguageScheduler(),
+        statusChanged = statusChanged,
         changed = changed,
     )
 
@@ -304,6 +321,8 @@ class LanguageClient internal constructor(
     private var pending: ((LanguageOutcome) -> Unit)? = null
     private var timeout: ScheduledLanguageTask? = null
 
+    var currentStatus: LanguageStatus = LanguageStatus.Missing
+        private set
     var ready = false
         private set
     var busy = false
@@ -333,7 +352,7 @@ class LanguageClient internal constructor(
                 if (error.isEmpty()) {
                     busy = false
                     ready = true
-                    emitStatus("Gemma 사용 가능 · 준비 ${elapsed}ms")
+                    emitStatus("Gemma 사용 가능 · 준비 ${elapsed}ms", LanguageStatus.Ready)
                 } else {
                     disconnect(ticket)
                     emitStatus(
@@ -341,7 +360,8 @@ class LanguageClient internal constructor(
                             "Gemma 메모리 부족 · 기본 명령 사용 가능"
                         } else {
                             "Gemma 준비 실패 · 다음 명령 시 다시 준비"
-                        }
+                        },
+                        LanguageStatus.Failed,
                     )
                 }
             } else if (requestId == activeRequestId) {
@@ -387,7 +407,7 @@ class LanguageClient internal constructor(
         if (bound) return
         if (retiringTicket != 0L) {
             pendingPreparePath = path
-            emitStatus("Gemma 이전 프로세스 정리 중 · 완료 후 준비")
+            emitStatus("Gemma 이전 프로세스 정리 중 · 완료 후 준비", LanguageStatus.Preparing)
             return
         }
         startPrepare(path)
@@ -403,7 +423,7 @@ class LanguageClient internal constructor(
         activeRequestId = 0L
         pending = null
         startedAt = scheduler.now()
-        emitStatus("Gemma 준비 중 · 최대 ${prepareTimeoutMillis / 1_000}초")
+        emitStatus("Gemma 준비 중 · 최대 ${prepareTimeoutMillis / 1_000}초", LanguageStatus.Preparing)
         arm(ticket, prepareTimeoutMillis) { onPrepareTimeout(ticket) }
         val connected = runCatching { transport.connect(ticket, path, transportListener) }.getOrDefault(false)
         if (!connected && epoch == ticket) {
@@ -445,7 +465,7 @@ class LanguageClient internal constructor(
     private fun onPrepareTimeout(ticket: Long) {
         if (epoch != ticket || !bound || ready) return
         disconnect(ticket)
-        emitStatus("Gemma 준비 시간 초과 · 다음 명령 시 다시 준비")
+        emitStatus("Gemma 준비 시간 초과 · 다음 명령 시 다시 준비", LanguageStatus.Failed)
     }
 
     private fun onInterpretTimeout(ticket: Long, requestId: Long) {
@@ -463,8 +483,12 @@ class LanguageClient internal constructor(
         val reply = pending
         pending = null
         activeRequestId = 0L
+        val failedDuringPrepare = !ready && busy
         disconnect(ticket, releaseRequired = releaseRequired)
-        emitStatus("Gemma 연결 오류 · 다음 명령 시 다시 준비")
+        emitStatus(
+            "Gemma 연결 오류 · 다음 명령 시 다시 준비",
+            if (failedDuringPrepare) LanguageStatus.Failed else null,
+        )
         reply?.invoke(LanguageOutcome.Failure(FailureReason.ConnectionError, reason))
     }
 
@@ -505,9 +529,16 @@ class LanguageClient internal constructor(
         }
     }
 
-    private fun emitStatus(value: String) {
+    private fun emitStatus(value: String, status: LanguageStatus? = null) {
         lastStatus = value
+        val resolvedStatus = status ?: when {
+            ready -> LanguageStatus.Ready
+            preparing -> LanguageStatus.Preparing
+            else -> currentStatus
+        }
+        currentStatus = resolvedStatus
         changed(value)
+        statusChanged?.invoke(resolvedStatus, value)
     }
 
     fun close() {
@@ -516,5 +547,6 @@ class LanguageClient internal constructor(
         pending = null
         activeRequestId = 0L
         disconnect(ticket)
+        emitStatus("Gemma 대기", LanguageStatus.Missing)
     }
 }

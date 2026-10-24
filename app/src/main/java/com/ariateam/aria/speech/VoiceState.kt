@@ -4,7 +4,7 @@ import com.ariateam.aria.command.CommandSnapshot
 
 enum class VoicePhase(val wireValue: Int) {
     Stopped(0), Initializing(1), Waiting(2), Dictating(3), Stopping(4), Error(5),
-    // 6 belonged to the retired Sherpa diagnostic. Never reuse it.
+    // 6 belonged to a retired diagnostic. Never reuse it.
     Reconnecting(7), Speaking(8);
 
     companion object {
@@ -36,6 +36,7 @@ data class VoiceState(
     val command: CommandSnapshot = CommandSnapshot(),
     val retryCount: Int = 0,
     val retryAtMillis: Long = 0,
+    val wakeFallback: Boolean = false,
 ) {
     val isActive: Boolean get() = phase !in listOf(VoicePhase.Stopped, VoicePhase.Error)
 }

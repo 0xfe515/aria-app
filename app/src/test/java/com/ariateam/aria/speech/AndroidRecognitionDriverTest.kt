@@ -5,7 +5,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidRecognitionDriverTest {
-    @Test fun productionDefaultUsesOnDeviceOnlyAndNeverFallsBackToCloudCapableDefaultProvider() {
+    @Test fun onDeviceOnlyDiagnosticModeNeverFallsBackToDefaultProvider() {
         val platform = FakePlatform(onDeviceAvailable = true, defaultAvailable = true)
         val driver = AndroidRecognitionDriver(platform, mainThreadCheck = {})
         val events = Recorder()
@@ -15,14 +15,14 @@ class AndroidRecognitionDriverTest {
         assertTrue(driver.activeBackend.guaranteedOffline)
         assertEquals(listOf(RecognitionBackend.OnDevice), platform.createdBackends)
 
-        // When on-device recognizer reports Korean unsupported, production OnDeviceOnly fails with Language.
+        // When the diagnostic on-device recognizer reports Korean unsupported, it fails without fallback.
         platform.recognizers.single().callback.onError(SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED)
         assertEquals(listOf(RecognitionFailure.Language), events.failures)
         assertEquals(listOf(RecognitionBackend.OnDevice), platform.createdBackends)
         assertFalse(driver.onDeviceFallbackLatched)
     }
 
-    @Test fun productionDefaultReportsUnavailableWhenOnDeviceServiceIsMissingEvenIfDefaultExists() {
+    @Test fun onDeviceOnlyDiagnosticModeReportsUnavailableWhenOnDeviceServiceIsMissing() {
         val platform = FakePlatform(onDeviceAvailable = false, defaultAvailable = true)
         val driver = AndroidRecognitionDriver(platform, mainThreadCheck = {})
         val events = Recorder()

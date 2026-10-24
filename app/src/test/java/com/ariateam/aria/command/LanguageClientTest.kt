@@ -7,6 +7,62 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LanguageClientTest {
+    @Test fun preparingAnAlreadyReadyModelPreservesStructuredReadyStatus() {
+        val h = Harness()
+        val statuses = mutableListOf<LanguageStatus>()
+        val client = LanguageClient(
+            transport = h.transport,
+            scheduler = h.time,
+            changed = {},
+            statusChanged = { status, _ -> statuses += status },
+        )
+        client.prepare(MODEL_PATH)
+        h.transport.connectCurrent()
+        h.transport.prepareReady()
+
+        client.prepare(MODEL_PATH)
+
+        assertTrue(client.ready)
+        assertEquals(LanguageStatus.Ready, client.currentStatus)
+        assertEquals(listOf(LanguageStatus.Preparing, LanguageStatus.Ready), statuses)
+    }
+
+    @Test fun statusCallbackTracksStructuredReadinessTransitions() {
+        val h = Harness()
+        val structured = mutableListOf<LanguageStatus>()
+        val client = LanguageClient(
+            transport = h.transport,
+            scheduler = h.time,
+            changed = {},
+            statusChanged = { status, _ -> structured += status }
+        )
+        assertEquals(LanguageStatus.Missing, client.currentStatus)
+        client.prepare(MODEL_PATH)
+        assertEquals(LanguageStatus.Preparing, client.currentStatus)
+        assertEquals(listOf(LanguageStatus.Preparing), structured)
+
+        h.transport.connectCurrent()
+        h.transport.prepareReady()
+        assertEquals(LanguageStatus.Ready, client.currentStatus)
+        assertEquals(listOf(LanguageStatus.Preparing, LanguageStatus.Ready), structured)
+    }
+
+    @Test fun statusCallbackTracksPreparationFailure() {
+        val h = Harness()
+        val structured = mutableListOf<LanguageStatus>()
+        val client = LanguageClient(
+            transport = h.transport,
+            scheduler = h.time,
+            changed = {},
+            statusChanged = { status, _ -> structured += status }
+        )
+        client.prepare(MODEL_PATH)
+        h.transport.connectCurrent()
+        h.transport.listener.onResult(h.transport.currentTicket, 0L, "", "memory")
+        assertEquals(LanguageStatus.Failed, client.currentStatus)
+        assertEquals(listOf(LanguageStatus.Preparing, LanguageStatus.Failed), structured)
+    }
+
     @Test fun successfulPreparationAndColdThenWarmInferenceSwitchDeadlines() {
         val h = Harness()
         h.client.prepare(MODEL_PATH)

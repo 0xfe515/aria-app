@@ -28,6 +28,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val feedback = VoiceFeedback(context).apply { audibleEnabled = mutableAudible.value }
     private val mutableState = MutableStateFlow(VoiceState())
     val state = mutableState.asStateFlow()
+    private val mutableServiceSynced = MutableStateFlow(false)
+    val isServiceSynced = mutableServiceSynced.asStateFlow()
     private var uiVisible = false
     private var uiScreen = "home"
     private var remote: IVoiceService? = null
@@ -59,6 +61,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         mutableAudible.value = incoming.command.audible
         feedback.audibleEnabled = incoming.command.audible
         mutableState.value = incoming
+        mutableServiceSynced.value = true
     }
 
     /** Read on an IO thread; visible screens also recover if a one-way callback was missed. */
@@ -162,6 +165,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         feedback.play(VoiceCue.Error)
         receiver.fail(VoiceError.PERMISSION)
         mutableState.update { it.copy(phase = VoicePhase.Error, errorCode = VoiceError.PERMISSION) }
+    }
+
+    fun retry(restartListening: Boolean = false) {
+        if (mutableState.value.phase == VoicePhase.Error) {
+            mutableState.update { it.copy(phase = VoicePhase.Stopped, errorCode = VoiceError.NONE) }
+        }
+        start(if (restartListening) VoiceService.ACTION_RESTART else VoiceService.ACTION_RETRY)
     }
 
     private fun handleDeath() {

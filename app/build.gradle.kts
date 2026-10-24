@@ -42,6 +42,13 @@ object SherpaOfflineProvisioning {
     const val MODEL_ARCHIVE_SHA256 = "911187cb71d94df8d8b9bbc1f7684db2d847e4b0259e6f0fb3141e4991711595"
     const val FORBIDDEN_FP32_ENCODER = "encoder-epoch-99-avg-1.onnx"
 
+    const val KEYWORDS_FILENAME = "keywords.txt"
+    const val KEYWORDS_CONTENT =
+        "▁헤 이 ▁아 리 아 @헤이아리아\n" +
+            "▁헤 이 ▁아 리 야 @헤이아리야\n" +
+            "▁헤 이 아 리 아 @헤이아리아\n" +
+            "▁헤 이 아 리 야 @헤이아리야\n"
+
     private const val CONNECT_TIMEOUT_MS = 30_000
     private const val READ_TIMEOUT_MS = 120_000
 
@@ -120,42 +127,33 @@ object SherpaOfflineProvisioning {
 
     fun isVerifiedFile(file: File, expectedBytes: Long, expectedSha256: String): Boolean {
         if (!file.isFile || file.length() != expectedBytes) return false
-        return sha256Hex(file).equals(expectedSha256, ignoreCase = true)
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var bytes = input.read(buffer)
+            while (bytes >= 0) {
+                if (bytes > 0) digest.update(buffer, 0, bytes)
+                bytes = input.read(buffer)
+            }
+        }
+        val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+        return actualSha256.equals(expectedSha256, ignoreCase = true)
     }
 
     fun requireVerifiedFile(file: File, expectedBytes: Long, expectedSha256: String) {
-        if (!file.isFile) {
-            throw GradleException("Required offline ASR artifact missing: ${file.absolutePath}")
-        }
-        val actualBytes = file.length()
-        if (actualBytes != expectedBytes) {
+        if (!file.isFile) throw GradleException("Missing file: ${file.absolutePath}")
+        if (file.length() != expectedBytes) {
             throw GradleException(
-                "Size mismatch for ${file.name}: expected $expectedBytes bytes, got $actualBytes bytes"
+                "File size mismatch for ${file.name}: expected $expectedBytes bytes, found ${file.length()} bytes"
             )
         }
-        val actualSha = sha256Hex(file)
-        if (!actualSha.equals(expectedSha256, ignoreCase = true)) {
-            throw GradleException(
-                "SHA-256 mismatch for ${file.name}: expected $expectedSha256, got $actualSha"
-            )
+        if (!isVerifiedFile(file, expectedBytes, expectedSha256)) {
+            throw GradleException("SHA-256 mismatch for ${file.absolutePath}")
         }
-    }
-
-    private fun sha256Hex(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().buffered().use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 }
 
-@DisableCachingByDefault(because = "Provisions and SHA-256 verifies local offline Sherpa-ONNX AAR")
+@DisableCachingByDefault(because = "Verifies external network/cache provisioning")
 abstract class ProvisionSherpaOfflineAarTask : DefaultTask() {
     @get:Input
     @get:Optional
@@ -168,21 +166,11 @@ abstract class ProvisionSherpaOfflineAarTask : DefaultTask() {
     abstract val outputAarFile: RegularFileProperty
 
     @TaskAction
-    fun provisionAar() {
+    fun provision() {
         val cacheRoot = SherpaOfflineProvisioning.resolveCacheRoot(
             configuredCacheDir.orNull,
             defaultCacheDirPath.get(),
         )
-        val targetAar = outputAarFile.get().asFile
-        targetAar.parentFile.mkdirs()
-        if (SherpaOfflineProvisioning.isVerifiedFile(
-                targetAar,
-                SherpaOfflineProvisioning.AAR_BYTES,
-                SherpaOfflineProvisioning.AAR_SHA256,
-            )
-        ) {
-            return
-        }
         val cachedAar = File(cacheRoot, SherpaOfflineProvisioning.AAR_FILENAME)
         if (!SherpaOfflineProvisioning.isVerifiedFile(
                 cachedAar,
@@ -197,17 +185,21 @@ abstract class ProvisionSherpaOfflineAarTask : DefaultTask() {
                 expectedSha256 = SherpaOfflineProvisioning.AAR_SHA256,
             )
         }
-        Files.copy(cachedAar.toPath(), targetAar.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        val destination = outputAarFile.get().asFile
+        destination.parentFile.mkdirs()
+        Files.copy(cachedAar.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
         SherpaOfflineProvisioning.requireVerifiedFile(
-            targetAar,
+            destination,
             SherpaOfflineProvisioning.AAR_BYTES,
             SherpaOfflineProvisioning.AAR_SHA256,
         )
     }
 }
 
-@DisableCachingByDefault(because = "Provisions and SHA-256 verifies local offline Korean ASR model assets")
-abstract class ProvisionSherpaOfflineAssetsTask : DefaultTask() {
+@DisableCachingByDefault(because = "Verifies external network/cache provisioning")
+abstract class ProvisionSherpaOfflineAssetsTask @Inject constructor(
+    private val archiveOperations: ArchiveOperations,
+) : DefaultTask() {
     @get:Input
     @get:Optional
     abstract val configuredCacheDir: Property<String>
@@ -218,38 +210,18 @@ abstract class ProvisionSherpaOfflineAssetsTask : DefaultTask() {
     @get:OutputDirectory
     abstract val outputAssetsDir: DirectoryProperty
 
-    @get:Inject
-    abstract val archiveOperations: ArchiveOperations
-
     @TaskAction
-    fun provisionAssets() {
+    fun provision() {
         val cacheRoot = SherpaOfflineProvisioning.resolveCacheRoot(
             configuredCacheDir.orNull,
             defaultCacheDirPath.get(),
         )
-        val assetsRoot = outputAssetsDir.get().asFile
         val modelDirName = SherpaOfflineProvisioning.MODEL_DIR_NAME
-        val targetModelDir = File(assetsRoot, modelDirName)
+        val cachedModelDir = File(cacheRoot, modelDirName)
+        val targetModelDir = outputAssetsDir.get().asFile.resolve(modelDirName)
         targetModelDir.mkdirs()
 
-        val forbiddenFp32 = File(targetModelDir, SherpaOfflineProvisioning.FORBIDDEN_FP32_ENCODER)
-        if (forbiddenFp32.exists() && !forbiddenFp32.delete()) {
-            throw GradleException(
-                "Failed to remove forbidden unquantized FP32 encoder: ${forbiddenFp32.absolutePath}"
-            )
-        }
-
-        val allTargetAssetsReady = SherpaOfflineProvisioning.MODEL_ASSET_SPECS.all { spec ->
-            SherpaOfflineProvisioning.isVerifiedFile(
-                File(targetModelDir, spec.relativePath),
-                spec.expectedBytes,
-                spec.expectedSha256,
-            )
-        }
-        if (allTargetAssetsReady) return
-
-        val cachedModelDir = File(cacheRoot, modelDirName)
-        val allCachedExtractedReady = SherpaOfflineProvisioning.MODEL_ASSET_SPECS.all { spec ->
+        val allPresentInCache = SherpaOfflineProvisioning.MODEL_ASSET_SPECS.all { spec ->
             SherpaOfflineProvisioning.isVerifiedFile(
                 File(cachedModelDir, spec.relativePath),
                 spec.expectedBytes,
@@ -257,13 +229,14 @@ abstract class ProvisionSherpaOfflineAssetsTask : DefaultTask() {
             )
         }
 
-        if (!allCachedExtractedReady) {
+        if (!allPresentInCache) {
+            cachedModelDir.mkdirs()
             val archiveFile = listOf(
-                File(cacheRoot, "korean-mobile.tar.bz2"),
                 File(cacheRoot, "$modelDirName.tar.bz2"),
-            ).firstOrNull {
-                SherpaOfflineProvisioning.isVerifiedFile(
-                    it,
+                File(cacheRoot, "korean-mobile.tar.bz2"),
+            ).firstOrNull { file ->
+                file.isFile && SherpaOfflineProvisioning.isVerifiedFile(
+                    file,
                     SherpaOfflineProvisioning.MODEL_ARCHIVE_BYTES,
                     SherpaOfflineProvisioning.MODEL_ARCHIVE_SHA256,
                 )
@@ -318,6 +291,12 @@ abstract class ProvisionSherpaOfflineAssetsTask : DefaultTask() {
         if (File(targetModelDir, SherpaOfflineProvisioning.FORBIDDEN_FP32_ENCODER).exists()) {
             throw GradleException("Forbidden unquantized FP32 encoder must not be packaged in assets")
         }
+
+        // Provision keywords.txt for KeywordSpotter
+        val cachedKeywordsFile = File(cachedModelDir, SherpaOfflineProvisioning.KEYWORDS_FILENAME)
+        cachedKeywordsFile.writeText(SherpaOfflineProvisioning.KEYWORDS_CONTENT, Charsets.UTF_8)
+        val targetKeywordsFile = File(targetModelDir, SherpaOfflineProvisioning.KEYWORDS_FILENAME)
+        Files.copy(cachedKeywordsFile.toPath(), targetKeywordsFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
     }
 }
 
@@ -368,7 +347,7 @@ android {
         aidl = true
     }
     androidResources {
-        noCompress += listOf("onnx", "wav", "model")
+        noCompress += listOf("onnx", "wav", "model", "tflite")
     }
 }
 
@@ -395,6 +374,13 @@ tasks.named("preBuild") {
 dependencies {
     implementation(files(provisionSherpaOfflineAar.flatMap { it.outputAarFile }).builtBy(provisionSherpaOfflineAar))
     implementation(libs.litert.lm)
+    implementation(libs.litert)
+    implementation(libs.litert.gpu)
+    implementation(libs.litert.gpu.api)
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(platform(libs.androidx.compose.bom))

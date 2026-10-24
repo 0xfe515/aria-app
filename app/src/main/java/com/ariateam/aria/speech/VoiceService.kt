@@ -59,11 +59,27 @@ class VoiceService : Service() {
         feedback = VoiceFeedback(this)
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aria:Voice").apply { setReferenceCounted(false) }
-        session = VoiceListeningSession(SherpaRecognitionDriver(this), MainRecognitionScheduler(),
-            object : VoiceListeningSession.Listener {
+
+        val wakeDetector = try {
+            SherpaWakeWordDetector.createIfAvailable(this)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Sherpa wake word detector failed to initialize, falling back to Android SpeechRecognizer", t)
+            null
+        }
+
+        session = VoiceListeningSession(
+            driver = AndroidRecognitionDriver.production(this),
+            scheduler = MainRecognitionScheduler(),
+            listener = object : VoiceListeningSession.Listener {
                 override fun state(snapshot: ListeningSnapshot) {
-                    if (!destroyed) publish(state.copy(phase = snapshot.phase, transcript = snapshot.transcript,
-                        errorCode = snapshot.errorCode, retryCount = snapshot.retryCount, retryAtMillis = snapshot.retryAtMillis))
+                    if (!destroyed) publish(state.copy(
+                        phase = snapshot.phase,
+                        transcript = snapshot.transcript,
+                        errorCode = snapshot.errorCode,
+                        retryCount = snapshot.retryCount,
+                        retryAtMillis = snapshot.retryAtMillis,
+                        wakeFallback = snapshot.wakeFallback,
+                    ))
                 }
                 override fun inputStarted() { coordinator.inputStarted() }
                 override fun wakeDetected() { feedback.play(VoiceCue.Detected, audible = false) }
@@ -76,7 +92,9 @@ class VoiceService : Service() {
                     postErrorNotification(errorCode)
                     stopSelf()
                 }
-            })
+            },
+            wakeDetector = wakeDetector,
+        )
         coordinator = CommandCoordinator(this,
             update = { next -> if (!destroyed) publish(state.copy(command = next)) },
             soundChanged = { feedback.audibleEnabled = it },
@@ -95,7 +113,7 @@ class VoiceService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_WAIT, ACTION_DICTATE -> {
+            ACTION_WAIT, ACTION_DICTATE, ACTION_RETRY, ACTION_RESTART -> {
                 try {
                     getSystemService(NotificationManager::class.java).cancel(ERROR_NOTIFICATION)
                     if (!foreground) {
@@ -103,7 +121,14 @@ class VoiceService : Service() {
                         foreground = true
                     }
                     if (!wakeLock.isHeld) wakeLock.acquire()
-                    if (!state.isActive) coordinator.started()
+                    if (!state.isActive) {
+                        coordinator.started()
+                    } else if (intent.action == ACTION_RETRY) {
+                        coordinator.retryPreparation()
+                    }
+                    if (state.isActive && intent.action == ACTION_RESTART) {
+                        session.stop()
+                    }
                     session.start(manual = intent.action == ACTION_DICTATE)
                 } catch (_: Exception) {
                     session.stop()
@@ -136,7 +161,7 @@ class VoiceService : Service() {
 
     private fun publish(next: VoiceState) {
         if (state.phase != next.phase || state.errorCode != next.errorCode) {
-            Log.i(TAG, "phase=${next.phase}, error=${next.errorCode}, retry=${next.retryCount}")
+            Log.i(TAG, "phase=${next.phase}, error=${next.errorCode}, retry=${next.retryCount}, wakeFallback=${next.wakeFallback}")
         }
         published = PublishedState(next.copy(command = coordinator.snapshot), published.revision + 1)
         val count = callbacks.beginBroadcast()
@@ -149,24 +174,48 @@ class VoiceService : Service() {
         runCatching { callback.onState(value.value.toBundle(value.revision)) }
     }
 
-    private fun openIntent(): PendingIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-
-    private fun notification(): Notification {
-        val stop = PendingIntent.getService(this, 1, Intent(this, VoiceService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_wakeword)
-            .setContentTitle(getString(R.string.app_name)).setContentText(getString(R.string.listening_notification))
-            .setContentIntent(openIntent()).setOngoing(true)
-            .addAction(Notification.Action.Builder(null, getString(R.string.stop_listening), stop).build()).build()
+    private fun postErrorNotification(errorCode: Int) {
+        val manager = getSystemService(NotificationManager::class.java)
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pending = PendingIntent.getActivity(
+            this, ERROR_NOTIFICATION, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val message = when (errorCode) {
+            VoiceError.PERMISSION -> getString(R.string.error_permission)
+            VoiceError.MICROPHONE -> getString(R.string.error_microphone)
+            VoiceError.RECOGNITION_UNAVAILABLE -> getString(R.string.error_recognition_unavailable)
+            VoiceError.RECOGNITION_LANGUAGE -> getString(R.string.error_recognition_language)
+            VoiceError.RECOGNITION_RATE_LIMIT -> getString(R.string.error_recognition_rate_limit)
+            VoiceError.RECOGNITION_NETWORK -> getString(R.string.error_recognition_network)
+            VoiceError.TIMEOUT -> getString(R.string.error_timeout)
+            else -> getString(R.string.error_engine)
+        }
+        val notification = Notification.Builder(this, CHANNEL)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(message)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .build()
+        manager.notify(ERROR_NOTIFICATION, notification)
     }
 
-    private fun postErrorNotification(errorCode: Int) {
-        val notification = Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_wakeword)
-            .setContentTitle(getString(R.string.app_name)).setContentText(getString(voiceErrorMessage(errorCode)))
-            .setStyle(Notification.BigTextStyle().bigText(getString(voiceErrorMessage(errorCode))))
-            .setContentIntent(openIntent()).setAutoCancel(true).build()
-        runCatching { getSystemService(NotificationManager::class.java).notify(ERROR_NOTIFICATION, notification) }
+    private fun notification(): Notification {
+        val openIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = PendingIntent.getService(
+            this, 1, Intent(this, VoiceService::class.java).apply { action = ACTION_STOP },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return Notification.Builder(this, CHANNEL)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(getString(R.string.listening_notification))
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(openIntent)
+            .addAction(Notification.Action.Builder(null, getString(R.string.stop_listening), stopIntent).build())
+            .setOngoing(true)
+            .build()
     }
 
     override fun onDestroy() {
@@ -182,6 +231,8 @@ class VoiceService : Service() {
     companion object {
         const val ACTION_WAIT = "com.ariateam.aria.WAIT"
         const val ACTION_DICTATE = "com.ariateam.aria.DICTATE"
+        const val ACTION_RETRY = "com.ariateam.aria.RETRY"
+        const val ACTION_RESTART = "com.ariateam.aria.RESTART"
         const val ACTION_STOP = "com.ariateam.aria.STOP"
         private const val CHANNEL = "wakeword"
         private const val NOTIFICATION = 1

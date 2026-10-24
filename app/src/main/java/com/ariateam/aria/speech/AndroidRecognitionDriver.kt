@@ -175,6 +175,18 @@ internal class AndroidRecognitionDriver internal constructor(
         internal const val KOREAN_LOCALE = "ko-KR"
         private const val TAG = "AriaRecognitionDriver"
 
+        internal fun production(context: Context): AndroidRecognitionDriver =
+            AndroidRecognitionDriver(context, BackendPreference.DefaultPreferOfflineOnly)
+
+        internal fun production(
+            platform: PlatformAdapter,
+            mainThreadCheck: () -> Unit = { check(Looper.myLooper() == Looper.getMainLooper()) },
+        ): AndroidRecognitionDriver = AndroidRecognitionDriver(
+            platform,
+            BackendPreference.DefaultPreferOfflineOnly,
+            mainThreadCheck,
+        )
+
         internal fun shouldFallbackFromOnDevice(failure: RecognitionFailure): Boolean =
             failure in setOf(
                 RecognitionFailure.Language,

@@ -1,0 +1,32 @@
+<resources>
+    <string name="settings_main_group">설정 항목</string>
+    <string name="settings_voice_title">음성 및 알림</string>
+    <string name="settings_voice_group">음성 설정</string>
+    <string name="settings_voice_enabled">호출어 대기 중</string>
+    <string name="settings_voice_disabled">중지됨</string>
+    <string name="settings_voice_service_summary">“헤이 아리아”라고 말해 음성 명령을 시작합니다.</string>
+    <string name="settings_feedback_enabled">진동과 안내 소리 사용</string>
+    <string name="settings_feedback_disabled">진동으로만 안내</string>
+    <string name="settings_notification_summary">백그라운드 명령 알림 권한 관리</string>
+    <string name="settings_tts_unavailable">한국어 음성 안내를 사용하려면 시스템에 음성 데이터를 설치하세요.</string>
+    <string name="settings_model_title">모델 관리</string>
+    <string name="settings_model_group">온디바이스 모델</string>
+    <string name="settings_model_size_summary">약 2.59 GB · Wi-Fi 기본</string>
+    <string name="settings_model_download_summary">Wi-Fi로 다운로드하거나 실패한 다운로드를 다시 시도합니다.</string>
+    <string name="settings_model_download_active">다운로드가 진행 중입니다.</string>
+    <string name="settings_model_cancel_summary">진행 중인 다운로드 또는 검증을 취소합니다.</string>
+    <string name="settings_model_delete_summary">설치된 모델 파일을 삭제합니다.</string>
+    <string name="settings_model_delete_title">모델을 삭제할까요?</string>
+    <string name="settings_model_delete_message">다운로드한 Gemma 모델 파일을 기기에서 삭제합니다. 기본 명령은 계속 사용할 수 있습니다.</string>
+    <string name="settings_model_delete_confirm">삭제</string>
+    <string name="settings_cancel">취소</string>
+    <string name="settings_mobile_data_enabled">Wi-Fi와 모바일 데이터 사용</string>
+    <string name="settings_mobile_data_disabled">Wi-Fi에서만 다운로드</string>
+    <string name="settings_diagnostics_title">시연 및 진단</string>
+    <string name="settings_diagnostics_group">도구</string>
+    <string name="settings_diagnostics_summary">시연 화면과 음성·비전 점검</string>
+    <string name="settings_vision_diagnostics_summary">카메라 및 비전 상태 확인</string>
+    <string name="settings_voice_diagnostics_summary">음성 인식 상태 확인</string>
+    <string name="settings_demo_summary">음성 및 비전 기능 시연</string>
+    <string name="settings_app_info_group">ARIA</string>
+</resources>

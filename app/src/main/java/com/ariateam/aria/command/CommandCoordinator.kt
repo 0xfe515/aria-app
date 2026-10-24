@@ -24,12 +24,16 @@ data class CommandSnapshot(
     val navigationId: Long = 0,
     val destination: String = "",
     val ttsAvailable: Boolean = false,
+    val eventId: Long = 0L,
+    val languageStatus: LanguageStatus = LanguageStatus.Missing,
 ) {
     fun toBundle() = Bundle().apply {
         putString("message", message); putBoolean("processing", processing)
         putString("model", model); putString("runtime", runtime); putBoolean("audible", audible)
         putLong("navigationId", navigationId); putString("destination", destination)
         putBoolean("ttsAvailable", ttsAvailable)
+        putLong("eventId", eventId)
+        putInt("languageStatus", languageStatus.wireValue)
     }
     companion object {
         fun fromBundle(value: Bundle?) = if (value == null) CommandSnapshot() else CommandSnapshot(
@@ -37,6 +41,8 @@ data class CommandSnapshot(
             value.getString("model").orEmpty(), value.getString("runtime").orEmpty(),
             value.getBoolean("audible", true), value.getLong("navigationId"),
             value.getString("destination").orEmpty(), value.getBoolean("ttsAvailable"),
+            value.getLong("eventId"),
+            LanguageStatus.fromWire(value.getInt("languageStatus", 0)),
         )
     }
 }
@@ -67,10 +73,20 @@ class CommandCoordinator(
     private val speech = CommandSpeech(context, suppress) { emit(snapshot) }
     var snapshot = CommandSnapshot(audible = preferences.getBoolean("audible", true))
         private set
-    private val language = LanguageClient(context) { value -> emit(snapshot.copy(runtime = value)) }
+    private val language = LanguageClient(
+        context = context,
+        changed = { value -> emit(snapshot.copy(runtime = value)) },
+        statusChanged = { status, desc -> emit(snapshot.copy(runtime = desc, languageStatus = status)) },
+    )
     private val store: GemmaModelStore = GemmaModelStore(context) { value ->
-        emit(snapshot.copy(model = value))
-        if (active && storeInstalled()) prepareModel()
+        val installed = storeInstalled()
+        val langStatus = if (installed) {
+            if (active) language.currentStatus else LanguageStatus.Preparing
+        } else {
+            LanguageStatus.Missing
+        }
+        emit(snapshot.copy(model = value, languageStatus = langStatus))
+        if (active && installed) prepareModel()
     }
     private fun storeInstalled() = store.installed()
 
@@ -85,7 +101,28 @@ class CommandCoordinator(
     }
 
     fun started() { active = true; prepareModel() }
-    private fun prepareModel() { if (store.installed()) language.prepare(store.modelFile.absolutePath) }
+    fun retryPreparation() {
+        if (!active) active = true
+        prepareModel()
+    }
+
+    private fun prepareModel() {
+        if (store.installed()) {
+            when (language.currentStatus) {
+                LanguageStatus.Ready -> {
+                    emit(snapshot.copy(runtime = language.lastStatus, languageStatus = LanguageStatus.Ready))
+                    return
+                }
+                LanguageStatus.Preparing -> emit(
+                    snapshot.copy(runtime = language.lastStatus, languageStatus = LanguageStatus.Preparing)
+                )
+                LanguageStatus.Missing,
+                LanguageStatus.Failed
+                -> emit(snapshot.copy(languageStatus = LanguageStatus.Preparing))
+            }
+            language.prepare(store.modelFile.absolutePath)
+        }
+    }
     fun setVisible(value: Boolean) { visible = value }
     fun setScreen(value: String) { if (value in setOf("home", "settings")) screen = value }
 
@@ -110,7 +147,7 @@ class CommandCoordinator(
         invalidate()
         language.close()
         store.cancel(deleteInstalled = true)
-        emit(snapshot.copy(runtime = "Gemma 대기"))
+        emit(snapshot.copy(runtime = "Gemma 대기", languageStatus = LanguageStatus.Missing))
     }
 
     /** Called at Waiting -> Dictating, so an old interpretation cannot win while user speaks. */
@@ -235,7 +272,8 @@ class CommandCoordinator(
     }
 
     private fun announce(message: String, done: () -> Unit = {}) {
-        emit(snapshot.copy(message = message, processing = false))
+        val nextEventId = generateEventId()
+        emit(snapshot.copy(message = message, eventId = nextEventId, processing = false))
         vibrate()
         if (!visible) notifyResult(message)
         if (snapshot.audible) speech.speak(message, done) else { speech.stop(); done() }
@@ -298,6 +336,24 @@ class CommandCoordinator(
     companion object {
         private const val CHANNEL = "aria_commands"
         private const val NAVIGATION_NOTIFICATION = 12
+        private val eventSequenceLock = Any()
+        private var lastGlobalEventId = 0L
+
+        fun generateEventId(): Long = synchronized(eventSequenceLock) {
+            val now = try {
+                SystemClock.elapsedRealtimeNanos()
+            } catch (_: RuntimeException) {
+                System.nanoTime()
+            }
+            val candidate = if (now > lastGlobalEventId) now else lastGlobalEventId + 1L
+            lastGlobalEventId = candidate
+            candidate
+        }
+
+        internal fun resetGlobalEventIdForTesting(value: Long = 0L) = synchronized(eventSequenceLock) {
+            lastGlobalEventId = value
+        }
+
         fun parseModelResult(text: String): Interpretation = ModelCommandParser.parse(text)
         internal fun buildModelPrompt(text: String, lastTarget: String?): String =
             JSONObject()

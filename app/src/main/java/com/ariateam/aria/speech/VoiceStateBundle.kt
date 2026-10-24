@@ -10,6 +10,7 @@ internal fun VoiceState.toBundle(revision: Long) = Bundle().apply {
     putBundle("command", command.toBundle())
     putInt("retryCount", retryCount)
     putLong("retryAtMillis", retryAtMillis)
+    putBoolean("wakeFallback", wakeFallback)
     putLong("revision", revision)
 }
 
@@ -20,4 +21,5 @@ internal fun voiceStateFromBundle(value: Bundle) = VoiceState(
     command = CommandSnapshot.fromBundle(value.getBundle("command")),
     retryCount = value.getInt("retryCount"),
     retryAtMillis = value.getLong("retryAtMillis"),
+    wakeFallback = value.getBoolean("wakeFallback", false),
 )

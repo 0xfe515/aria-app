@@ -12,11 +12,8 @@ import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.k2fsa.sherpa.onnx.WaveReader
-import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.*
 import org.junit.Test
@@ -123,12 +120,12 @@ class SpeechCapabilityProbeTest {
         if (!optInLive) {
             // Fast main-thread creation/destruction verification without binding the physical microphone.
             instrumentation.runOnMainSync {
-                val driver = AndroidRecognitionDriver(context)
+                val driver = AndroidRecognitionDriver.production(context)
                 val selected = driver.selectBackend()
-                Log.i(TAG, "Default production selected backend on device: $selected")
-                if (SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
-                    assertEquals(RecognitionBackend.OnDevice, selected)
-                    val recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+                Log.i(TAG, "Production selected backend on device: $selected")
+                if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                    assertEquals(RecognitionBackend.DefaultPreferOffline, selected)
+                    val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
                     recognizer.destroy()
                 } else {
                     assertEquals(RecognitionBackend.Unavailable, selected)
@@ -210,125 +207,6 @@ class SpeechCapabilityProbeTest {
             }
         }
         return outcome.get()
-    }
-
-    @Test fun bundledSherpaKoreanStreamingWavDecodeAndWakeProbe() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        SherpaRecognitionDriver.verifyBundledModelAssets(context.assets)
-
-        val waveData = WaveReader.readWave(
-            context.assets,
-            SherpaRecognitionDriver.SAMPLE_WAV_ASSET,
-        )
-        assertEquals(SherpaRecognitionDriver.SAMPLE_RATE, waveData.sampleRate)
-        assertTrue("Expected non-empty bundled Korean WAV samples", waveData.samples.isNotEmpty())
-
-        val driver = SherpaRecognitionDriver(
-            audioSource = WaveAudioCaptureSource(waveData.samples),
-            engineFactory = { SherpaOnnxStreamingEngine(context.assets) },
-        )
-        try {
-            val coldStart = SystemClock.elapsedRealtime()
-            val coldOutcome = decodeOnceWithDriver(driver)
-            val coldElapsedMs = SystemClock.elapsedRealtime() - coldStart
-
-            Log.i(
-                TAG,
-                "Sherpa cold decode (${coldElapsedMs}ms): final='${coldOutcome.finalText}', " +
-                    "partials=${coldOutcome.partials}, failure=${coldOutcome.failure}",
-            )
-
-            assertNull("Expected no recognition failure on bundled sample WAV", coldOutcome.failure)
-            assertTrue("Expected driver.ready() on bundled sample WAV", coldOutcome.ready)
-            assertTrue("Expected speechStarted() on bundled sample WAV", coldOutcome.speechStarted)
-            assertTrue("Expected speechEnded() on bundled sample WAV", coldOutcome.speechEnded)
-            assertTrue(
-                "Expected Korean transcript containing '괜찮은' and '같았다', got '${coldOutcome.finalText}'",
-                coldOutcome.finalText.contains("괜찮은") && coldOutcome.finalText.contains("같았다"),
-            )
-            assertNull(
-                "Ordinary Korean sentence must not trigger wake phrase matcher",
-                KoreanWakePhraseMatcher().selectWakeAfterPhrase(listOf(coldOutcome.finalText)),
-            )
-
-            // Verify warm-engine reuse on a second attempt without reloading the 111.5 MB model.
-            val warmStart = SystemClock.elapsedRealtime()
-            val warmOutcome = decodeOnceWithDriver(driver)
-            val warmElapsedMs = SystemClock.elapsedRealtime() - warmStart
-
-            Log.i(
-                TAG,
-                "Sherpa warm decode (${warmElapsedMs}ms): final='${warmOutcome.finalText}', " +
-                    "failure=${warmOutcome.failure}",
-            )
-            assertNull("Expected no failure on warm reuse decode", warmOutcome.failure)
-            assertEquals(coldOutcome.finalText, warmOutcome.finalText)
-        } finally {
-            driver.shutdown()
-        }
-    }
-
-    private data class DriverDecodeOutcome(
-        val ready: Boolean,
-        val speechStarted: Boolean,
-        val speechEnded: Boolean,
-        val partials: List<String>,
-        val finalText: String,
-        val failure: RecognitionFailure?,
-    )
-
-    private fun decodeOnceWithDriver(driver: SherpaRecognitionDriver): DriverDecodeOutcome {
-        val latch = CountDownLatch(1)
-        val ready = AtomicBoolean(false)
-        val speechStarted = AtomicBoolean(false)
-        val speechEnded = AtomicBoolean(false)
-        val partials = Collections.synchronizedList(mutableListOf<String>())
-        val finalText = AtomicReference("")
-        val failureRef = AtomicReference<RecognitionFailure?>(null)
-
-        InstrumentationRegistry.getInstrumentation().runOnMainSync {
-            driver.start(object : RecognitionDriver.Listener {
-                override fun ready() {
-                    ready.set(true)
-                }
-                override fun speechStarted() {
-                    speechStarted.set(true)
-                }
-                override fun speechEnded() {
-                    speechEnded.set(true)
-                }
-                override fun partial(text: String) {
-                    partials.add(text)
-                }
-                override fun partial(candidates: List<String>) {
-                    candidates.firstOrNull()?.let { partials.add(it) }
-                }
-                override fun result(text: String) {
-                    finalText.set(text)
-                    latch.countDown()
-                }
-                override fun result(candidates: List<String>) {
-                    finalText.set(candidates.firstOrNull().orEmpty())
-                    latch.countDown()
-                }
-                override fun failed(failure: RecognitionFailure) {
-                    failureRef.set(failure)
-                    latch.countDown()
-                }
-            })
-        }
-        assertTrue("Timed out waiting for Sherpa streaming decode", latch.await(30, TimeUnit.SECONDS))
-        InstrumentationRegistry.getInstrumentation().runOnMainSync {
-            driver.close()
-        }
-        return DriverDecodeOutcome(
-            ready = ready.get(),
-            speechStarted = speechStarted.get(),
-            speechEnded = speechEnded.get(),
-            partials = partials.toList(),
-            finalText = finalText.get(),
-            failure = failureRef.get(),
-        )
     }
 
     companion object {
