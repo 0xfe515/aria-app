@@ -1,5 +1,7 @@
 # Orca 병렬 위임 워크플로 (Gemini · Copilot · Luna)
 
+> **2026-10-30 사용자 우선 정책:** 아래의 Gemini 고정 및 Luna 전용 quota fallback 조항보다 [AGENTS.md](../AGENTS.md)의 adaptive models and fresh sessions 정책이 우선한다. Antigravity/Copilot에서 실제 제공하는 모델 중 작업 난이도에 맞게 선택하고, 모델별 실제 사용량 소진이 확인되면 기존 시도와 파일 소유권을 정리한 뒤 다른 모델로 계속한다. 현재 무응답 세션은 사용자가 명시적으로 정리·새 시작을 요청했다. Codex 코디네이터의 직접 구현 금지, Orca 생명주기, 독립 검증은 유지한다.
+
 정책 갱신 기준일: **2026-10-22** (기존 Gemini 검증 기록은 2026-10-20 기준)
 
 이 문서는 `aria-app` 저장소에서 **Codex(`Codex/gpt-sol`)** 코디네이터와 **Gemini 3.8 Flash High(`gemini-3.8-flash-high`)** 기본 Gemini 워커 및 **Copilot** 구현 워커의 역할 분리, **Gemini 할당량 소진 시 GPT-6 Luna(`gpt-6-luna`) 예외**, **Orca 감독 오케스트레이션**, 그리고 **직접 Antigravity CLI 헤드리스 호출(저수준 진단 폴백)** 절차를 정의합니다.
