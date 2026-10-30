@@ -5,6 +5,7 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.floor
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * YCbCr color range and matrix used when converting `YUV_420_888` camera planes to normalized RGB `[0.0f, 1.0f]`.
@@ -27,12 +28,44 @@ enum class VisionResizeFilter {
 }
 
 /**
- * Upright (post-rotation) crop rectangle aligned to the 512:288 (16:9) model aspect ratio.
+ * Orientation-aware vision preprocessing strategy.
+ */
+enum class VisionPreprocessingStrategy {
+    /**
+     * Lossless-field-of-view orientation-aware preprocessing:
+     * - Portrait upright frames rotate 90 degrees clockwise into landscape model input.
+     * - Landscape upright frames keep full landscape orientation.
+     * - Both preserve aspect ratio by letterboxing into 512x288 (black padding).
+     * - Model outputs are inverse-mapped into upright camera coordinates before hazard/ROI analysis.
+     */
+    FULL_FRAME_ROTATED_LANDSCAPE,
+
+    /**
+     * Legacy bottom-aligned (or center-aligned) 16:9 crop resized to 512x288 without letterboxing.
+     * Available for comparison and rollback.
+     */
+    LEGACY_CROP,
+
+    /**
+     * Full frame letterboxed directly into 512x288 without rotating portrait upright frames.
+     * Available for comparison/evaluation by evaluation peers.
+     */
+    FULL_FRAME_UPRIGHT_LETTERBOX,
+}
+
+/**
+ * Upright (post-rotation) crop rectangle aligned to the 512:288 (16:9) model aspect ratio or full frame.
  *
+ * In [VisionPreprocessingStrategy.LEGACY_CROP] mode:
  * When the upright frame is taller than 512:288 (e.g. 640x480 landscape -> 640x360, or 480x640 portrait -> 480x270),
  * the vertical crop is bottom-aligned (`top = uprightHeight - cropHeight`) so the lower road/sidewalk region is preserved,
  * matching upstream `vision_model/test_video_multi.py`.
  * When the upright frame is wider than 512:288, the horizontal crop is centered (`left = (uprightWidth - cropWidth) / 2`).
+ *
+ * In [VisionPreprocessingStrategy.FULL_FRAME_ROTATED_LANDSCAPE] and [VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX] modes:
+ * The entire upright frame bounds are preserved (`left = 0, top = 0, width = uprightWidth, height = uprightHeight`),
+ * and letterbox content bounds inside the 512x288 model tensor are defined by [contentLeft], [contentTop],
+ * [contentWidth], [contentHeight].
  */
 data class UprightCropRect(
     val bufferWidth: Int,
@@ -44,11 +77,118 @@ data class UprightCropRect(
     val top: Int,
     val width: Int,
     val height: Int,
+    val strategy: VisionPreprocessingStrategy = VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX,
+    val contentLeft: Int = 0,
+    val contentTop: Int = 0,
+    val contentWidth: Int = VisionContract.MODEL_INPUT_WIDTH,
+    val contentHeight: Int = VisionContract.MODEL_INPUT_HEIGHT,
+    val isRotatedClockwise: Boolean = false,
 ) {
     val normLeft: Float get() = if (uprightWidth > 0) left.toFloat() / uprightWidth else 0f
     val normTop: Float get() = if (uprightHeight > 0) top.toFloat() / uprightHeight else 0f
     val normWidth: Float get() = if (uprightWidth > 0) width.toFloat() / uprightWidth else 1f
     val normHeight: Float get() = if (uprightHeight > 0) height.toFloat() / uprightHeight else 1f
+
+    val isFullFrame: Boolean get() = left == 0 && top == 0 && width == uprightWidth && height == uprightHeight
+
+    /**
+     * Maps normalized upright coordinate `(uNorm, vNorm)` in `[0.0, 1.0] x [0.0, 1.0]`
+     * to model tensor pixel coordinate X in `[0.0, targetWidth]` without object allocation.
+     */
+    fun mapUprightNormToModelTensorX(
+        uNorm: Float,
+        vNorm: Float,
+        targetWidth: Int = VisionContract.MODEL_INPUT_WIDTH,
+    ): Float {
+        return when (strategy) {
+            VisionPreprocessingStrategy.LEGACY_CROP -> {
+                uNorm.coerceIn(0f, 1f) * targetWidth
+            }
+            VisionPreprocessingStrategy.FULL_FRAME_ROTATED_LANDSCAPE -> {
+                val clampedV = vNorm.coerceIn(0f, 1f)
+                val moUNorm = if (isRotatedClockwise) 1f - clampedV else uNorm.coerceIn(0f, 1f)
+                contentLeft + moUNorm * contentWidth
+            }
+            VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX -> {
+                contentLeft + uNorm.coerceIn(0f, 1f) * contentWidth
+            }
+        }
+    }
+
+    /**
+     * Maps normalized upright coordinate `(uNorm, vNorm)` in `[0.0, 1.0] x [0.0, 1.0]`
+     * to model tensor pixel coordinate Y in `[0.0, targetHeight]` without object allocation.
+     */
+    fun mapUprightNormToModelTensorY(
+        uNorm: Float,
+        vNorm: Float,
+        targetHeight: Int = VisionContract.MODEL_INPUT_HEIGHT,
+    ): Float {
+        return when (strategy) {
+            VisionPreprocessingStrategy.LEGACY_CROP -> {
+                vNorm.coerceIn(0f, 1f) * targetHeight
+            }
+            VisionPreprocessingStrategy.FULL_FRAME_ROTATED_LANDSCAPE -> {
+                val clampedU = uNorm.coerceIn(0f, 1f)
+                val moVNorm = if (isRotatedClockwise) clampedU else vNorm.coerceIn(0f, 1f)
+                contentTop + moVNorm * contentHeight
+            }
+            VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX -> {
+                contentTop + vNorm.coerceIn(0f, 1f) * contentHeight
+            }
+        }
+    }
+
+    /**
+     * Maps normalized upright coordinates `(uNorm, vNorm)` in `[0.0, 1.0] x [0.0, 1.0]`
+     * to model tensor pixel coordinates `(mx, my)` in `[0.0, targetWidth] x [0.0, targetHeight]`.
+     */
+    fun mapUprightNormToModelTensor(
+        uNorm: Float,
+        vNorm: Float,
+        targetWidth: Int = VisionContract.MODEL_INPUT_WIDTH,
+        targetHeight: Int = VisionContract.MODEL_INPUT_HEIGHT,
+    ): Pair<Float, Float> {
+        return mapUprightNormToModelTensorX(uNorm, vNorm, targetWidth) to
+            mapUprightNormToModelTensorY(uNorm, vNorm, targetHeight)
+    }
+
+    /**
+     * Maps model tensor coordinates `(mx, my)` in `[0.0, targetWidth] x [0.0, targetHeight]`
+     * back to normalized upright coordinates `(uNorm, vNorm)` in `[0.0, 1.0] x [0.0, 1.0]`,
+     * or returns null if `(mx, my)` falls in the letterbox padding region.
+     */
+    fun mapModelTensorToUprightNorm(
+        mx: Float,
+        my: Float,
+        targetWidth: Int = VisionContract.MODEL_INPUT_WIDTH,
+        targetHeight: Int = VisionContract.MODEL_INPUT_HEIGHT,
+    ): Pair<Float, Float>? {
+        return when (strategy) {
+            VisionPreprocessingStrategy.LEGACY_CROP -> {
+                val uNorm = (mx / targetWidth).coerceIn(0f, 1f)
+                val vNorm = (my / targetHeight).coerceIn(0f, 1f)
+                uNorm to vNorm
+            }
+            VisionPreprocessingStrategy.FULL_FRAME_ROTATED_LANDSCAPE,
+            VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX -> {
+                if (mx < contentLeft || mx > contentLeft + contentWidth ||
+                    my < contentTop || my > contentTop + contentHeight
+                ) {
+                    return null
+                }
+                val moUNorm = if (contentWidth > 0) ((mx - contentLeft) / contentWidth).coerceIn(0f, 1f) else 0f
+                val moVNorm = if (contentHeight > 0) ((my - contentTop) / contentHeight).coerceIn(0f, 1f) else 0f
+                if (isRotatedClockwise) {
+                    val uNorm = moVNorm
+                    val vNorm = 1f - moUNorm
+                    uNorm to vNorm
+                } else {
+                    moUNorm to moVNorm
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -77,10 +217,11 @@ data class OverlayViewportRect(
  * - Supports precomputed 2x2 `BILINEAR` interpolation (default, matching upstream bilinear/area image scaling) as well as `NEAREST` sampling.
  */
 class VisionFramePreprocessor(
-    val targetWidth: Int = VisionContract.MODEL_WIDTH,
-    val targetHeight: Int = VisionContract.MODEL_HEIGHT,
+    val targetWidth: Int = VisionContract.MODEL_INPUT_WIDTH,
+    val targetHeight: Int = VisionContract.MODEL_INPUT_HEIGHT,
     val defaultColorRange: YuvColorRange = YuvColorRange.BT601_LIMITED,
     val defaultResizeFilter: VisionResizeFilter = VisionResizeFilter.BILINEAR,
+    val defaultStrategy: VisionPreprocessingStrategy = VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX,
 ) {
     init {
         require(targetWidth > 0 && targetHeight > 0) {
@@ -110,9 +251,11 @@ class VisionFramePreprocessor(
     private var cachedVRowStride = -1
     private var cachedVPixelStride = -1
     private var cachedResizeFilter: VisionResizeFilter? = null
+    private var cachedStrategy: VisionPreprocessingStrategy? = null
     private var cachedCropRect: UprightCropRect? = null
 
     // 4-corner LUTs for bilinear (and nearest when w00=256, w01=w10=w11=0)
+    private val isPaddingLut = BooleanArray(pixelCount)
     private val yOffset00Lut = IntArray(pixelCount)
     private val yOffset01Lut = IntArray(pixelCount)
     private val yOffset10Lut = IntArray(pixelCount)
@@ -139,6 +282,7 @@ class VisionFramePreprocessor(
         vPixelStride: Int,
         colorRange: YuvColorRange = defaultColorRange,
         resizeFilter: VisionResizeFilter = defaultResizeFilter,
+        strategy: VisionPreprocessingStrategy = defaultStrategy,
     ): UprightCropRect {
         val yLen = yBuffer.remaining()
         val uLen = uBuffer.remaining()
@@ -184,6 +328,7 @@ class VisionFramePreprocessor(
             vPixelStride = vPixelStride,
             colorRange = colorRange,
             resizeFilter = resizeFilter,
+            strategy = strategy,
         )
     }
 
@@ -205,6 +350,7 @@ class VisionFramePreprocessor(
         vPixelStride: Int,
         colorRange: YuvColorRange = defaultColorRange,
         resizeFilter: VisionResizeFilter = defaultResizeFilter,
+        strategy: VisionPreprocessingStrategy = defaultStrategy,
     ): UprightCropRect {
         require(yLength <= yBytes.size && uLength <= uBytes.size && vLength <= vBytes.size) {
             "Declared plane length exceeds backing array size"
@@ -235,6 +381,7 @@ class VisionFramePreprocessor(
             vRowStride = vRowStride,
             vPixelStride = vPixelStride,
             resizeFilter = resizeFilter,
+            strategy = strategy,
         )
 
         val y00 = yOffset00Lut
@@ -251,9 +398,17 @@ class VisionFramePreprocessor(
         val norm = NORM_LUT
         val isLimited = colorRange == YuvColorRange.BT601_LIMITED
         val isNearest = resizeFilter == VisionResizeFilter.NEAREST
+        val isPad = isPaddingLut
 
         var outOffset = 0
         for (i in 0 until pixelCount) {
+            if (isPad[i]) {
+                out[outOffset] = 0f
+                out[outOffset + 1] = 0f
+                out[outOffset + 2] = 0f
+                outOffset += 3
+                continue
+            }
             val yVal = if (isNearest) {
                 yBytes[y00[i]].toInt() and 0xFF
             } else {
@@ -306,6 +461,7 @@ class VisionFramePreprocessor(
         vRowStride: Int,
         vPixelStride: Int,
         resizeFilter: VisionResizeFilter,
+        strategy: VisionPreprocessingStrategy = defaultStrategy,
     ): UprightCropRect {
         val existing = cachedCropRect
         if (existing != null &&
@@ -318,7 +474,8 @@ class VisionFramePreprocessor(
             cachedUPixelStride == uPixelStride &&
             cachedVRowStride == vRowStride &&
             cachedVPixelStride == vPixelStride &&
-            cachedResizeFilter == resizeFilter
+            cachedResizeFilter == resizeFilter &&
+            cachedStrategy == strategy
         ) {
             return existing
         }
@@ -329,63 +486,100 @@ class VisionFramePreprocessor(
             rotationDegrees = rotationDegrees,
             targetWidth = targetWidth,
             targetHeight = targetHeight,
+            strategy = strategy,
         )
 
         var idx = 0
         for (outY in 0 until targetHeight) {
-            val exactUpY = crop.top + ((outY + 0.5f) * crop.height / targetHeight) - 0.5f
-            val upY0 = floor(exactUpY).toInt().coerceIn(0, crop.uprightHeight - 1)
-            val upY1 = (upY0 + 1).coerceIn(0, crop.uprightHeight - 1)
-            val fy = (exactUpY - upY0).coerceIn(0f, 1f)
-            val wy1 = (fy * 16f + 0.5f).toInt().coerceIn(0, 16)
-            val wy0 = 16 - wy1
-            val nearestUpY = (crop.top + ((outY + 0.5f) * crop.height / targetHeight).toInt())
-                .coerceIn(0, crop.uprightHeight - 1)
-
             for (outX in 0 until targetWidth) {
-                val exactUpX = crop.left + ((outX + 0.5f) * crop.width / targetWidth) - 0.5f
-                val upX0 = floor(exactUpX).toInt().coerceIn(0, crop.uprightWidth - 1)
-                val upX1 = (upX0 + 1).coerceIn(0, crop.uprightWidth - 1)
-                val fx = (exactUpX - upX0).coerceIn(0f, 1f)
-                val wx1 = (fx * 16f + 0.5f).toInt().coerceIn(0, 16)
-                val wx0 = 16 - wx1
-                val nearestUpX = (crop.left + ((outX + 0.5f) * crop.width / targetWidth).toInt())
-                    .coerceIn(0, crop.uprightWidth - 1)
+                val isPad = outX < crop.contentLeft || outX >= (crop.contentLeft + crop.contentWidth) ||
+                    outY < crop.contentTop || outY >= (crop.contentTop + crop.contentHeight)
+                isPaddingLut[idx] = isPad
 
-                if (resizeFilter == VisionResizeFilter.NEAREST) {
-                    val (srcX, srcY) = mapUprightToSensor(nearestUpX, nearestUpY, bufferWidth, bufferHeight, rotationDegrees)
-                    val yOff = srcY * yRowStride + srcX * yPixelStride
-                    yOffset00Lut[idx] = yOff
-                    yOffset01Lut[idx] = yOff
-                    yOffset10Lut[idx] = yOff
-                    yOffset11Lut[idx] = yOff
-                    weight00Lut[idx] = 256
+                if (isPad) {
+                    yOffset00Lut[idx] = 0
+                    yOffset01Lut[idx] = 0
+                    yOffset10Lut[idx] = 0
+                    yOffset11Lut[idx] = 0
+                    weight00Lut[idx] = 0
                     weight01Lut[idx] = 0
                     weight10Lut[idx] = 0
                     weight11Lut[idx] = 0
-                    val chromaX = srcX shr 1
-                    val chromaY = srcY shr 1
-                    uOffsetLut[idx] = chromaY * uRowStride + chromaX * uPixelStride
-                    vOffsetLut[idx] = chromaY * vRowStride + chromaX * vPixelStride
+                    uOffsetLut[idx] = 0
+                    vOffsetLut[idx] = 0
                 } else {
-                    val (sX00, sY00) = mapUprightToSensor(upX0, upY0, bufferWidth, bufferHeight, rotationDegrees)
-                    val (sX01, sY01) = mapUprightToSensor(upX1, upY0, bufferWidth, bufferHeight, rotationDegrees)
-                    val (sX10, sY10) = mapUprightToSensor(upX0, upY1, bufferWidth, bufferHeight, rotationDegrees)
-                    val (sX11, sY11) = mapUprightToSensor(upX1, upY1, bufferWidth, bufferHeight, rotationDegrees)
-                    yOffset00Lut[idx] = sY00 * yRowStride + sX00 * yPixelStride
-                    yOffset01Lut[idx] = sY01 * yRowStride + sX01 * yPixelStride
-                    yOffset10Lut[idx] = sY10 * yRowStride + sX10 * yPixelStride
-                    yOffset11Lut[idx] = sY11 * yRowStride + sX11 * yPixelStride
-                    weight00Lut[idx] = wx0 * wy0
-                    weight01Lut[idx] = wx1 * wy0
-                    weight10Lut[idx] = wx0 * wy1
-                    weight11Lut[idx] = wx1 * wy1
+                    val exactUpX: Float
+                    val exactUpY: Float
+                    if (crop.strategy == VisionPreprocessingStrategy.LEGACY_CROP) {
+                        exactUpX = crop.left + ((outX + 0.5f) * crop.width / targetWidth) - 0.5f
+                        exactUpY = crop.top + ((outY + 0.5f) * crop.height / targetHeight) - 0.5f
+                    } else {
+                        val uContent = outX - crop.contentLeft + 0.5f
+                        val vContent = outY - crop.contentTop + 0.5f
+                        val moUNorm = (uContent / crop.contentWidth).coerceIn(0f, 1f)
+                        val moVNorm = (vContent / crop.contentHeight).coerceIn(0f, 1f)
+                        if (crop.isRotatedClockwise) {
+                            val upContX = moVNorm * crop.uprightWidth
+                            val upContY = (1f - moUNorm) * crop.uprightHeight
+                            exactUpX = upContX - 0.5f
+                            exactUpY = upContY - 0.5f
+                        } else {
+                            val upContX = moUNorm * crop.uprightWidth
+                            val upContY = moVNorm * crop.uprightHeight
+                            exactUpX = upContX - 0.5f
+                            exactUpY = upContY - 0.5f
+                        }
+                    }
 
-                    val (cSrcX, cSrcY) = mapUprightToSensor(nearestUpX, nearestUpY, bufferWidth, bufferHeight, rotationDegrees)
-                    val chromaX = cSrcX shr 1
-                    val chromaY = cSrcY shr 1
-                    uOffsetLut[idx] = chromaY * uRowStride + chromaX * uPixelStride
-                    vOffsetLut[idx] = chromaY * vRowStride + chromaX * vPixelStride
+                    val upX0 = floor(exactUpX).toInt().coerceIn(0, crop.uprightWidth - 1)
+                    val upX1 = (upX0 + 1).coerceIn(0, crop.uprightWidth - 1)
+                    val fx = (exactUpX - upX0).coerceIn(0f, 1f)
+                    val wx1 = (fx * 16f + 0.5f).toInt().coerceIn(0, 16)
+                    val wx0 = 16 - wx1
+                    val nearestUpX = (exactUpX + 0.5f).toInt().coerceIn(0, crop.uprightWidth - 1)
+
+                    val upY0 = floor(exactUpY).toInt().coerceIn(0, crop.uprightHeight - 1)
+                    val upY1 = (upY0 + 1).coerceIn(0, crop.uprightHeight - 1)
+                    val fy = (exactUpY - upY0).coerceIn(0f, 1f)
+                    val wy1 = (fy * 16f + 0.5f).toInt().coerceIn(0, 16)
+                    val wy0 = 16 - wy1
+                    val nearestUpY = (exactUpY + 0.5f).toInt().coerceIn(0, crop.uprightHeight - 1)
+
+                    if (resizeFilter == VisionResizeFilter.NEAREST) {
+                        val (srcX, srcY) = mapUprightToSensor(nearestUpX, nearestUpY, bufferWidth, bufferHeight, rotationDegrees)
+                        val yOff = srcY * yRowStride + srcX * yPixelStride
+                        yOffset00Lut[idx] = yOff
+                        yOffset01Lut[idx] = yOff
+                        yOffset10Lut[idx] = yOff
+                        yOffset11Lut[idx] = yOff
+                        weight00Lut[idx] = 256
+                        weight01Lut[idx] = 0
+                        weight10Lut[idx] = 0
+                        weight11Lut[idx] = 0
+                        val chromaX = srcX shr 1
+                        val chromaY = srcY shr 1
+                        uOffsetLut[idx] = chromaY * uRowStride + chromaX * uPixelStride
+                        vOffsetLut[idx] = chromaY * vRowStride + chromaX * vPixelStride
+                    } else {
+                        val (sX00, sY00) = mapUprightToSensor(upX0, upY0, bufferWidth, bufferHeight, rotationDegrees)
+                        val (sX01, sY01) = mapUprightToSensor(upX1, upY0, bufferWidth, bufferHeight, rotationDegrees)
+                        val (sX10, sY10) = mapUprightToSensor(upX0, upY1, bufferWidth, bufferHeight, rotationDegrees)
+                        val (sX11, sY11) = mapUprightToSensor(upX1, upY1, bufferWidth, bufferHeight, rotationDegrees)
+                        yOffset00Lut[idx] = sY00 * yRowStride + sX00 * yPixelStride
+                        yOffset01Lut[idx] = sY01 * yRowStride + sX01 * yPixelStride
+                        yOffset10Lut[idx] = sY10 * yRowStride + sX10 * yPixelStride
+                        yOffset11Lut[idx] = sY11 * yRowStride + sX11 * yPixelStride
+                        weight00Lut[idx] = wx0 * wy0
+                        weight01Lut[idx] = wx1 * wy0
+                        weight10Lut[idx] = wx0 * wy1
+                        weight11Lut[idx] = wx1 * wy1
+
+                        val (cSrcX, cSrcY) = mapUprightToSensor(nearestUpX, nearestUpY, bufferWidth, bufferHeight, rotationDegrees)
+                        val chromaX = cSrcX shr 1
+                        val chromaY = cSrcY shr 1
+                        uOffsetLut[idx] = chromaY * uRowStride + chromaX * uPixelStride
+                        vOffsetLut[idx] = chromaY * vRowStride + chromaX * vPixelStride
+                    }
                 }
                 idx++
             }
@@ -401,6 +595,7 @@ class VisionFramePreprocessor(
         cachedVRowStride = vRowStride
         cachedVPixelStride = vPixelStride
         cachedResizeFilter = resizeFilter
+        cachedStrategy = strategy
         cachedCropRect = crop
         return crop
     }
@@ -451,8 +646,9 @@ class VisionFramePreprocessor(
             bufferWidth: Int,
             bufferHeight: Int,
             rotationDegrees: Int,
-            targetWidth: Int = VisionContract.MODEL_WIDTH,
-            targetHeight: Int = VisionContract.MODEL_HEIGHT,
+            targetWidth: Int = VisionContract.MODEL_INPUT_WIDTH,
+            targetHeight: Int = VisionContract.MODEL_INPUT_HEIGHT,
+            strategy: VisionPreprocessingStrategy = VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX,
         ): UprightCropRect {
             require(bufferWidth > 0 && bufferHeight > 0) {
                 "Invalid frame dimensions: ${bufferWidth}x${bufferHeight}"
@@ -464,36 +660,100 @@ class VisionFramePreprocessor(
             val uprightW = if (swap) bufferHeight else bufferWidth
             val uprightH = if (swap) bufferWidth else bufferHeight
 
-            val scaledHeightForFullWidth = (uprightW * targetHeight) / targetWidth
-            val cropLeft: Int
-            val cropTop: Int
-            val cropWidth: Int
-            val cropHeight: Int
-            if (scaledHeightForFullWidth <= uprightH) {
-                cropWidth = uprightW.coerceAtLeast(1)
-                cropHeight = scaledHeightForFullWidth.coerceIn(1, uprightH)
-                cropLeft = 0
-                // Bottom-align vertical crop to keep the road/sidewalk region at the bottom of the frame.
-                cropTop = (uprightH - cropHeight).coerceAtLeast(0)
-            } else {
-                val scaledWidthForFullHeight = ((uprightH * targetWidth) / targetHeight).coerceIn(1, uprightW)
-                cropWidth = scaledWidthForFullHeight
-                cropHeight = uprightH.coerceAtLeast(1)
-                cropLeft = ((uprightW - cropWidth) / 2).coerceAtLeast(0)
-                cropTop = 0
-            }
+            return when (strategy) {
+                VisionPreprocessingStrategy.LEGACY_CROP -> {
+                    val scaledHeightForFullWidth = (uprightW * targetHeight) / targetWidth
+                    val cropLeft: Int
+                    val cropTop: Int
+                    val cropWidth: Int
+                    val cropHeight: Int
+                    if (scaledHeightForFullWidth <= uprightH) {
+                        cropWidth = uprightW.coerceAtLeast(1)
+                        cropHeight = scaledHeightForFullWidth.coerceIn(1, uprightH)
+                        cropLeft = 0
+                        // Bottom-align vertical crop to keep the road/sidewalk region at the bottom of the frame.
+                        cropTop = (uprightH - cropHeight).coerceAtLeast(0)
+                    } else {
+                        val scaledWidthForFullHeight = ((uprightH * targetWidth) / targetHeight).coerceIn(1, uprightW)
+                        cropWidth = scaledWidthForFullHeight
+                        cropHeight = uprightH.coerceAtLeast(1)
+                        cropLeft = ((uprightW - cropWidth) / 2).coerceAtLeast(0)
+                        cropTop = 0
+                    }
 
-            return UprightCropRect(
-                bufferWidth = bufferWidth,
-                bufferHeight = bufferHeight,
-                rotationDegrees = rotationDegrees,
-                uprightWidth = uprightW,
-                uprightHeight = uprightH,
-                left = cropLeft,
-                top = cropTop,
-                width = cropWidth,
-                height = cropHeight,
-            )
+                    UprightCropRect(
+                        bufferWidth = bufferWidth,
+                        bufferHeight = bufferHeight,
+                        rotationDegrees = rotationDegrees,
+                        uprightWidth = uprightW,
+                        uprightHeight = uprightH,
+                        left = cropLeft,
+                        top = cropTop,
+                        width = cropWidth,
+                        height = cropHeight,
+                        strategy = VisionPreprocessingStrategy.LEGACY_CROP,
+                        contentLeft = 0,
+                        contentTop = 0,
+                        contentWidth = targetWidth,
+                        contentHeight = targetHeight,
+                        isRotatedClockwise = false,
+                    )
+                }
+                VisionPreprocessingStrategy.FULL_FRAME_ROTATED_LANDSCAPE -> {
+                    val isPortrait = uprightH > uprightW
+                    val moWidth = if (isPortrait) uprightH else uprightW
+                    val moHeight = if (isPortrait) uprightW else uprightH
+
+                    val scale = minOf(targetWidth.toFloat() / moWidth, targetHeight.toFloat() / moHeight)
+                    val contentW = (moWidth * scale).roundToInt().coerceIn(1, targetWidth)
+                    val contentH = (moHeight * scale).roundToInt().coerceIn(1, targetHeight)
+                    val padLeft = (targetWidth - contentW) / 2
+                    val padTop = (targetHeight - contentH) / 2
+
+                    UprightCropRect(
+                        bufferWidth = bufferWidth,
+                        bufferHeight = bufferHeight,
+                        rotationDegrees = rotationDegrees,
+                        uprightWidth = uprightW,
+                        uprightHeight = uprightH,
+                        left = 0,
+                        top = 0,
+                        width = uprightW,
+                        height = uprightH,
+                        strategy = VisionPreprocessingStrategy.FULL_FRAME_ROTATED_LANDSCAPE,
+                        contentLeft = padLeft,
+                        contentTop = padTop,
+                        contentWidth = contentW,
+                        contentHeight = contentH,
+                        isRotatedClockwise = isPortrait,
+                    )
+                }
+                VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX -> {
+                    val scale = minOf(targetWidth.toFloat() / uprightW, targetHeight.toFloat() / uprightH)
+                    val contentW = (uprightW * scale).roundToInt().coerceIn(1, targetWidth)
+                    val contentH = (uprightH * scale).roundToInt().coerceIn(1, targetHeight)
+                    val padLeft = (targetWidth - contentW) / 2
+                    val padTop = (targetHeight - contentH) / 2
+
+                    UprightCropRect(
+                        bufferWidth = bufferWidth,
+                        bufferHeight = bufferHeight,
+                        rotationDegrees = rotationDegrees,
+                        uprightWidth = uprightW,
+                        uprightHeight = uprightH,
+                        left = 0,
+                        top = 0,
+                        width = uprightW,
+                        height = uprightH,
+                        strategy = VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX,
+                        contentLeft = padLeft,
+                        contentTop = padTop,
+                        contentWidth = contentW,
+                        contentHeight = contentH,
+                        isRotatedClockwise = false,
+                    )
+                }
+            }
         }
 
         /**

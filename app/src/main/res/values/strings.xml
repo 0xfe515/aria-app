@@ -83,4 +83,16 @@
     <string name="licenses_description">ARIA에 사용된 오픈소스 소프트웨어 및 라이선스 고지</string>
     <string name="license_view_notice">라이선스 전문 보기</string>
     <string name="license_open_source_url">공식 소스 링크 열기</string>
+    <string name="vision_inset_title">실시간 비전</string>
+    <string name="vision_status_initializing">카메라 초기화 중…</string>
+    <string name="vision_status_inferencing">실시간 추론 중</string>
+    <string name="vision_status_stopped">비전 중지됨</string>
+    <string name="vision_status_permission">카메라 권한 필요</string>
+    <string name="vision_status_error">카메라 오류</string>
+    <string name="vision_status_model_absent">모델 미적용</string>
+    <string name="vision_inset_collapse">비전 미리보기 접기</string>
+    <string name="vision_inset_expand">비전 미리보기 펼치기</string>
+    <string name="vision_inset_start">카메라 시작</string>
+    <string name="vision_inset_stop">카메라 중지</string>
+    <string name="vision_inset_grant_permission">권한 허용</string>
 </resources>

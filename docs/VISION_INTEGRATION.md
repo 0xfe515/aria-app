@@ -1,5 +1,7 @@
 # Aria Offline Vision Integration Guide
 
+> 2026-10-30 clarification: This guide records the initial integration stage, including the original Cityscapes-only crosswalk mapping and pre-bundling model availability. The user confirmed subsequent `Surface_1` fine-tuning for Korean sidewalk environments; see [training data provenance](VISION_TRAINING_DATA.md). For later bundled artifacts and current working-tree portrait integration, see [model specifications](VISION_MODEL.md) and [portrait production integration](VISION_PORTRAIT_PRODUCTION.md).
+
 ## 1. Overview & Scope
 
 This document describes the on-device camera and offline semantic segmentation integration in Aria (`com.ariateam.aria.vision` and `Settings > Debug` screens).

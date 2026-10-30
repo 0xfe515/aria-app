@@ -245,4 +245,34 @@ class CameraGeometryTest {
         assertTrue(reCalibrated.isCalibrated)
         assertTrue(reCalibrated.isReliable)
     }
+
+    @Test
+    fun fullFrameOrientationAware_preservesFullSensorBoundsWithoutHorizontalCropScale() {
+        // Under FULL_FRAME_ROTATED_LANDSCAPE:
+        // Portrait 640x480 at 90 deg has cropWidth = uprightWidth = 480.
+        // cropScaleX = 1.0 (no horizontal cropping).
+        val portraitHfov = CameraGeometry.computeEffectiveUprightHfovDegrees(
+            intrinsics = pixel3Intrinsics,
+            bufferWidth = 640,
+            bufferHeight = 480,
+            rotationDegrees = 90,
+            cropWidth = 480,
+            uprightWidth = 480,
+        )
+        assertNotNull(portraitHfov)
+        assertEquals(51.54f, portraitHfov!!, 0.5f)
+
+        // Landscape 640x480 at 0 deg has cropWidth = uprightWidth = 640.
+        // cropScaleX = 1.0 (no horizontal cropping).
+        val landscapeHfov = CameraGeometry.computeEffectiveUprightHfovDegrees(
+            intrinsics = pixel3Intrinsics,
+            bufferWidth = 640,
+            bufferHeight = 480,
+            rotationDegrees = 0,
+            cropWidth = 640,
+            uprightWidth = 640,
+        )
+        assertNotNull(landscapeHfov)
+        assertEquals(65.95f, landscapeHfov!!, 0.5f)
+    }
 }

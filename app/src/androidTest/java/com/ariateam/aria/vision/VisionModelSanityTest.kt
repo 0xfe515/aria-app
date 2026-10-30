@@ -227,11 +227,14 @@ class VisionModelSanityTest {
             assertTrue(crossThreadOutput!!.invokeDurationNanos > 0L)
             assertNotNull(crossThreadOutput!!.overlayBitmap)
 
-            // Reconfigure backend across threads
+            // Reconfigure backend across threads: verify CPU is rejected in production
             var thread2Error: Throwable? = null
+            var cpuRejected = false
             val thread2 = Thread {
                 try {
                     store.setPreferredBackend(VisionBackendType.CPU, 2)
+                } catch (expected: IllegalArgumentException) {
+                    cpuRejected = true
                 } catch (t: Throwable) {
                     thread2Error = t
                 }
@@ -239,20 +242,16 @@ class VisionModelSanityTest {
             thread2.start()
             thread2.join(5000L)
             assertFalse("Thread 2 must complete within 5s", thread2.isAlive)
-            thread2Error?.let { throw AssertionError("Thread 2 failed with exception", it) }
-            assertEquals(VisionBackendType.CPU, store.segmenter.configuredBackend)
-            assertEquals(2, store.segmenter.configuredCpuThreads)
-            assertTrue(
-                "CPU backend description must state FP32, was ${store.segmenter.activeBackendDescription}",
-                store.segmenter.activeBackendDescription.contains("LiteRT CPU FP32"),
-            )
+            thread2Error?.let { throw AssertionError("Thread 2 failed with unexpected exception", it) }
+            assertTrue("Production store must reject CPU backend selection", cpuRejected)
+            assertEquals(VisionBackendType.GPU, store.segmenter.configuredBackend)
 
-            // Re-run inference on CPU 2T
-            val cpuOutput = store.segmenter.runIfLoaded(inputBuf, produceOverlayBitmap = false)
-            assertNotNull(cpuOutput)
-            assertTrue(cpuOutput!!.invokeDurationNanos > 0L)
+            // Inference remains on GPU
+            val gpuOutputAfterAttemptedCpu = store.segmenter.runIfLoaded(inputBuf, produceOverlayBitmap = false)
+            assertNotNull(gpuOutputAfterAttemptedCpu)
+            assertTrue(gpuOutputAfterAttemptedCpu!!.invokeDurationNanos > 0L)
 
-            // If GPU is supported, verify raw numerical parity between production GPU and CPU across 3 synthetic fixtures
+            // If GPU is supported, verify raw numerical parity between production GPU and CPU across 4 synthetic fixtures
             if (isGpuSupported) {
                 // 1. Prepare 4 synthetic test fixtures (blank_zeros, constant_0.5, gradient_ramp, seeded_random)
                 class Fixture(val name: String, val generate: () -> ByteBuffer)
@@ -293,8 +292,7 @@ class VisionModelSanityTest {
                     },
                 )
 
-                // Run on GPU FP32
-                store.setPreferredBackend(VisionBackendType.GPU, VisionContract.DEFAULT_CPU_THREADS)
+                // Run on production GPU FP32
                 val gpuFixtureOutputs = fixtures.map { fixture ->
                     val out = FloatArray(VisionContract.OUTPUT_FLOATS)
                     val inBuf = fixture.generate()
@@ -302,13 +300,23 @@ class VisionModelSanityTest {
                     out
                 }
 
-                // Run on CPU 4T
-                store.setPreferredBackend(VisionBackendType.CPU, 4)
-                val cpuFixtureOutputs = fixtures.map { fixture ->
-                    val out = FloatArray(VisionContract.OUTPUT_FLOATS)
-                    val inBuf = fixture.generate()
-                    store.segmenter.runDirectRawProbabilities(inBuf, out)
-                    out
+                // Run on CPU 4T using diagnostic inference policy
+                val diagnosticSegmenter = LiteRtVisionSegmenter(
+                    inferencePolicy = DiagnosticInferencePolicy(allowCpuReferenceForTesting = true),
+                )
+                val diagnosticStore = VisionModelStore(context, segmenter = diagnosticSegmenter, restoreOnInit = false)
+                val cpuFixtureOutputs = try {
+                    val diagReady = diagnosticStore.provisionOptimizedAssetModelSync()
+                    assertTrue("Diagnostic model must provision", diagReady is VisionModelState.Ready)
+                    diagnosticStore.setPreferredBackend(VisionBackendType.CPU, 4)
+                    fixtures.map { fixture ->
+                        val out = FloatArray(VisionContract.OUTPUT_FLOATS)
+                        val inBuf = fixture.generate()
+                        diagnosticStore.segmenter.runDirectRawProbabilities(inBuf, out)
+                        out
+                    }
+                } finally {
+                    diagnosticStore.close()
                 }
 
                 // Verify numeric parity on each fixture
@@ -566,5 +574,98 @@ class VisionModelSanityTest {
         )
         assertNotNull(revLandscapeHfov)
         assertEquals("Pixel 3 reverse landscape HFOV must match 0 deg", landscapeHfov, revLandscapeHfov!!, 0.01f)
+    }
+
+    @Test
+    fun productionStore_upgradesOldCpuPreferencesToGpuOnRestore() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val prefs = context.getSharedPreferences("vision_model_store", Context.MODE_PRIVATE)
+        prefs.edit().putString("preferred_backend", "CPU").commit()
+
+        val store = VisionModelStore(context, restoreOnInit = false)
+        try {
+            assertEquals(VisionBackendType.GPU, store.getPreferredBackend())
+            assertEquals(VisionBackendType.GPU.name, prefs.getString("preferred_backend", null))
+            assertEquals(VisionBackendType.GPU, store.segmenter.configuredBackend)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun productionSegmenter_gpuUnsupportedSimulation_failsCleanlyWithoutCpuFallback() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val unsupportedEnv = object : GpuEnvironment() {
+            override fun isGpuSupported(): Boolean = false
+        }
+        val unsupportedSegmenter = LiteRtVisionSegmenter(
+            gpuEnvironment = unsupportedEnv,
+        )
+        val store = VisionModelStore(context, segmenter = unsupportedSegmenter, restoreOnInit = false)
+        try {
+            val outcome = store.provisionDefaultAssetModelSync()
+            assertTrue("GPU unsupported must produce Error, but was $outcome", outcome is VisionModelState.Error)
+            val err = outcome as VisionModelState.Error
+            assertTrue("Error detail must identify activation/GPU failure: ${err.detail}", err.detail.contains("activation_failed") || err.detail.contains("IllegalStateException"))
+            assertFalse("Segmenter must NOT be ready when GPU fails", store.segmenter.isReady)
+            assertEquals("Configured backend must NOT fall back to CPU", VisionBackendType.GPU, store.segmenter.configuredBackend)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun productionSegmenter_gpuDelegateInitFailure_failsCleanlyAndPreservesValidSessionOnRollback() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val isGpuSupported = org.tensorflow.lite.gpu.CompatibilityList().use { it.isDelegateSupportedOnThisDevice }
+        if (!isGpuSupported) return
+
+        // 1. Start with a working store with active GPU session
+        val store = VisionModelStore(context, restoreOnInit = false)
+        try {
+            val state = store.provisionDefaultAssetModelSync()
+            assertTrue(state is VisionModelState.Ready)
+            assertTrue(store.segmenter.isReady)
+            assertEquals(VisionBackendType.GPU, store.segmenter.configuredBackend)
+
+            // 2. Prepare candidate model file session
+            val prepareOutcome = store.segmenter.prepareModelSession(store.activeModelFile)
+            assertTrue(prepareOutcome is LiteRtVisionSegmenter.PrepareOutcome.Valid)
+            val preparedSession = (prepareOutcome as LiteRtVisionSegmenter.PrepareOutcome.Valid).session
+
+            // 3. Inject a failing GPU environment (supported=true, createDelegate throws) into a segmenter
+            val failingDelegateEnv = object : GpuEnvironment() {
+                override fun isGpuSupported(): Boolean = true
+                override fun createDelegate(precisionLossAllowed: Boolean): org.tensorflow.lite.gpu.GpuDelegate {
+                    throw RuntimeException("Simulated GPU shader compile failure")
+                }
+            }
+            val testSegmenter = LiteRtVisionSegmenter(gpuEnvironment = failingDelegateEnv)
+            try {
+                var initFailed = false
+                try {
+                    testSegmenter.buildSession(
+                        preparedSession.mappedBuffer,
+                        VisionBackendType.GPU,
+                        VisionContract.DEFAULT_CPU_THREADS,
+                    )
+                } catch (expected: RuntimeException) {
+                    initFailed = true
+                    assertEquals("Simulated GPU shader compile failure", expected.message)
+                }
+                assertTrue("buildSession must propagate delegate init failure", initFailed)
+                assertFalse("Session must not be ready", testSegmenter.isReady)
+                assertEquals("Backend must remain GPU, never CPU fallback", VisionBackendType.GPU, testSegmenter.configuredBackend)
+
+                // 4. Verify existing store valid session remains untouched and ready
+                assertTrue("Existing store session must remain ready after candidate failure", store.segmenter.isReady)
+                assertEquals(VisionBackendType.GPU, store.segmenter.configuredBackend)
+            } finally {
+                testSegmenter.close()
+                preparedSession.close()
+            }
+        } finally {
+            store.close()
+        }
     }
 }

@@ -36,8 +36,10 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -145,13 +147,26 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(selectedTab, debugDestination, showLicenses) {
-        if (selectedTab == 1 && !showLicenses && PendingCameraStartGate.isCameraAllowedDestination(debugDestination)) {
-            visionModel.ensureController()
+
+    LaunchedEffect(
+        selectedTab,
+        debugDestination,
+        showLicenses,
+    ) {
+        if (selectedTab == 1) {
+            if (!showLicenses && PendingCameraStartGate.isCameraAllowedDestination(debugDestination)) {
+                visionModel.ensureController()
+            } else {
+                invalidatePendingAndStopCamera()
+            }
+            model.setUiScreen("settings")
         } else {
-            invalidatePendingAndStopCamera()
+            // Home tab: previous settings camera is already synchronously invalidated and stopped
+            // by navigation callbacks (FloatingTabBar, BackHandler, voice navigation).
+            // Do not call invalidatePendingAndStopCamera() here to avoid racing Home inset camera start.
+            visionModel.ensureController()
+            model.setUiScreen("home")
         }
-        model.setUiScreen(if (selectedTab == 1) "settings" else "home")
     }
 
     var screenVisible by remember { mutableStateOf(false) }
@@ -391,7 +406,15 @@ fun MainScreen(
 
     val requestStartCamera: (Preview.SurfaceProvider?, VisionPipelineMode, Int) -> Unit = { provider, mode, rotation ->
         val isResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-        if (selectedTab != 1 || !PendingCameraStartGate.isCameraAllowedDestination(debugDestination) || !isResumed) {
+        val isScreenEligible = PendingCameraStartGate.isCameraEligibleScreen(
+            selectedTab = selectedTab,
+            debugDestination = debugDestination,
+            showLicenses = showLicenses,
+            hasBeenAdmitted = startupModel.hasBeenAdmitted,
+            isStartupSettingsVisible = startupModel.isStartupSettingsVisible,
+            permissionLossDetected = permissionLossDetected,
+        )
+        if (!isScreenEligible || !isResumed) {
             invalidatePendingAndStopCamera()
         } else if (StartupPermissionInventory.CAMERA !in refreshRuntimePermissions()) {
             pendingCameraGate.invalidate()
@@ -404,13 +427,9 @@ fun MainScreen(
         } else {
             pendingCameraGate.invalidate()
             visionModel.ensureController().permissionDenied()
-            startupModel.enterPermissionRecovery()
-        }
-    }
-
-    val modelPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) {
-            visionModel.importModel(uri)
+            if (selectedTab != 0) {
+                startupModel.enterPermissionRecovery()
+            }
         }
     }
 
@@ -480,18 +499,62 @@ fun MainScreen(
                         )
                 ) {
                     val navSafeBottomPadding = calculateFloatingNavSafeBottomPadding(floatingTabBarHeightDp)
+                    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+                    val density = LocalDensity.current
+                    var measuredInsetHeightDp by remember { mutableStateOf(84.dp) }
+                    val homeTopInsetClearance = if (isLandscape) {
+                        8.dp
+                    } else {
+                        measuredInsetHeightDp + 12.dp
+                    }
                     when {
-                        selectedTab == 0 -> VoiceDemoScreen(
-                            state = state,
-                            onStart = { requestAction(1) },
-                            onFinish = model::finishDictation,
-                            onOpenSettings = openSettings,
-                            onStartWaiting = { requestAction(0) },
-                            onStop = model::stop,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(bottom = navSafeBottomPadding + transcriptContentClearance),
-                        )
+                        selectedTab == 0 -> {
+                            VoiceDemoScreen(
+                                state = state,
+                                onStart = { requestAction(1) },
+                                onFinish = model::finishDictation,
+                                onOpenSettings = openSettings,
+                                onStartWaiting = { requestAction(0) },
+                                onStop = model::stop,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(
+                                        top = homeTopInsetClearance,
+                                        bottom = navSafeBottomPadding + transcriptContentClearance,
+                                    ),
+                            )
+                            MainVisionInset(
+                                visionUiState = visionUiState,
+                                visionModelState = visionModelState,
+                                hasCameraPermission = StartupPermissionInventory.CAMERA !in missingRuntimePermissions,
+                                isHomeVisible = screenVisible && selectedTab == 0 && startupModel.hasBeenAdmitted && !permissionLossDetected,
+                                onStartCamera = { provider, rotation ->
+                                    requestStartCamera(provider, VisionPipelineMode.PREPROCESS_OR_INFERENCE, rotation)
+                                },
+                                onStopCamera = {
+                                    visionModel.stopCamera()
+                                },
+                                onSurfaceProviderUpdated = { provider, rotation ->
+                                    visionModel.ensureController().updateSurfaceProvider(provider, rotation)
+                                },
+                                onRequestCameraPermission = {
+                                    val missing = refreshRuntimePermissions()
+                                    if (StartupPermissionInventory.CAMERA in missing) {
+                                        startupPermissions.launch(arrayOf(StartupPermissionInventory.CAMERA))
+                                    }
+                                },
+                                onOpenAppSettings = openSettings,
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(top = 8.dp, end = 12.dp)
+                                    .onGloballyPositioned { coordinates ->
+                                        val heightDp = with(density) { coordinates.size.height.toDp() }
+                                        if (heightDp > 0.dp && heightDp != measuredInsetHeightDp) {
+                                            measuredInsetHeightDp = heightDp
+                                        }
+                                    },
+                            )
+                        }
                         showLicenses -> LicensesScreen(
                             onBack = { showLicenses = false },
                             modifier = Modifier
@@ -509,12 +572,6 @@ fun MainScreen(
                             onStopCamera = invalidatePendingAndStopCamera,
                             onSelectPipelineMode = visionModel::setPipelineMode,
                             onResetMetrics = visionModel::resetMetrics,
-                            onImportModelClick = {
-                                modelPickerLauncher.launch(arrayOf("application/octet-stream", "*/*"))
-                            },
-                            onClearModelClick = visionModel::clearModel,
-                            onRestoreDefaultModelClick = visionModel::restoreDefaultModel,
-                            onApplyOptimizedModelClick = visionModel::applyOptimizedModel,
                             onOpenAppSettings = openSettings,
                             onSurfaceProviderUpdated = { provider, rotation ->
                                 pendingCameraGate.updateSurfaceProvider(provider, rotation)
@@ -522,7 +579,6 @@ fun MainScreen(
                             },
                             onCalibrateForward = { visionModel.calibrateForward() },
                             onToggleHazardAlert = { visionModel.setHazardAlertEnabled(it) },
-                            onConfigureBackend = { backend, threads -> visionModel.configureBackend(backend, threads) },
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(bottom = hiddenNavTranscriptBottomPadding),

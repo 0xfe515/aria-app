@@ -62,11 +62,11 @@ import com.ariateam.aria.hazard.MotionState
 import com.ariateam.aria.vision.CameraSessionStatus
 import com.ariateam.aria.vision.SensorTimestampSource
 import com.ariateam.aria.vision.UprightCropRect
-import com.ariateam.aria.vision.VisionBackendType
 import com.ariateam.aria.vision.VisionContract
 import com.ariateam.aria.vision.VisionFramePreprocessor
 import com.ariateam.aria.vision.VisionModelState
 import com.ariateam.aria.vision.VisionPipelineMode
+import com.ariateam.aria.vision.VisionPreprocessingStrategy
 import com.ariateam.aria.vision.VisionSegmentationSummary
 import com.ariateam.aria.vision.VisionUiState
 import java.util.Locale
@@ -81,15 +81,10 @@ fun VisionDiagnosticsScreen(
     onStopCamera: () -> Unit,
     onSelectPipelineMode: (VisionPipelineMode) -> Unit,
     onResetMetrics: () -> Unit,
-    onImportModelClick: () -> Unit,
-    onClearModelClick: () -> Unit,
-    onRestoreDefaultModelClick: () -> Unit = {},
-    onApplyOptimizedModelClick: () -> Unit = {},
     onOpenAppSettings: () -> Unit,
     onSurfaceProviderUpdated: (Preview.SurfaceProvider?, Int) -> Unit = { _, _ -> },
     onCalibrateForward: () -> Unit = {},
     onToggleHazardAlert: (Boolean) -> Unit = {},
-    onConfigureBackend: (VisionBackendType, Int) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -147,7 +142,7 @@ fun VisionDiagnosticsScreen(
             )
         }
 
-        // 1. Model Importer & Validation Card
+        // 1. Model Status Card
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
@@ -156,18 +151,18 @@ fun VisionDiagnosticsScreen(
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "규격: 입력 [1, 288, 512, 3] FLOAT32 (RGB 0~1) · 출력 [1, 288, 512, 7] FLOAT32 (7클래스 softmax)",
+                    text = "규격: 입력 [1, 512, 288, 3] FLOAT32 (RGB 0~1) · 출력 [1, 512, 288, 7] FLOAT32 (7클래스 softmax)",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 when (modelState) {
                     is VisionModelState.Missing -> {
                         Text(
-                            text = "모델 상태: 모델 미적용 (카메라 전처리 512×288 전용 모드)",
+                            text = "모델 상태: 모델 미적용 (카메라 전처리 288×512 전용 모드)",
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.Medium,
                         )
                         Text(
-                            text = "실제 .tflite 모델 없이 카메라 프레임 수집 및 512:288 하단 정렬 크롭·정규화 병목을 측정할 수 있습니다.",
+                            text = "실제 .tflite 모델 없이 카메라 프레임 수집 및 288:512 직립 레터박스 전처리 병목을 측정할 수 있습니다.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -215,31 +210,6 @@ fun VisionDiagnosticsScreen(
                         }
                     }
                 }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button(onClick = onApplyOptimizedModelClick) {
-                        Text("GPU 최적화 모델 (FP32)")
-                    }
-                    OutlinedButton(onClick = onRestoreDefaultModelClick) {
-                        Text("기본 원본 복원")
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedButton(onClick = onImportModelClick) {
-                        Text("새 모델 불러오기 (.tflite)")
-                    }
-                    if (modelState is VisionModelState.Ready) {
-                        OutlinedButton(onClick = onClearModelClick) {
-                            Text("모델 해제")
-                        }
-                    }
-                }
             }
         }
 
@@ -247,12 +217,39 @@ fun VisionDiagnosticsScreen(
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "실시간 카메라 시야 (512×288 하단 정렬 ROI)",
+                    text = "실시간 카메라 시야 (512×288 표준 직립 분석 그리드)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
                     text = "상태: ${cameraStatusLabel(uiState.cameraStatus)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                val backendStatus = when {
+                    modelState is VisionModelState.Missing -> "추론 백엔드: 모델 미적용"
+                    modelState is VisionModelState.Loading -> "추론 백엔드: 모델 준비 중"
+                    modelState is VisionModelState.Error -> "추론 백엔드: 모델 오류로 추론할 수 없습니다"
+                    uiState.cameraStatus == CameraSessionStatus.Running &&
+                        uiState.pipelineMode != VisionPipelineMode.PREVIEW_ONLY ->
+                        "실제 추론 백엔드: ${uiState.activeBackendDescription}"
+                    uiState.cameraStatus == CameraSessionStatus.Running ->
+                        "미리보기 전용 모드 · 추론 백엔드 비활성"
+                    uiState.cameraStatus == CameraSessionStatus.Starting ->
+                        "카메라 시작 후 실제 추론 백엔드가 표시됩니다"
+                    else -> "카메라 실행 중에 실제 추론 백엔드가 표시됩니다"
+                }
+                Text(
+                    text = backendStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                )
+                val strategyLabel = when (uiState.preprocessingStrategy) {
+                    VisionPreprocessingStrategy.FULL_FRAME_ROTATED_LANDSCAPE -> "무손실 전방위 시야 (회전+레터박스)"
+                    VisionPreprocessingStrategy.LEGACY_CROP -> "16:9 하단 정렬 크롭 (레거시)"
+                    VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX -> "무손실 직립 레터박스"
+                }
+                Text(
+                    text = "전처리 방식: $strategyLabel",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (uiState.cameraErrorDetail != null) {
@@ -306,53 +303,7 @@ fun VisionDiagnosticsScreen(
             }
         }
 
-        // 3. Backend Acceleration & Thread Selection Card
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "추론 가속 백엔드 설정 (LiteRT)",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "현재 활성 백엔드: ${uiState.activeBackendDescription}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = { onConfigureBackend(VisionBackendType.CPU, 4) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("CPU 4스레드", style = MaterialTheme.typography.labelSmall)
-                    }
-                    OutlinedButton(
-                        onClick = { onConfigureBackend(VisionBackendType.CPU, 2) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("CPU 2스레드", style = MaterialTheme.typography.labelSmall)
-                    }
-                    OutlinedButton(
-                        onClick = { onConfigureBackend(VisionBackendType.CPU, 1) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("CPU 1스레드", style = MaterialTheme.typography.labelSmall)
-                    }
-                    Button(
-                        onClick = { onConfigureBackend(VisionBackendType.GPU, 4) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("GPU 대리자", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-            }
-        }
-
-        // 4. Direction-Aware IMU Motion & Orientation Card
+        // 3. Direction-Aware IMU Motion & Orientation Card
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
@@ -411,7 +362,7 @@ fun VisionDiagnosticsScreen(
             }
         }
 
-        // 5. Direction-Aware Hazard Assessment & Alert Card
+        // 4. Direction-Aware Hazard Assessment & Alert Card
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
@@ -465,7 +416,7 @@ fun VisionDiagnosticsScreen(
             }
         }
 
-        // 6. Detailed Timing & Profiling Breakdown Card
+        // 5. Detailed Timing & Profiling Breakdown Card
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
@@ -503,7 +454,7 @@ fun VisionDiagnosticsScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    text = "2. 전처리 (Preprocess YUV→512×288 RGB 0..1): ${timing.formatPreprocessLabel()}",
+                    text = "2. 전처리 (Preprocess YUV→288×512 RGB 0..1): ${timing.formatPreprocessLabel()}",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
@@ -535,7 +486,7 @@ fun VisionDiagnosticsScreen(
             }
         }
 
-        // 7. Segmentation Output Summary Card
+        // 6. Segmentation Output Summary Card
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
@@ -582,6 +533,7 @@ internal fun VisionCameraPreviewBox(
     onSurfaceProviderReady: (Preview.SurfaceProvider) -> Unit,
     modifier: Modifier = Modifier,
     fillViewport: Boolean = false,
+    overlayAlpha: Float = 0.55f,
 ) {
     Box(
         modifier = modifier
@@ -606,6 +558,9 @@ internal fun VisionCameraPreviewBox(
                         onSurfaceProviderReady(surfaceProvider)
                     }
                 },
+                update = { view ->
+                    onSurfaceProviderReady(view.surfaceProvider)
+                },
                 modifier = Modifier.fillMaxSize(),
             )
             val imageBitmap = remember(overlayBitmap) { overlayBitmap?.asImageBitmap() }
@@ -624,7 +579,7 @@ internal fun VisionCameraPreviewBox(
                             image = imageBitmap,
                             dstOffset = IntOffset(vp.cropLeftPx.roundToInt(), vp.cropTopPx.roundToInt()),
                             dstSize = IntSize(vp.cropWidthPx.roundToInt(), vp.cropHeightPx.roundToInt()),
-                            alpha = 0.55f,
+                            alpha = overlayAlpha,
                             filterQuality = FilterQuality.None,
                         )
                     }

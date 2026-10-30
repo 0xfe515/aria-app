@@ -9,32 +9,45 @@ package com.ariateam.aria.vision
  */
 object VisionContract {
     const val MODEL_BATCH = 1
+    // Canonical upright analysis/overlay output grid; these are not tensor dimensions.
     const val MODEL_HEIGHT = 288
     const val MODEL_WIDTH = 512
+    const val MODEL_INPUT_HEIGHT = 512
+    const val MODEL_INPUT_WIDTH = 288
     const val MODEL_CHANNELS = 3
     const val MODEL_CLASSES = 7
 
-    const val INPUT_PIXELS = MODEL_HEIGHT * MODEL_WIDTH
-    const val INPUT_FLOATS = MODEL_BATCH * MODEL_HEIGHT * MODEL_WIDTH * MODEL_CHANNELS
+    const val INPUT_PIXELS = MODEL_INPUT_HEIGHT * MODEL_INPUT_WIDTH
+    const val INPUT_FLOATS = MODEL_BATCH * MODEL_INPUT_HEIGHT * MODEL_INPUT_WIDTH * MODEL_CHANNELS
     const val INPUT_BYTES = INPUT_FLOATS * Float.SIZE_BYTES
 
-    const val OUTPUT_FLOATS = MODEL_BATCH * MODEL_HEIGHT * MODEL_WIDTH * MODEL_CLASSES
+    const val OUTPUT_FLOATS = MODEL_BATCH * MODEL_INPUT_HEIGHT * MODEL_INPUT_WIDTH * MODEL_CLASSES
     const val OUTPUT_BYTES = OUTPUT_FLOATS * Float.SIZE_BYTES
 
     const val EXPECTED_DATA_TYPE = "FLOAT32"
     const val DEFAULT_MODEL_FILENAME = "walkable_seg_aria.tflite"
     const val STAGING_MODEL_FILENAME = "walkable_seg_aria.tflite.staging"
 
-    const val DEFAULT_ASSET_MODEL_PATH = "models/walkable_seg_aria5.tflite"
-    const val DEFAULT_ASSET_MODEL_NAME = "walkable_seg_aria5.tflite"
-    const val DEFAULT_ASSET_MODEL_SHA256 = "3944dce57cc161679525c3f4feb1f6b46c8e7519f8f10ba06155b3874c2c66b7"
-    const val DEFAULT_ASSET_MODEL_BYTES = 10_837_912L
+    const val DEFAULT_ASSET_MODEL_PATH = "models/walkable_seg_aria5_portrait_unfused.tflite"
+    const val DEFAULT_ASSET_MODEL_NAME = "walkable_seg_aria5_portrait_unfused.tflite"
+    const val DEFAULT_ASSET_MODEL_SHA256 = "312105f5a82fc2677337ca7c15867249b3ae255a983fb5ffa4a54dae2b6864c1"
+    const val DEFAULT_ASSET_MODEL_BYTES = 10_839_936L
     const val DEFAULT_ASSET_MODEL_UPSTREAM_COMMIT = "bfb11e6"
 
-    const val OPTIMIZED_ASSET_MODEL_PATH = "models/walkable_seg_aria5_unfused.tflite"
-    const val OPTIMIZED_ASSET_MODEL_NAME = "walkable_seg_aria5_unfused.tflite"
-    const val OPTIMIZED_ASSET_MODEL_SHA256 = "84364b9730d200b00a65ebcbae6a13444c6f8eb9bbab0676adc30d57cfa24847"
-    const val OPTIMIZED_ASSET_MODEL_BYTES = 10_839_936L
+    const val OPTIMIZED_ASSET_MODEL_PATH = DEFAULT_ASSET_MODEL_PATH
+    const val OPTIMIZED_ASSET_MODEL_NAME = DEFAULT_ASSET_MODEL_NAME
+    const val OPTIMIZED_ASSET_MODEL_SHA256 = DEFAULT_ASSET_MODEL_SHA256
+    const val OPTIMIZED_ASSET_MODEL_BYTES = DEFAULT_ASSET_MODEL_BYTES
+
+    const val LEGACY_DEFAULT_ASSET_MODEL_PATH = "models/walkable_seg_aria5.tflite"
+    const val LEGACY_DEFAULT_ASSET_MODEL_NAME = "walkable_seg_aria5.tflite"
+    const val LEGACY_DEFAULT_ASSET_MODEL_SHA256 = "3944dce57cc161679525c3f4feb1f6b46c8e7519f8f10ba06155b3874c2c66b7"
+    const val LEGACY_DEFAULT_ASSET_MODEL_BYTES = 10_837_912L
+
+    const val LEGACY_OPTIMIZED_ASSET_MODEL_PATH = "models/walkable_seg_aria5_unfused.tflite"
+    const val LEGACY_OPTIMIZED_ASSET_MODEL_NAME = "walkable_seg_aria5_unfused.tflite"
+    const val LEGACY_OPTIMIZED_ASSET_MODEL_SHA256 = "84364b9730d200b00a65ebcbae6a13444c6f8eb9bbab0676adc30d57cfa24847"
+    const val LEGACY_OPTIMIZED_ASSET_MODEL_BYTES = 10_839_936L
 
     /**
      * Bounded import copy limit (64 MiB).
@@ -49,8 +62,8 @@ object VisionContract {
     /** Bottom 45% ROI start row (288 * 0.55 = 158), matching upstream `test_video_multi.py`. */
     const val ROI_START_ROW = 158
 
-    val EXPECTED_INPUT_SHAPE = intArrayOf(MODEL_BATCH, MODEL_HEIGHT, MODEL_WIDTH, MODEL_CHANNELS)
-    val EXPECTED_OUTPUT_SHAPE = intArrayOf(MODEL_BATCH, MODEL_HEIGHT, MODEL_WIDTH, MODEL_CLASSES)
+    val EXPECTED_INPUT_SHAPE = intArrayOf(MODEL_BATCH, MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH, MODEL_CHANNELS)
+    val EXPECTED_OUTPUT_SHAPE = intArrayOf(MODEL_BATCH, MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH, MODEL_CLASSES)
 
     data class ClassSpec(
         val id: Int,
@@ -149,7 +162,7 @@ data class VisionModelMetadata(
     val sizeBytes: Long,
     val sha256: String,
     val importedAtMillis: Long,
-    val backendDescription: String = "LiteRT CPU (XNNPACK, ${VisionContract.DEFAULT_CPU_THREADS}스레드)",
+    val backendDescription: String = "LiteRT GPU FP32 (GpuDelegate · 잔여 CPU ${VisionContract.DEFAULT_CPU_THREADS}스레드)",
 )
 
 sealed interface VisionModelState {

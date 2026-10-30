@@ -56,8 +56,7 @@ class VisionModelStore(
         }
 
     private fun inactiveSlotFile(): File {
-        val currentName = prefs.getString(KEY_ACTIVE_SLOT_FILE, null)
-        val nextName = if (currentName == SLOT_0_FILENAME) SLOT_1_FILENAME else SLOT_0_FILENAME
+        val nextName = if (activeModelFile.name == SLOT_0_FILENAME) SLOT_1_FILENAME else SLOT_0_FILENAME
         return File(visionDir, nextName)
     }
 
@@ -100,14 +99,18 @@ class VisionModelStore(
     }
 
     fun getPreferredBackend(): VisionBackendType {
+        if (!segmenter.inferencePolicy.allowCpuReferenceForTesting) {
+            val saved = prefs.getString(KEY_PREFERRED_BACKEND, null)
+            if (saved != null && saved != VisionBackendType.GPU.name) {
+                prefs.edit().putString(KEY_PREFERRED_BACKEND, VisionBackendType.GPU.name).apply()
+            }
+            return VisionBackendType.GPU
+        }
         val saved = prefs.getString(KEY_PREFERRED_BACKEND, null)
         if (saved != null) {
-            return runCatching { VisionBackendType.valueOf(saved) }.getOrDefault(VisionBackendType.CPU)
+            return runCatching { VisionBackendType.valueOf(saved) }.getOrDefault(VisionBackendType.GPU)
         }
-        val isGpuSupported = runCatching {
-            org.tensorflow.lite.gpu.CompatibilityList().use { it.isDelegateSupportedOnThisDevice }
-        }.getOrDefault(false)
-        return if (isGpuSupported) VisionBackendType.GPU else VisionBackendType.CPU
+        return VisionBackendType.GPU
     }
 
     fun getPreferredCpuThreads(): Int {
@@ -115,6 +118,11 @@ class VisionModelStore(
     }
 
     fun setPreferredBackend(backend: VisionBackendType, threads: Int = VisionContract.DEFAULT_CPU_THREADS) {
+        if (backend == VisionBackendType.CPU && !segmenter.inferencePolicy.allowCpuReferenceForTesting) {
+            throw IllegalArgumentException(
+                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+            )
+        }
         prefs.edit()
             .putString(KEY_PREFERRED_BACKEND, backend.name)
             .putInt(KEY_PREFERRED_CPU_THREADS, threads)
@@ -125,28 +133,32 @@ class VisionModelStore(
     internal fun restorePersistedModelSync(): VisionModelState {
         try {
             if (closed.get()) return VisionModelState.Missing
+            if (prefs.getBoolean(KEY_USER_CLEARED, false)) {
+                segmenter.unloadModel()
+                activeMetadata = null
+                val missing = VisionModelState.Missing
+                mutableState.value = missing
+                return missing
+            }
             val preferredBackend = getPreferredBackend()
             val preferredThreads = getPreferredCpuThreads()
             segmenter.configureBackend(preferredBackend, preferredThreads)
 
             val file = activeModelFile
             if (!file.isFile || file.length() <= 0L) {
-                val userCleared = prefs.getBoolean(KEY_USER_CLEARED, false)
-                if (!userCleared) {
-                    if (hasOptimizedAssetModel()) {
-                        val provisionOutcome = provisionOptimizedAssetModelSync()
-                        if (provisionOutcome is VisionModelState.Ready) {
-                            return provisionOutcome
-                        }
-                    }
-                    if (hasDefaultAssetModel()) {
-                        val provisionOutcome = provisionDefaultAssetModelSync()
-                        if (provisionOutcome is VisionModelState.Ready) {
-                            return provisionOutcome
-                        }
+                if (hasOptimizedAssetModel()) {
+                    val provisionOutcome = provisionOptimizedAssetModelSync()
+                    if (provisionOutcome is VisionModelState.Ready) {
+                        return provisionOutcome
                     }
                 }
-                clearPersistedPrefs(preserveClearedFlag = userCleared)
+                if (hasDefaultAssetModel()) {
+                    val provisionOutcome = provisionDefaultAssetModelSync()
+                    if (provisionOutcome is VisionModelState.Ready) {
+                        return provisionOutcome
+                    }
+                }
+                clearPersistedPrefs(preserveClearedFlag = false)
                 segmenter.unloadModel()
                 activeMetadata = null
                 val missing = VisionModelState.Missing
@@ -186,13 +198,33 @@ class VisionModelStore(
                 return err
             }
 
+            if (isKnownLegacyLandscapeModel(file.length(), actualSha256)) {
+                activeMetadata = VisionModelMetadata(
+                    displayName = displayName,
+                    sizeBytes = file.length(),
+                    sha256 = actualSha256,
+                    importedAtMillis = prefs.getLong(KEY_IMPORTED_AT, file.lastModified()),
+                )
+                return provisionOptimizedAssetModelSync()
+            }
+
             return when (val outcome = segmenter.prepareModelSession(file)) {
                 is LiteRtVisionSegmenter.PrepareOutcome.Valid -> {
                     if (closed.get()) {
                         outcome.session.close()
                         return VisionModelState.Missing
                     }
-                    segmenter.activatePreparedSession(outcome.session, preferredBackend, preferredThreads)
+                    try {
+                        segmenter.activatePreparedSession(outcome.session, preferredBackend, preferredThreads)
+                    } catch (t: Throwable) {
+                        outcome.session.close()
+                        val err = VisionModelState.Error(
+                            reason = "GPU 가속 세그멘테이션 초기화에 실패했습니다 (${t.javaClass.simpleName}).",
+                            detail = "${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)}",
+                        )
+                        mutableState.value = err
+                        return err
+                    }
                     val importedAt = prefs.getLong(KEY_IMPORTED_AT, file.lastModified())
                     val metadata = VisionModelMetadata(
                         displayName = displayName,
@@ -207,10 +239,6 @@ class VisionModelStore(
                     ready
                 }
                 is LiteRtVisionSegmenter.PrepareOutcome.Invalid -> {
-                    runCatching { file.delete() }
-                    clearPersistedPrefs()
-                    segmenter.unloadModel()
-                    activeMetadata = null
                     val err = VisionModelState.Error(
                         reason = outcome.failure.koreanMessage,
                         detail = outcome.failure.detail,
@@ -229,6 +257,13 @@ class VisionModelStore(
         } finally {
             mutableInitialRestoreCompleted.value = true
         }
+    }
+
+    private fun isKnownLegacyLandscapeModel(sizeBytes: Long, sha256: String): Boolean {
+        return (sizeBytes == VisionContract.LEGACY_DEFAULT_ASSET_MODEL_BYTES &&
+            sha256.equals(VisionContract.LEGACY_DEFAULT_ASSET_MODEL_SHA256, ignoreCase = true)) ||
+            (sizeBytes == VisionContract.LEGACY_OPTIMIZED_ASSET_MODEL_BYTES &&
+                sha256.equals(VisionContract.LEGACY_OPTIMIZED_ASSET_MODEL_SHA256, ignoreCase = true))
     }
 
     fun importFromUri(uri: Uri) {
@@ -365,8 +400,8 @@ class VisionModelStore(
                 clearPersistedPrefs()
             }
             return handleImportFailure(
-                reason = "모델 활성화 중 오류가 발생했습니다 (${t.javaClass.simpleName}).",
-                detail = "activation_failed",
+                reason = "모델 GPU 가속 활성화에 실패했습니다 (${t.javaClass.simpleName}).",
+                detail = "activation_failed: ${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)}",
                 runtimeReadyCheck = runtimeReadyCheck,
             )
         }
@@ -456,18 +491,12 @@ class VisionModelStore(
             mutableState.value = err
             return err
         }
-        // Original un-unfused model has 140 CPU fallback partitions on GPU; configure CPU unless user explicitly chose otherwise
-        val explicitPref = prefs.getString(KEY_PREFERRED_BACKEND, null)
-        val desiredBackend = if (explicitPref != null) {
-            getPreferredBackend()
-        } else {
-            VisionBackendType.CPU
-        }
+        val preferred = getPreferredBackend()
         val threads = getPreferredCpuThreads()
         return stream.use { input ->
             provisionDefaultAssetStreamSync(
                 input = input,
-                targetBackend = desiredBackend,
+                targetBackend = preferred,
                 targetCpuThreads = threads,
             )
         }
@@ -580,8 +609,8 @@ class VisionModelStore(
                 clearPersistedPrefs(preserveClearedFlag = false)
             }
             return handleImportFailure(
-                reason = "기본 모델 활성화 중 오류가 발생했습니다 (${t.javaClass.simpleName}).",
-                detail = "activation_failed",
+                reason = "기본 모델 GPU 가속 활성화에 실패했습니다 (${t.javaClass.simpleName}).",
+                detail = "activation_failed: ${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)}",
             )
         }
 

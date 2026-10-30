@@ -58,13 +58,14 @@ data class VisionUiState(
     val cameraStatus: CameraSessionStatus = CameraSessionStatus.Stopped,
     val cameraErrorDetail: String? = null,
     val pipelineMode: VisionPipelineMode = VisionPipelineMode.PREPROCESS_OR_INFERENCE,
+    val preprocessingStrategy: VisionPreprocessingStrategy = VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX,
     val timing: VisionTimingSnapshot = VisionTimingSnapshot(),
     val latestSummary: VisionSegmentationSummary? = null,
     val latestOverlayBitmap: Bitmap? = null,
     val motionState: MotionState = MotionState(),
     val hazardAssessment: HazardAssessment = HazardAssessment(),
     val isHazardAlertEnabled: Boolean = true,
-    val configuredBackend: VisionBackendType = VisionBackendType.CPU,
+    val configuredBackend: VisionBackendType = VisionBackendType.GPU,
     val configuredCpuThreads: Int = VisionContract.DEFAULT_CPU_THREADS,
     val activeBackendDescription: String = "N/A (모델 미적용)",
 )
@@ -77,7 +78,11 @@ class VisionPipelineController(
     private val context: Context,
     val modelStore: VisionModelStore = VisionModelStore(context.applicationContext),
     val timingTracker: VisionTimingTracker = VisionTimingTracker(),
-    val preprocessor: VisionFramePreprocessor = VisionFramePreprocessor(),
+    val preprocessor: VisionFramePreprocessor = VisionFramePreprocessor(
+        targetWidth = VisionContract.MODEL_INPUT_WIDTH,
+        targetHeight = VisionContract.MODEL_INPUT_HEIGHT,
+        defaultStrategy = VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX,
+    ),
     val motionTracker: MotionTracker = MotionTracker(context),
     val hazardDetector: HazardDetector = HazardDetector(),
     val alertCoordinator: HazardAlertCoordinator = HazardAlertCoordinator(context),
@@ -113,6 +118,10 @@ class VisionPipelineController(
     private var currentMode: VisionPipelineMode = VisionPipelineMode.PREPROCESS_OR_INFERENCE
 
     @Volatile
+    var preprocessingStrategy: VisionPreprocessingStrategy = VisionPreprocessingStrategy.FULL_FRAME_UPRIGHT_LETTERBOX
+        private set
+
+    @Volatile
     private var sensorTimestampSource: SensorTimestampSource = SensorTimestampSource.UNKNOWN_OR_UNVERIFIED
 
     @Volatile
@@ -131,6 +140,18 @@ class VisionPipelineController(
 
     val isInitialRestoreCompleted: StateFlow<Boolean>
         get() = modelStore.isInitialRestoreCompleted
+
+    fun setPreprocessingStrategy(strategy: VisionPreprocessingStrategy) {
+        if (preprocessingStrategy == strategy) return
+        preprocessingStrategy = strategy
+        lastObservedGeomWidth = -1
+        lastObservedGeomHeight = -1
+        lastObservedGeomRotation = -1
+        lastObservedCropWidth = -1
+        lastObservedUprightWidth = -1
+        motionTracker.updateCameraGeometry(null)
+        mutableUiState.update { it.copy(preprocessingStrategy = strategy) }
+    }
 
     fun setPipelineMode(mode: VisionPipelineMode) {
         if (currentMode == mode) return
@@ -186,14 +207,33 @@ class VisionPipelineController(
         backend: VisionBackendType,
         threads: Int = modelStore.segmenter.configuredCpuThreads,
     ) {
+        if (backend == VisionBackendType.CPU && !modelStore.segmenter.inferencePolicy.allowCpuReferenceForTesting) {
+            throw IllegalArgumentException(
+                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+            )
+        }
         analyzerExecutor.execute {
-            modelStore.setPreferredBackend(backend, threads)
+            try {
+                modelStore.setPreferredBackend(backend, threads)
+            } catch (t: Throwable) {
+                val desc = modelStore.segmenter.activeBackendDescription
+                mutableUiState.update {
+                    it.copy(
+                        configuredBackend = modelStore.segmenter.configuredBackend,
+                        configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
+                        activeBackendDescription = desc,
+                        cameraErrorDetail = "백엔드 재구성 실패 (기존 유효 세션 유지: ${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)})",
+                    )
+                }
+                return@execute
+            }
             val desc = modelStore.segmenter.activeBackendDescription
             mutableUiState.update {
                 it.copy(
                     configuredBackend = modelStore.segmenter.configuredBackend,
                     configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
                     activeBackendDescription = desc,
+                    cameraErrorDetail = null,
                 )
             }
         }
@@ -245,6 +285,7 @@ class VisionPipelineController(
                 cameraStatus = CameraSessionStatus.Starting,
                 cameraErrorDetail = null,
                 pipelineMode = mode,
+                preprocessingStrategy = preprocessingStrategy,
                 timing = timingTracker.snapshot(mode, modelLoaded, activeBackendLabel(mode, modelLoaded)),
                 latestSummary = null,
                 latestOverlayBitmap = null,
@@ -476,6 +517,7 @@ class VisionPipelineController(
                 vBuffer = vPlane.buffer,
                 vRowStride = vPlane.rowStride,
                 vPixelStride = vPlane.pixelStride,
+                strategy = preprocessingStrategy,
             )
             val preprocessDurationNanos = (SystemClock.elapsedRealtimeNanos() - preprocessStartNanos).coerceAtLeast(0L)
 
@@ -516,6 +558,7 @@ class VisionPipelineController(
             val inferenceOutput = modelStore.segmenter.runIfLoaded(
                 inputByteBuffer = preprocessor.inputByteBuffer,
                 produceOverlayBitmap = shouldPublishUi,
+                transform = cropRect,
             )
             val analyzerEndNanos = SystemClock.elapsedRealtimeNanos()
             if (!isSessionLive(ticket)) return
@@ -799,6 +842,7 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
     fun retryModelRestore() = ensureController().modelStore.restorePersistedModelAsync()
     fun applyOptimizedModel() = ensureController().modelStore.provisionOptimizedAssetModelAsync()
     fun setPipelineMode(mode: VisionPipelineMode) = ensureController().setPipelineMode(mode)
+    fun setPreprocessingStrategy(strategy: VisionPreprocessingStrategy) = ensureController().setPreprocessingStrategy(strategy)
     fun resetMetrics() = ensureController().resetMetrics()
     fun calibrateForward() = ensureController().calibrateForward()
     fun setHazardAlertEnabled(enabled: Boolean) = ensureController().setHazardAlertEnabled(enabled)

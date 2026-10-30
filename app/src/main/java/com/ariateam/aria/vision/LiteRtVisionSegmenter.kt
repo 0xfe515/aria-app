@@ -24,6 +24,42 @@ enum class VisionBackendType(val label: String) {
 }
 
 /**
+ * Policy governing vision inference execution.
+ * Production enforces GPU-only inference; CPU reference is isolated to explicit diagnostic testing.
+ */
+internal interface VisionInferencePolicy {
+    val allowCpuReferenceForTesting: Boolean
+        get() = false
+}
+
+internal object ProductionGpuOnlyPolicy : VisionInferencePolicy {
+    override val allowCpuReferenceForTesting: Boolean = false
+}
+
+internal data class DiagnosticInferencePolicy(
+    override val allowCpuReferenceForTesting: Boolean = true,
+) : VisionInferencePolicy
+
+/**
+ * Encapsulates LiteRT GPU delegate compatibility detection and construction.
+ * Open for test injection to deterministically simulate GPU unsupported or init failure cases.
+ */
+internal open class GpuEnvironment {
+    open fun isGpuSupported(): Boolean {
+        return runCatching {
+            CompatibilityList().use { it.isDelegateSupportedOnThisDevice }
+        }.getOrDefault(false)
+    }
+
+    open fun createDelegate(precisionLossAllowed: Boolean): GpuDelegate {
+        val delegateOptions = CompatibilityList().use { it.bestOptionsForThisDevice }
+        delegateOptions.setPrecisionLossAllowed(precisionLossAllowed)
+        delegateOptions.setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+        return GpuDelegate(delegateOptions)
+    }
+}
+
+/**
  * Informational segmentation summary from a single 512x288 model output frame.
  * Does NOT make hazard or obstacle alert decisions.
  */
@@ -62,12 +98,19 @@ data class VisionInferenceOutput(
 )
 
 /**
- * Thread-safe LiteRT CPU/GPU segmentation runner with atomic session commits, strict
+ * Thread-safe LiteRT GPU segmentation runner with atomic session commits, strict
  * local resource disposal on failure, and single-session ownership.
+ *
+ * Production enforces GPU-only FP32 model inference. CPU reference execution is isolated
+ * to explicitly injected [inferencePolicy] for diagnostic parity testing.
  */
-class LiteRtVisionSegmenter(
+class LiteRtVisionSegmenter internal constructor(
     private val defaultCpuThreads: Int = VisionContract.DEFAULT_CPU_THREADS,
+    internal val inferencePolicy: VisionInferencePolicy = ProductionGpuOnlyPolicy,
+    internal val gpuEnvironment: GpuEnvironment = GpuEnvironment(),
 ) : AutoCloseable {
+    constructor() : this(VisionContract.DEFAULT_CPU_THREADS, ProductionGpuOnlyPolicy, GpuEnvironment())
+    constructor(defaultCpuThreads: Int) : this(defaultCpuThreads, ProductionGpuOnlyPolicy, GpuEnvironment())
 
     private val lock = Any()
 
@@ -114,7 +157,7 @@ class LiteRtVisionSegmenter(
     private var activeSession: InferenceSession? = null
 
     @Volatile
-    var configuredBackend: VisionBackendType = VisionBackendType.CPU
+    var configuredBackend: VisionBackendType = VisionBackendType.GPU
         private set
 
     @Volatile
@@ -138,7 +181,7 @@ class LiteRtVisionSegmenter(
 
     private fun outputAsFloatBuffer(): FloatBuffer {
         val dup = outputByteBuffer.duplicate().order(ByteOrder.nativeOrder())
-        dup.rewind()
+        dup.clear()
         return dup.asFloatBuffer()
     }
 
@@ -165,6 +208,10 @@ class LiteRtVisionSegmenter(
     /**
      * Builds and validates a candidate session off the lock without touching any active session.
      * Guarantees all candidate locals are closed if building throws, preventing GPU or native leaks.
+     *
+     * Production enforces GPU-only inference (FP32 sustained speed).
+     * If GPU is unsupported or fails to initialize, throws an exception immediately without falling back to CPU.
+     * CPU inference is only allowed when explicitly enabled via [inferencePolicy.allowCpuReferenceForTesting].
      */
     internal fun buildSession(
         mappedBuffer: MappedByteBuffer,
@@ -174,71 +221,72 @@ class LiteRtVisionSegmenter(
     ): InferenceSession {
         val cpuThreads = threads.coerceIn(1, 8)
 
-        if (requestedBackend == VisionBackendType.GPU) {
-            var delegate: GpuDelegate? = null
+        if (requestedBackend == VisionBackendType.CPU) {
+            if (!inferencePolicy.allowCpuReferenceForTesting) {
+                throw UnsupportedOperationException(
+                    "CPU inference is disabled in production. Aria enforces LiteRT GPU-only inference."
+                )
+            }
             var candidateInterpreter: Interpreter? = null
             try {
-                val isSupported: Boolean
-                val delegateOptions: GpuDelegate.Options
-                CompatibilityList().use { compatList ->
-                    isSupported = compatList.isDelegateSupportedOnThisDevice
-                    delegateOptions = if (isSupported) compatList.bestOptionsForThisDevice else GpuDelegate.Options()
+                val options = Interpreter.Options().apply {
+                    setNumThreads(cpuThreads)
+                    setUseXNNPACK(true)
                 }
-                if (isSupported) {
-                    delegateOptions.setPrecisionLossAllowed(precisionLossAllowed)
-                    delegateOptions.setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
-                    delegate = GpuDelegate(delegateOptions)
-                    val options = Interpreter.Options().apply {
-                        addDelegate(delegate)
-                        setNumThreads(cpuThreads)
-                    }
-                    candidateInterpreter = Interpreter(mappedBuffer, options)
-                    candidateInterpreter.allocateTensors()
-                    val specResult = inspectInterpreterSpec(candidateInterpreter)
-                    if (specResult is VisionContract.SpecValidationResult.Valid) {
-                        val precisionTag = if (precisionLossAllowed) "FP16 [진단 전용]" else "FP32"
+                candidateInterpreter = Interpreter(mappedBuffer, options)
+                candidateInterpreter.allocateTensors()
+                when (val specResult = inspectInterpreterSpec(candidateInterpreter)) {
+                    is VisionContract.SpecValidationResult.Valid -> {
                         return InferenceSession(
                             interpreter = candidateInterpreter,
-                            gpuDelegate = delegate,
+                            gpuDelegate = null,
                             mappedBuffer = mappedBuffer,
-                            backendType = VisionBackendType.GPU,
+                            backendType = VisionBackendType.CPU,
                             cpuThreads = cpuThreads,
-                            backendDescription = "LiteRT GPU $precisionTag (GpuDelegate · 잔여 CPU ${cpuThreads}스레드)",
+                            backendDescription = "LiteRT CPU FP32 [진단 전용] (XNNPACK, ${cpuThreads}스레드)",
                         )
-                    } else {
-                        throw IllegalArgumentException((specResult as VisionContract.SpecValidationResult.Invalid).detail)
+                    }
+                    is VisionContract.SpecValidationResult.Invalid -> {
+                        throw IllegalArgumentException(specResult.detail)
                     }
                 }
             } catch (t: Throwable) {
-                // Guarantee candidate locals are cleaned up immediately on failure
                 runCatching { candidateInterpreter?.close() }
-                runCatching { delegate?.close() }
-                // Fall back to CPU below
+                throw t
             }
         }
 
-        // Build CPU Session
+        // Requested GPU
+        if (!gpuEnvironment.isGpuSupported()) {
+            throw IllegalStateException("LiteRT GPU delegate is not supported on this device.")
+        }
+
+        val effectivePrecisionLoss = if (inferencePolicy.allowCpuReferenceForTesting) {
+            precisionLossAllowed
+        } else {
+            false
+        }
+
+        var delegate: GpuDelegate? = null
         var candidateInterpreter: Interpreter? = null
         try {
+            delegate = gpuEnvironment.createDelegate(effectivePrecisionLoss)
             val options = Interpreter.Options().apply {
+                addDelegate(delegate)
                 setNumThreads(cpuThreads)
-                setUseXNNPACK(true)
             }
             candidateInterpreter = Interpreter(mappedBuffer, options)
             candidateInterpreter.allocateTensors()
             when (val specResult = inspectInterpreterSpec(candidateInterpreter)) {
                 is VisionContract.SpecValidationResult.Valid -> {
+                    val precisionTag = if (effectivePrecisionLoss) "FP16 [진단 전용]" else "FP32"
                     return InferenceSession(
                         interpreter = candidateInterpreter,
-                        gpuDelegate = null,
+                        gpuDelegate = delegate,
                         mappedBuffer = mappedBuffer,
-                        backendType = VisionBackendType.CPU,
+                        backendType = VisionBackendType.GPU,
                         cpuThreads = cpuThreads,
-                        backendDescription = if (requestedBackend == VisionBackendType.GPU) {
-                            "LiteRT CPU FP32 (XNNPACK, ${cpuThreads}스레드 · GPU 미지원 폴백)"
-                        } else {
-                            "LiteRT CPU FP32 (XNNPACK, ${cpuThreads}스레드)"
-                        },
+                        backendDescription = "LiteRT GPU $precisionTag (GpuDelegate · 잔여 CPU ${cpuThreads}스레드)",
                     )
                 }
                 is VisionContract.SpecValidationResult.Invalid -> {
@@ -246,7 +294,9 @@ class LiteRtVisionSegmenter(
                 }
             }
         } catch (t: Throwable) {
+            // Guarantee candidate locals are cleaned up immediately on failure
             runCatching { candidateInterpreter?.close() }
+            runCatching { delegate?.close() }
             throw t
         }
     }
@@ -265,6 +315,7 @@ class LiteRtVisionSegmenter(
                 configuredCpuThreads = newSession.cpuThreads
                 activeBackendDescription = newSession.backendDescription
             } else {
+                configuredBackend = VisionBackendType.GPU
                 activeBackendDescription = "N/A (모델 미적용)"
             }
         }
@@ -273,26 +324,31 @@ class LiteRtVisionSegmenter(
     }
 
     /**
-     * Reconfigures the backend (CPU or GPU) and thread count for the active model.
-     * Preserves existing session if candidate initialization fails.
+     * Reconfigures the backend (GPU only in production, or CPU if explicitly allowed for testing).
+     * Preserves existing valid session if candidate initialization fails and propagates diagnostic failure.
      */
     fun configureBackend(
         backend: VisionBackendType,
         threads: Int = configuredCpuThreads,
         precisionLossAllowed: Boolean = false,
     ) {
-        synchronized(lock) {
-            configuredBackend = backend
-            configuredCpuThreads = threads
+        if (backend == VisionBackendType.CPU && !inferencePolicy.allowCpuReferenceForTesting) {
+            throw IllegalArgumentException(
+                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+            )
         }
+        val targetThreads = threads.coerceIn(1, 8)
         runOnInferenceThread {
-            val mapped = synchronized(lock) { activeSession?.mappedBuffer } ?: return@runOnInferenceThread
-            try {
-                val candidate = buildSession(mapped, backend, threads, precisionLossAllowed)
-                commitSession(candidate)
-            } catch (t: Throwable) {
-                // Keep existing valid session untouched
-            }
+            val mapped = synchronized(lock) {
+                if (activeSession == null) {
+                    configuredBackend = backend
+                    configuredCpuThreads = targetThreads
+                    return@runOnInferenceThread
+                }
+                activeSession?.mappedBuffer
+            } ?: return@runOnInferenceThread
+            val candidate = buildSession(mapped, backend, targetThreads, precisionLossAllowed)
+            commitSession(candidate)
         }
     }
 
@@ -348,12 +404,14 @@ class LiteRtVisionSegmenter(
         threads: Int = configuredCpuThreads,
         precisionLossAllowed: Boolean = false,
     ) {
-        synchronized(lock) {
-            configuredBackend = backend
-            configuredCpuThreads = threads
+        if (backend == VisionBackendType.CPU && !inferencePolicy.allowCpuReferenceForTesting) {
+            throw IllegalArgumentException(
+                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+            )
         }
+        val targetThreads = threads.coerceIn(1, 8)
         runOnInferenceThread {
-            val candidate = buildSession(session.mappedBuffer, backend, threads, precisionLossAllowed)
+            val candidate = buildSession(session.mappedBuffer, backend, targetThreads, precisionLossAllowed)
             commitSession(candidate)
         }
     }
@@ -361,8 +419,16 @@ class LiteRtVisionSegmenter(
     fun loadModelFile(file: File): VisionContract.SpecValidationResult {
         return when (val outcome = prepareModelSession(file)) {
             is PrepareOutcome.Valid -> {
-                activatePreparedSession(outcome.session)
-                VisionContract.SpecValidationResult.Valid
+                try {
+                    activatePreparedSession(outcome.session)
+                    VisionContract.SpecValidationResult.Valid
+                } catch (t: Throwable) {
+                    VisionContract.SpecValidationResult.Invalid(
+                        code = "gpu_activation_failed",
+                        detail = "${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)}",
+                        koreanMessage = "GPU 가속 초기화에 실패했습니다 (${t.javaClass.simpleName}).",
+                    )
+                }
             }
             is PrepareOutcome.Invalid -> outcome.failure
         }
@@ -371,12 +437,13 @@ class LiteRtVisionSegmenter(
     fun runIfLoaded(
         inputByteBuffer: ByteBuffer,
         produceOverlayBitmap: Boolean = true,
+        transform: UprightCropRect? = null,
     ): VisionInferenceOutput? {
         return runOnInferenceThread {
             synchronized(lock) {
                 val session = activeSession ?: return@runOnInferenceThread null
                 inputByteBuffer.rewind()
-                outputByteBuffer.rewind()
+                outputByteBuffer.clear()
 
                 val invokeStart = SystemClock.elapsedRealtimeNanos()
                 session.interpreter.run(inputByteBuffer, outputByteBuffer)
@@ -388,6 +455,13 @@ class LiteRtVisionSegmenter(
                     probabilities = outputFloatArray,
                     outClassMask = reusableClassMask,
                     outOverlayArgb = if (produceOverlayBitmap) reusableOverlayArgb else null,
+                    width = VisionContract.MODEL_WIDTH,
+                    height = VisionContract.MODEL_HEIGHT,
+                    numClasses = VisionContract.MODEL_CLASSES,
+                    roiStartRow = VisionContract.ROI_START_ROW,
+                    transform = transform,
+                    modelWidth = VisionContract.MODEL_INPUT_WIDTH,
+                    modelHeight = VisionContract.MODEL_INPUT_HEIGHT,
                 )
                 val bitmap = if (produceOverlayBitmap) {
                     Bitmap.createBitmap(
@@ -422,7 +496,7 @@ class LiteRtVisionSegmenter(
             synchronized(lock) {
                 val session = checkNotNull(activeSession) { "Session not loaded" }
                 inputByteBuffer.rewind()
-                outputByteBuffer.rewind()
+                outputByteBuffer.clear()
                 val start = SystemClock.elapsedRealtimeNanos()
                 session.interpreter.run(inputByteBuffer, outputByteBuffer)
                 val duration = (SystemClock.elapsedRealtimeNanos() - start).coerceAtLeast(0L)
@@ -487,12 +561,19 @@ class LiteRtVisionSegmenter(
             height: Int = VisionContract.MODEL_HEIGHT,
             numClasses: Int = VisionContract.MODEL_CLASSES,
             roiStartRow: Int = VisionContract.ROI_START_ROW,
+            transform: UprightCropRect? = null,
+            modelWidth: Int = width,
+            modelHeight: Int = height,
         ): VisionSegmentationSummary {
-            val pixelCount = width * height
-            require(probabilities.size >= pixelCount * numClasses) {
-                "Probabilities array too small: ${probabilities.size} < ${pixelCount * numClasses}"
+            require(width > 0 && height > 0 && modelWidth > 0 && modelHeight > 0 && numClasses > 0) {
+                "Dimensions must be positive: width=$width, height=$height, modelWidth=$modelWidth, modelHeight=$modelHeight, numClasses=$numClasses"
             }
-            require(outClassMask.size >= pixelCount && (outOverlayArgb == null || outOverlayArgb.size >= pixelCount)) {
+            val modelPixelCount = modelWidth * modelHeight
+            require(probabilities.size >= modelPixelCount * numClasses) {
+                "Probabilities array too small: ${probabilities.size} < ${modelPixelCount * numClasses}"
+            }
+            val outputPixelCount = width * height
+            require(outClassMask.size >= outputPixelCount && (outOverlayArgb == null || outOverlayArgb.size >= outputPixelCount)) {
                 "Output mask arrays too small for ${width}x${height}"
             }
 
@@ -510,48 +591,147 @@ class LiteRtVisionSegmenter(
             var rightWalkable = 0
             var rightTotal = 0
 
-            var probOffset = 0
-            var pixelIndex = 0
-            for (y in 0 until height) {
-                val inRoi = y >= roiStartRow
-                for (x in 0 until width) {
-                    var bestClass = 0
-                    var bestProb = probabilities[probOffset]
-                    for (c in 1 until numClasses) {
-                        val p = probabilities[probOffset + c]
-                        if (p > bestProb) {
-                            bestProb = p
-                            bestClass = c
-                        }
-                    }
-                    probOffset += numClasses
+            val isInverseMapping = (transform != null && transform.strategy != VisionPreprocessingStrategy.LEGACY_CROP) ||
+                modelWidth != width || modelHeight != height
 
-                    outClassMask[pixelIndex] = bestClass.toByte()
-                    outOverlayArgb?.set(pixelIndex, colors[bestClass])
-                    classCounts[bestClass]++
-
-                    if (inRoi) {
-                        val isWalkable = walkableFlags[bestClass]
-                        when {
-                            x < thirdWidth -> {
-                                leftTotal++
-                                if (isWalkable) leftWalkable++
+            if (!isInverseMapping) {
+                var probOffset = 0
+                var pixelIndex = 0
+                for (y in 0 until height) {
+                    val inRoi = y >= roiStartRow
+                    for (x in 0 until width) {
+                        var bestClass = 0
+                        var bestProb = probabilities[probOffset]
+                        for (c in 1 until numClasses) {
+                            val p = probabilities[probOffset + c]
+                            if (p > bestProb) {
+                                bestProb = p
+                                bestClass = c
                             }
-                            x < twoThirdWidth -> {
-                                centerTotal++
-                                if (isWalkable) {
-                                    centerWalkable++
-                                } else {
-                                    centerBlockedCounts[bestClass]++
+                        }
+                        probOffset += numClasses
+
+                        outClassMask[pixelIndex] = bestClass.toByte()
+                        outOverlayArgb?.set(pixelIndex, colors[bestClass])
+                        classCounts[bestClass]++
+
+                        if (inRoi) {
+                            val isWalkable = walkableFlags[bestClass]
+                            when {
+                                x < thirdWidth -> {
+                                    leftTotal++
+                                    if (isWalkable) leftWalkable++
+                                }
+                                x < twoThirdWidth -> {
+                                    centerTotal++
+                                    if (isWalkable) {
+                                        centerWalkable++
+                                    } else {
+                                        centerBlockedCounts[bestClass]++
+                                    }
+                                }
+                                else -> {
+                                    rightTotal++
+                                    if (isWalkable) rightWalkable++
                                 }
                             }
-                            else -> {
-                                rightTotal++
-                                if (isWalkable) rightWalkable++
+                        }
+                        pixelIndex++
+                    }
+                }
+            } else {
+                // Inverse-map model tensor probabilities into the canonical upright coordinate space (width x height).
+                // Each upright grid pixel (ux, uy) represents an exact point in the unpadded camera frame.
+                // Model tensor has dimensions (modelWidth x modelHeight), with row stride = modelWidth.
+                // Implemented with zero per-pixel heap allocations (no Pair or boxed Float instances).
+                var pixelIndex = 0
+                val cLeft: Int
+                val cTop: Int
+                val cWidth: Float
+                val cHeight: Float
+                val isRot: Boolean
+
+                if (transform != null) {
+                    cLeft = transform.contentLeft.coerceIn(0, modelWidth - 1)
+                    cTop = transform.contentTop.coerceIn(0, modelHeight - 1)
+                    cWidth = transform.contentWidth.toFloat().coerceIn(1f, (modelWidth - cLeft).toFloat())
+                    cHeight = transform.contentHeight.toFloat().coerceIn(1f, (modelHeight - cTop).toFloat())
+                    isRot = transform.isRotatedClockwise
+                } else {
+                    cLeft = 0
+                    cTop = 0
+                    cWidth = modelWidth.toFloat()
+                    cHeight = modelHeight.toFloat()
+                    isRot = false
+                }
+
+                val cRight = (cLeft + cWidth.toInt() - 1).coerceIn(cLeft, modelWidth - 1)
+                val cBottom = (cTop + cHeight.toInt() - 1).coerceIn(cTop, modelHeight - 1)
+                val invWidth = 1.0f / width
+                val invHeight = 1.0f / height
+
+                for (uy in 0 until height) {
+                    val inRoi = uy >= roiStartRow
+                    val vNorm = (uy + 0.5f) * invHeight
+                    val rowMCol = if (isRot) {
+                        (cLeft + (1.0f - vNorm).coerceIn(0f, 1f) * cWidth).toInt().coerceIn(cLeft, cRight)
+                    } else 0
+                    val rowMRow = if (!isRot) {
+                        (cTop + vNorm.coerceIn(0f, 1f) * cHeight).toInt().coerceIn(cTop, cBottom)
+                    } else 0
+
+                    for (ux in 0 until width) {
+                        val uNorm = (ux + 0.5f) * invWidth
+                        val mCol: Int
+                        val mRow: Int
+                        if (isRot) {
+                            mCol = rowMCol
+                            mRow = (cTop + uNorm.coerceIn(0f, 1f) * cHeight).toInt().coerceIn(cTop, cBottom)
+                        } else {
+                            mCol = (cLeft + uNorm.coerceIn(0f, 1f) * cWidth).toInt().coerceIn(cLeft, cRight)
+                            mRow = rowMRow
+                        }
+                        val safeCol = mCol.coerceIn(0, modelWidth - 1)
+                        val safeRow = mRow.coerceIn(0, modelHeight - 1)
+                        val modelProbOffset = (safeRow * modelWidth + safeCol) * numClasses
+
+                        var bestClass = 0
+                        var bestProb = probabilities[modelProbOffset]
+                        for (c in 1 until numClasses) {
+                            val p = probabilities[modelProbOffset + c]
+                            if (p > bestProb) {
+                                bestProb = p
+                                bestClass = c
                             }
                         }
+
+                        outClassMask[pixelIndex] = bestClass.toByte()
+                        outOverlayArgb?.set(pixelIndex, colors[bestClass])
+                        classCounts[bestClass]++
+
+                        if (inRoi) {
+                            val isWalkable = walkableFlags[bestClass]
+                            when {
+                                ux < thirdWidth -> {
+                                    leftTotal++
+                                    if (isWalkable) leftWalkable++
+                                }
+                                ux < twoThirdWidth -> {
+                                    centerTotal++
+                                    if (isWalkable) {
+                                        centerWalkable++
+                                    } else {
+                                        centerBlockedCounts[bestClass]++
+                                    }
+                                }
+                                else -> {
+                                    rightTotal++
+                                    if (isWalkable) rightWalkable++
+                                }
+                            }
+                        }
+                        pixelIndex++
                     }
-                    pixelIndex++
                 }
             }
 

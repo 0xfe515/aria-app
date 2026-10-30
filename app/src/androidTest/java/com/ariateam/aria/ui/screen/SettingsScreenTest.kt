@@ -18,6 +18,10 @@ import com.ariateam.aria.R
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceState
 import com.ariateam.aria.ui.theme.AriaTheme
+import com.ariateam.aria.vision.CameraSessionStatus
+import com.ariateam.aria.vision.VisionModelMetadata
+import com.ariateam.aria.vision.VisionModelState
+import com.ariateam.aria.vision.VisionUiState
 import org.junit.Rule
 import org.junit.Test
 
@@ -215,8 +219,6 @@ class SettingsScreenTest {
                         onStopCamera = {},
                         onSelectPipelineMode = {},
                         onResetMetrics = {},
-                        onImportModelClick = {},
-                        onClearModelClick = {},
                         onOpenAppSettings = {},
                     )
                 } else {
@@ -253,6 +255,62 @@ class SettingsScreenTest {
         compose.runOnIdle {
             org.junit.Assert.assertEquals(2, backCount)
         }
+    }
+
+    @Test fun visionDiagnosticsRemovesModelAndBackendControlsAndReportsOnlyActiveBackend() {
+        val uiState = mutableStateOf(
+            VisionUiState(activeBackendDescription = "LiteRT GPU FP32"),
+        )
+        val modelState = mutableStateOf<VisionModelState>(
+            VisionModelState.Ready(
+                VisionModelMetadata(
+                    displayName = "production-model",
+                    sizeBytes = 1L,
+                    sha256 = "hash",
+                    importedAtMillis = 0L,
+                ),
+            ),
+        )
+        compose.setContent {
+            AriaTheme {
+                VisionDiagnosticsScreen(
+                    uiState = uiState.value,
+                    modelState = modelState.value,
+                    onBack = {},
+                    onStartCamera = { _, _, _ -> },
+                    onStopCamera = {},
+                    onSelectPipelineMode = {},
+                    onResetMetrics = {},
+                    onOpenAppSettings = {},
+                )
+            }
+        }
+
+        listOf(
+            "GPU 최적화 모델 (FP32)",
+            "기본 원본 복원",
+            "새 모델 불러오기 (.tflite)",
+            "모델 해제",
+            "CPU 4스레드",
+            "CPU 2스레드",
+            "CPU 1스레드",
+            "GPU 대리자",
+        ).forEach { label -> compose.onNodeWithText(label).assertDoesNotExist() }
+        compose.onNodeWithText("GPU", substring = true).assertDoesNotExist()
+
+        compose.runOnIdle {
+            uiState.value = uiState.value.copy(cameraStatus = CameraSessionStatus.Running)
+        }
+        compose.onNodeWithText("실제 추론 백엔드: LiteRT GPU FP32").performScrollTo().assertIsDisplayed()
+
+        compose.runOnIdle {
+            uiState.value = uiState.value.copy(cameraStatus = CameraSessionStatus.Error)
+            modelState.value = VisionModelState.Error("Model rejected", "invalid model")
+        }
+        compose.onNodeWithText("추론 백엔드: 모델 오류로 추론할 수 없습니다")
+            .performScrollTo()
+            .assertIsDisplayed()
+        compose.onNodeWithText("GPU", substring = true).assertDoesNotExist()
     }
 
     @Test fun licensesMenuIsReachableAndNavigatesBack() {

@@ -129,5 +129,27 @@ class PendingCameraStartGate {
         fun isCameraAllowedDestination(destination: DebugDestination): Boolean =
             destination == DebugDestination.VisionDiagnostics ||
                 destination == DebugDestination.PresentationDemo
+
+        fun isHomeCameraAllowed(
+            selectedTab: Int,
+            hasBeenAdmitted: Boolean,
+            isStartupSettingsVisible: Boolean = false,
+            permissionLossDetected: Boolean = false,
+        ): Boolean =
+            selectedTab == 0 && hasBeenAdmitted && !isStartupSettingsVisible && !permissionLossDetected
+
+        fun isCameraEligibleScreen(
+            selectedTab: Int,
+            debugDestination: DebugDestination,
+            showLicenses: Boolean,
+            hasBeenAdmitted: Boolean,
+            isStartupSettingsVisible: Boolean = false,
+            permissionLossDetected: Boolean = false,
+        ): Boolean =
+            if (selectedTab == 0) {
+                isHomeCameraAllowed(selectedTab, hasBeenAdmitted, isStartupSettingsVisible, permissionLossDetected)
+            } else {
+                selectedTab == 1 && !showLicenses && isCameraAllowedDestination(debugDestination)
+            }
     }
 }
