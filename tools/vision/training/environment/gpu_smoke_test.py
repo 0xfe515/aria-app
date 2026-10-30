@@ -11,11 +11,48 @@ NOTE ON SCOPE:
 """
 
 import argparse
+import glob
 import os
+import site
 import sys
 import tempfile
 import time
 import numpy as np
+
+
+def _ensure_wsl_cuda_env() -> None:
+    if os.name != "posix" or os.environ.get("_ARIA_WSL_CUDA_ENV_SET") == "1":
+        return
+
+    lib_dirs: list[str] = []
+    if os.path.isdir("/usr/lib/wsl/lib"):
+        lib_dirs.append("/usr/lib/wsl/lib")
+
+    for sp in site.getsitepackages():
+        for d in sorted(glob.glob(os.path.join(sp, "nvidia", "*", "lib"))):
+            if os.path.isdir(d) and d not in lib_dirs:
+                lib_dirs.append(d)
+
+    bin_dirs: list[str] = []
+    for sp in site.getsitepackages():
+        for d in sorted(glob.glob(os.path.join(sp, "nvidia", "*", "bin"))):
+            if os.path.isdir(d) and d not in bin_dirs:
+                bin_dirs.append(d)
+
+    current_ld = [p for p in os.environ.get("LD_LIBRARY_PATH", "").split(":") if p]
+    missing_ld = [p for p in lib_dirs if p not in current_ld]
+
+    current_path = [p for p in os.environ.get("PATH", "").split(":") if p]
+    missing_bin = [p for p in bin_dirs if p not in current_path]
+    if os.path.isdir("/usr/lib/wsl/lib") and "/usr/lib/wsl/lib" not in current_path:
+        missing_bin.append("/usr/lib/wsl/lib")
+
+    if missing_ld or missing_bin:
+        os.environ["LD_LIBRARY_PATH"] = ":".join(lib_dirs + current_ld)
+        os.environ["PATH"] = ":".join(missing_bin + current_path)
+        os.environ["_ARIA_WSL_CUDA_ENV_SET"] = "1"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
 
 
 def parse_args():
@@ -71,6 +108,7 @@ def build_smoke_model(height: int, width: int, num_classes: int, num_hazards: in
 
 
 def main():
+    _ensure_wsl_cuda_env()
     args = parse_args()
 
     print(f"=== Aria Portrait Training Environment Smoke Test ===")
@@ -128,6 +166,14 @@ def main():
 
         grads = tape.gradient(total_loss, model.trainable_variables)
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+        if step == 1:
+            sem_dev = preds["semantic"].device
+            loss_dev = total_loss.device
+            print(f"  Step 1 tensor placement: semantic={sem_dev}, total_loss={loss_dev}")
+            if args.require_gpu and ("GPU:0" not in sem_dev or "GPU:0" not in loss_dev):
+                print(f"ERROR: --require-gpu specified but tensors placed on {sem_dev} / {loss_dev}.")
+                sys.exit(1)
 
         if step % 25 == 0 or step == 1 or step == args.steps:
             elapsed = time.time() - start_time
