@@ -120,10 +120,21 @@ original files:
    mapped to /mnt/c) is cached with @lru_cache so that subprocess execution
    occurs only once per drive, completely avoiding per-frame or per-epoch
    subprocess overhead.
-3. **Strict path containment**: Subpaths are resolved under the translated drive
-   root. Path traversal attempts with .. that resolve outside the drive root
-   are caught and rejected with an explicit PortraitDatasetError.
-4. **Validation and rejection**:
+3. **Per-dataset parent directory resolution caching**: During manifest record
+   validation, canonical parent directory resolution is cached within the scope
+   of the individual dataset construction (`parent_cache`). Because manifest
+   records share a small number of distinct parent directories on the mounted
+   drive, repeated ancestor filesystem traversals over 9P (`p9_client_rpc`) are
+   eliminated while resolving each parent directory exactly once. The cache scope
+   is strictly local to `_validate_records` and automatically discarded after
+   construction, preventing any cross-dataset stale state.
+4. **Leaf symlink resolution and containment**: Non-symlink leaf files avoid
+   re-resolving the canonical parent chain. Explicit leaf symlinks and directory
+   symlinks are resolved and strictly validated to ensure they remain inside the
+   translated drive root via `.relative_to(translated_root)`. Path traversal
+   attempts with `..` or symlinks that resolve outside the drive root are caught
+   and rejected with an explicit `PortraitDatasetError`.
+5. **Validation and rejection**:
    - Drive-relative paths (e.g. C:foo) are rejected as ambiguous.
    - UNC paths (e.g. \\server\share\..., //..., \\?\...) are rejected.
    - Arbitrary drive mount locations are never guessed. If wslpath is missing,
@@ -132,10 +143,10 @@ original files:
      immediately.
    - Native absolute paths (Windows paths on Windows, POSIX paths on POSIX) are
      validated normally.
-5. **Data integrity and loader contract**: Original image_path, IDs, group
+6. **Data integrity and loader contract**: Original image_path, IDs, group
    IDs, source splits, and image_sha256 metadata are never rewritten. The
    resolved file must exist on disk and is read only to derive exact letterbox
    geometry and padding bounds.
-6. **Environment note**: The actual WSL runtime remains unverified on this host
-   because WSL and WSL GPU are not installed; cross-platform resolution is
-   verified via mocked platform and resolver unit tests.
+7. **Environment note**: Path resolution safety is verified via mocked platform
+   unit tests in Windows environments and real Linux symlink and bounded path
+   performance verification in WSL.

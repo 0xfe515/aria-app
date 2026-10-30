@@ -16,9 +16,19 @@ from PIL import Image
 from tools.vision.training.data import CLASS_NAMES, HAZARD_NAMES, convert_inventory, inventory_dataset, load_inventory_manifest
 import subprocess
 from unittest.mock import Mock, patch
-import subprocess
-from unittest.mock import Mock, patch
-from tools.vision.training.train_data import PortraitDataset, PortraitDatasetError, _resolve_original_image_path, _wsl_drive_root, _resolve_original_image_path, _wsl_drive_root, _resolve_original_image_path, _wsl_drive_root
+from tools.vision.training.train_data import PortraitDataset, PortraitDatasetError, _resolve_original_image_path, _wsl_drive_root
+
+
+def _can_create_symlinks() -> bool:
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "probe_src"
+            src.write_text("ok")
+            dst = Path(td) / "probe_dst"
+            dst.symlink_to(src)
+            return True
+    except OSError:
+        return False
 
 
 HEIGHT = 512
@@ -256,6 +266,282 @@ class PortraitDatasetTests(unittest.TestCase):
                     _resolve_original_image_path(r"C:\..\..\outside.jpg", "rec-escape1", is_windows=False)
                 with self.assertRaisesRegex(PortraitDatasetError, "escapes drive root"):
                     _resolve_original_image_path(r"C:\folder\..\..\..\outside.jpg", "rec-escape2", is_windows=False)
+
+    def test_wsl_path_parent_caching_and_leaf_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            folder = mock_mount / "Users" / "felice" / "data"
+            folder.mkdir(parents=True)
+            f1 = folder / "img1.jpg"
+            f2 = folder / "img2.jpg"
+            f1.write_bytes(b"1")
+            f2.write_bytes(b"2")
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                parent_cache: dict[Path, Path] = {}
+                res1 = _resolve_original_image_path(
+                    r"C:\Users\felice\data\img1.jpg", "rec-1", is_windows=False, parent_cache=parent_cache
+                )
+                self.assertEqual(res1, f1.resolve())
+                self.assertIn(folder.resolve(), parent_cache.values())
+                cached_count_before = len(parent_cache)
+
+                res2 = _resolve_original_image_path(
+                    r"C:\Users\felice\data\img2.jpg", "rec-2", is_windows=False, parent_cache=parent_cache
+                )
+                self.assertEqual(res2, f2.resolve())
+                self.assertEqual(len(parent_cache), cached_count_before)
+
+    def test_wsl_path_leaf_symlink_inside_and_outside_drive_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            folder = mock_mount / "Users" / "felice"
+            folder.mkdir(parents=True)
+            real_file = folder / "target.jpg"
+            real_file.write_bytes(b"target")
+
+            outside_dir = Path(temporary) / "outside"
+            outside_dir.mkdir()
+            outside_file = outside_dir / "outside.jpg"
+            outside_file.write_bytes(b"outside")
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                # 1. Leaf symlink pointing inside drive root
+                orig_resolve = Path.resolve
+                def mock_resolve_leaf(self, *args, **kwargs):
+                    if "sym_in" in str(self):
+                        return real_file.resolve()
+                    if "sym_out" in str(self):
+                        return outside_file.resolve()
+                    return orig_resolve(self, *args, **kwargs)
+
+                with patch.object(Path, "is_symlink", return_value=True), \
+                     patch.object(Path, "resolve", mock_resolve_leaf):
+                    res = _resolve_original_image_path(
+                        r"C:\Users\felice\sym_in.jpg", "rec-sym-in", is_windows=False
+                    )
+                    self.assertEqual(res, real_file.resolve())
+
+                    # 2. Leaf symlink pointing outside drive root
+                    with self.assertRaisesRegex(PortraitDatasetError, "escapes drive root"):
+                        _resolve_original_image_path(
+                            r"C:\Users\felice\sym_out.jpg", "rec-sym-out", is_windows=False
+                        )
+
+    def test_wsl_path_ancestor_symlink_escape_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            outside_dir = Path(temporary) / "outside"
+            outside_dir.mkdir()
+
+            orig_resolve = Path.resolve
+            def mock_resolve_dir(self, *args, **kwargs):
+                if "sym_dir" in str(self):
+                    return outside_dir.resolve()
+                return orig_resolve(self, *args, **kwargs)
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                with patch.object(Path, "resolve", mock_resolve_dir):
+                    with self.assertRaisesRegex(PortraitDatasetError, "escapes drive root"):
+                        _resolve_original_image_path(
+                            r"C:\sym_dir\file.jpg", "rec-sym-dir", is_windows=False
+                        )
+
+    def test_parent_cache_scope_resets_across_dataset_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mock_mount = root / "mnt_c"
+            orig_dir = mock_mount / "Users" / "felice" / "Desktop" / "dataset" / "original"
+            orig_dir.mkdir(parents=True)
+            original_file = orig_dir / "sample_0.jpg"
+            Image.new("RGB", (100, 100), (10, 20, 30)).save(original_file)
+
+            conv_dir = root / "converted_data"
+            conv_dir.mkdir()
+            windows_path = r"C:\Users\felice\Desktop\dataset\original\sample_0.jpg"
+            row1 = _record(conv_dir, "sample_0")
+            row1["image_path"] = windows_path
+            manifest1 = _manifest(conv_dir, [row1])
+
+            row2 = _record(conv_dir, "sample_1")
+            row2["image_path"] = windows_path
+            manifest2 = _manifest(conv_dir, [row2])
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run, \
+                 patch("tools.vision.training.train_data._resolve_original_image_path", wraps=_resolve_original_image_path) as spy_resolve:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+
+                ds1 = PortraitDataset(manifest1, split="train", _is_windows=False)
+                cache1 = spy_resolve.call_args[1].get("parent_cache")
+                self.assertIsInstance(cache1, dict)
+
+                ds2 = PortraitDataset(manifest2, split="train", _is_windows=False)
+                cache2 = spy_resolve.call_args[1].get("parent_cache")
+                self.assertIsInstance(cache2, dict)
+                self.assertIsNot(cache1, cache2)
+
+    @unittest.skipUnless(_can_create_symlinks(), "Filesystem does not support symlinks")
+    def test_wsl_real_symlink_leaf_inside_drive_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            folder = mock_mount / "Users" / "felice" / "images"
+            folder.mkdir(parents=True)
+            real_file = folder / "actual_target.jpg"
+            real_file.write_text("image-bytes")
+
+            sym_file = folder / "symlink_leaf.jpg"
+            sym_file.symlink_to(real_file)
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                resolved = _resolve_original_image_path(
+                    r"C:\Users\felice\images\symlink_leaf.jpg",
+                    "rec-sym-leaf",
+                    is_windows=False,
+                )
+                self.assertEqual(resolved, real_file.resolve())
+
+    @unittest.skipUnless(_can_create_symlinks(), "Filesystem does not support symlinks")
+    def test_wsl_real_symlink_leaf_outside_drive_root_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            folder = mock_mount / "Users" / "felice"
+            folder.mkdir(parents=True)
+
+            outside_dir = Path(temporary) / "outside"
+            outside_dir.mkdir()
+            outside_file = outside_dir / "secret.jpg"
+            outside_file.write_text("secret")
+
+            sym_file = folder / "escape_symlink.jpg"
+            sym_file.symlink_to(outside_file)
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                with self.assertRaisesRegex(PortraitDatasetError, "escapes drive root"):
+                    _resolve_original_image_path(
+                        r"C:\Users\felice\escape_symlink.jpg",
+                        "rec-sym-escape",
+                        is_windows=False,
+                    )
+
+    @unittest.skipUnless(_can_create_symlinks(), "Filesystem does not support symlinks")
+    def test_wsl_real_symlink_directory_inside_drive_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            real_dir = mock_mount / "Users" / "felice" / "real_dir"
+            real_dir.mkdir(parents=True)
+            img = real_dir / "pic.jpg"
+            img.write_text("pic")
+
+            sym_dir = mock_mount / "Users" / "felice" / "sym_dir"
+            sym_dir.symlink_to(real_dir)
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                parent_cache = {}
+                resolved = _resolve_original_image_path(
+                    r"C:\Users\felice\sym_dir\pic.jpg",
+                    "rec-sym-dir",
+                    is_windows=False,
+                    parent_cache=parent_cache,
+                )
+                self.assertEqual(resolved, img.resolve())
+                self.assertIn(sym_dir.resolve(), parent_cache.values())
+
+    @unittest.skipUnless(_can_create_symlinks(), "Filesystem does not support symlinks")
+    def test_wsl_real_symlink_parent_outside_with_regular_leaf_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            outside_dir = Path(temporary) / "outside_dir"
+            outside_dir.mkdir()
+            img = outside_dir / "pic.jpg"
+            img.write_text("pic")
+
+            sym_dir = mock_mount / "Users" / "felice" / "bad_sym_dir"
+            sym_dir.parent.mkdir(parents=True)
+            sym_dir.symlink_to(outside_dir)
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                with self.assertRaisesRegex(PortraitDatasetError, "escapes drive root"):
+                    _resolve_original_image_path(
+                        r"C:\Users\felice\bad_sym_dir\pic.jpg",
+                        "rec-bad-dir-escape",
+                        is_windows=False,
+                    )
+
+    @unittest.skipUnless(_can_create_symlinks(), "Filesystem does not support symlinks")
+    def test_wsl_real_symlink_parent_outside_but_leaf_symlink_back_inside_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            real_inside_dir = mock_mount / "Users" / "felice" / "data"
+            real_inside_dir.mkdir(parents=True)
+            real_image = real_inside_dir / "real_target.jpg"
+            real_image.write_text("bytes")
+
+            outside_dir = Path(temporary) / "outside_dir"
+            outside_dir.mkdir()
+            # leaf symlink inside outside_dir points back to real_inside_dir/real_target.jpg
+            leaf_link = outside_dir / "back_inside.jpg"
+            leaf_link.symlink_to(real_image)
+
+            sym_dir = mock_mount / "Users" / "felice" / "sym_to_outside"
+            sym_dir.symlink_to(outside_dir)
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                parent_cache = {}
+                resolved = _resolve_original_image_path(
+                    r"C:\Users\felice\sym_to_outside\back_inside.jpg",
+                    "rec-back-inside",
+                    is_windows=False,
+                    parent_cache=parent_cache,
+                )
+                self.assertEqual(resolved, real_image.resolve())
+
+    @unittest.skipUnless(_can_create_symlinks(), "Filesystem does not support symlinks")
+    def test_wsl_real_symlink_regular_leaf_and_direct_symlink_equivalence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            mock_mount = Path(temporary) / "mnt_c"
+            mock_mount.mkdir()
+            folder = mock_mount / "Users" / "felice" / "folder"
+            folder.mkdir(parents=True)
+            real_file = folder / "img.jpg"
+            real_file.write_text("img")
+
+            link_file = folder / "link.jpg"
+            link_file.symlink_to(real_file)
+
+            with patch("tools.vision.training.train_data.subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(["wslpath", "-u", "C:\\"], 0, stdout=str(mock_mount))
+                parent_cache = {}
+                res_direct = _resolve_original_image_path(
+                    r"C:\Users\felice\folder\img.jpg",
+                    "rec-direct",
+                    is_windows=False,
+                    parent_cache=parent_cache,
+                )
+                res_link = _resolve_original_image_path(
+                    r"C:\Users\felice\folder\link.jpg",
+                    "rec-link",
+                    is_windows=False,
+                    parent_cache=parent_cache,
+                )
+                self.assertEqual(res_direct, real_file.resolve())
+                self.assertEqual(res_link, real_file.resolve())
+                self.assertEqual(res_direct, res_link)
 
     def test_native_windows_and_posix_path_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

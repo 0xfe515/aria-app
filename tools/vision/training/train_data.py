@@ -156,6 +156,7 @@ class PortraitDataset:
         ids: set[str] = set()
         group_splits: dict[str, str] = {}
         hash_splits: dict[str, str] = {}
+        parent_cache: dict[Path, Path] = {}
         for index, raw in enumerate(raw_records):
             if not isinstance(raw, dict):
                 raise PortraitDatasetError(f"Manifest record {index} must be a JSON object.")
@@ -206,6 +207,7 @@ class PortraitDataset:
                 record_id,
                 is_windows=self._is_windows,
                 resolver=self._path_resolver,
+                parent_cache=parent_cache,
             )
             paths: dict[str, Path] = {}
             for key in (
@@ -633,6 +635,7 @@ def _resolve_original_image_path(
     *,
     is_windows: bool | None = None,
     resolver: Any = None,
+    parent_cache: dict[Path, Path] | None = None,
 ) -> Path:
     drive, tail = ntpath.splitdrive(value)
     if drive.startswith(("\\\\", "//")) or value.startswith(("//", "\\\\")):
@@ -661,7 +664,35 @@ def _resolve_original_image_path(
         drive_root = f"{drive[0].upper()}:\\"
         translated_root = _wsl_drive_root(drive_root, resolver=resolver)
         relative = tail.lstrip("\\/").replace("\\", "/")
-        resolved = (translated_root / relative).resolve()
+        if not relative:
+            return translated_root
+
+        unresolved = translated_root / relative
+        leaf = unresolved.name
+        if leaf in (".", ".."):
+            resolved = unresolved.resolve()
+            try:
+                resolved.relative_to(translated_root)
+            except ValueError as exc:
+                raise PortraitDatasetError(
+                    f"Record {record_id} image_path escapes drive root {drive_root!r}: {value!r}."
+                ) from exc
+            return resolved
+
+        parent_path = unresolved.parent
+        if parent_cache is not None and parent_path in parent_cache:
+            resolved_parent = parent_cache[parent_path]
+        else:
+            resolved_parent = parent_path.resolve()
+            if parent_cache is not None:
+                parent_cache[parent_path] = resolved_parent
+
+        candidate = resolved_parent / leaf
+        if candidate.is_symlink():
+            resolved = candidate.resolve()
+        else:
+            resolved = candidate
+
         try:
             resolved.relative_to(translated_root)
         except ValueError as exc:
