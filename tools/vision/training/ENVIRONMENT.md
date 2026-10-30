@@ -210,4 +210,3 @@ wsl.exe -d Ubuntu-22.04 -- bash -lic "cd /mnt/c/Users/felice/orca/aria-app && so
 ## Final independent tooling check (2026-10-30)
 
 Windows existing TF interpreter ran gpu_smoke_test.py with --steps 2 --batch-size 1 and a separate ignored final_cpu_smoke output: checkpoint cold restore, dual-head TFLite export and interpreter inference passed (exit 0). This is CPU synthetic verification only. WSL bash -n and host PowerShell AST parsing passed; neither proves Ubuntu 26.04 installation/runtime support.
-
