@@ -48,36 +48,112 @@ def compute_inverse_sqrt_class_weights(
 ) -> List[float]:
     """Computes clipped inverse square-root frequency weights for class imbalance.
 
-    Weight for class c: w_c = 1 / sqrt(max(freq_c, eps))
-    If normalize is True, weights are normalized so their mean equals 1.0.
-    Finally, weights are clipped to [min_weight, max_weight].
+    Weight for positive class c: w_c = 1 / sqrt(freq_c) where freq_c = count_c / sum(positive_counts).
+    If normalize is True, positive class weights are normalized so their mean equals 1.0.
+    Absent classes (count == 0.0) receive a neutral weight of 1.0 and do not contribute to
+    the positive class normalization or mean calculation.
+    All weights are clipped to [min_weight, max_weight].
+    If all class counts are 0.0 or the input is empty, all classes receive neutral 1.0 (clipped).
 
     Args:
-        frequencies_or_counts: List or sequence of class counts or frequencies.
-        min_weight: Minimum weight clipping threshold (default 0.5).
-        max_weight: Maximum weight clipping threshold (default 3.0).
-        normalize: Whether to normalize mean weight to 1.0 before clipping.
+        frequencies_or_counts: Sequence of non-negative numeric class counts or frequencies.
+        min_weight: Minimum weight clipping threshold (default 0.5, must be > 0).
+        max_weight: Maximum weight clipping threshold (default 3.0, must be >= min_weight).
+        normalize: Whether to normalize positive class mean weight to 1.0 before clipping.
 
     Returns:
         List of clipped float weights with length matching frequencies_or_counts.
+
+    Raises:
+        TypeError: If any count or bound is boolean, non-numeric, or malformed.
+        ValueError: If any count is negative or non-finite, or if bounds are non-positive,
+            non-finite, or min_weight > max_weight.
     """
-    total = sum(frequencies_or_counts)
-    if total <= 0.0:
-        return [1.0] * len(frequencies_or_counts)
+    if isinstance(min_weight, bool) or type(min_weight).__name__ in ("bool", "bool_"):
+        raise TypeError(f"min_weight cannot be boolean, got {min_weight!r}.")
+    if isinstance(max_weight, bool) or type(max_weight).__name__ in ("bool", "bool_"):
+        raise TypeError(f"max_weight cannot be boolean, got {max_weight!r}.")
 
-    raw_weights = []
-    for count in frequencies_or_counts:
-        freq = max(float(count) / total, 1e-8)
-        w = 1.0 / math.sqrt(freq)
-        raw_weights.append(w)
+    if not isinstance(min_weight, (int, float)):
+        if not hasattr(min_weight, "__float__") or isinstance(min_weight, (str, bytes)):
+            raise TypeError(f"min_weight must be numeric, got {type(min_weight).__name__}.")
+    if not isinstance(max_weight, (int, float)):
+        if not hasattr(max_weight, "__float__") or isinstance(max_weight, (str, bytes)):
+            raise TypeError(f"max_weight must be numeric, got {type(max_weight).__name__}.")
 
-    if normalize and len(raw_weights) > 0:
-        mean_w = sum(raw_weights) / len(raw_weights)
-        if mean_w > 0.0:
-            raw_weights = [w / mean_w for w in raw_weights]
+    try:
+        min_w = float(min_weight)
+    except (TypeError, ValueError):
+        raise TypeError(f"min_weight must be numeric, got {type(min_weight).__name__}.")
 
-    clipped_weights = [min(max(w, min_weight), max_weight) for w in raw_weights]
-    return clipped_weights
+    try:
+        max_w = float(max_weight)
+    except (TypeError, ValueError):
+        raise TypeError(f"max_weight must be numeric, got {type(max_weight).__name__}.")
+
+    if not math.isfinite(min_w):
+        raise ValueError(f"min_weight must be finite, got {min_weight}.")
+    if not math.isfinite(max_w):
+        raise ValueError(f"max_weight must be finite, got {max_weight}.")
+    if min_w <= 0.0:
+        raise ValueError(f"min_weight must be strictly positive (> 0), got {min_weight}.")
+    if max_w <= 0.0:
+        raise ValueError(f"max_weight must be strictly positive (> 0), got {max_weight}.")
+    if min_w > max_w:
+        raise ValueError(
+            f"Invalid clipping bounds: min_weight ({min_w}) cannot exceed max_weight ({max_w})."
+        )
+
+    clean_counts: List[float] = []
+    for idx, item in enumerate(frequencies_or_counts):
+        if isinstance(item, bool) or type(item).__name__ in ("bool", "bool_"):
+            raise TypeError(f"Class count at index {idx} cannot be boolean, got {item!r}.")
+        if not isinstance(item, (int, float)):
+            if not hasattr(item, "__float__") or isinstance(item, (str, bytes)):
+                raise TypeError(
+                    f"Class count at index {idx} must be numeric, got {type(item).__name__}."
+                )
+        try:
+            val = float(item)
+        except (TypeError, ValueError):
+            raise TypeError(
+                f"Class count at index {idx} must be numeric, got {type(item).__name__}."
+            )
+        if not math.isfinite(val):
+            raise ValueError(f"Class count at index {idx} must be finite, got {item}.")
+        if val < 0.0:
+            raise ValueError(f"Class count at index {idx} cannot be negative, got {item}.")
+        clean_counts.append(val)
+
+    if not clean_counts:
+        return []
+
+    neutral_weight = min(max(1.0, min_w), max_w)
+    pos_indices = [i for i, c in enumerate(clean_counts) if c > 0.0]
+    if not pos_indices:
+        return [neutral_weight] * len(clean_counts)
+
+    total_pos = sum(clean_counts[i] for i in pos_indices)
+    raw_pos_weights = [
+        1.0 / math.sqrt(max(clean_counts[i] / total_pos, 1e-8)) for i in pos_indices
+    ]
+
+    if normalize and len(raw_pos_weights) > 0:
+        mean_pos = sum(raw_pos_weights) / len(raw_pos_weights)
+        if mean_pos > 0.0:
+            norm_pos_weights = [w / mean_pos for w in raw_pos_weights]
+        else:
+            norm_pos_weights = raw_pos_weights
+    else:
+        norm_pos_weights = raw_pos_weights
+
+    clipped_pos_weights = [min(max(w, min_w), max_w) for w in norm_pos_weights]
+
+    out_weights: List[float] = [neutral_weight] * len(clean_counts)
+    for pos_idx, orig_idx in enumerate(pos_indices):
+        out_weights[orig_idx] = clipped_pos_weights[pos_idx]
+
+    return out_weights
 
 
 # ==============================================================================
