@@ -33,7 +33,7 @@
 2. **Decoupled Full-Pool Random Sampling (`--sampling-seed`) & Exposure Audit**:
    - `--sampling-seed` controls `PortraitDataset` full-pool uniform shuffle (`random.Random(sampling_seed + epoch).shuffle(sorted_records)`) independently of model `--seed` (defaulting to `--seed` when omitted).
    - Samples without replacement within each epoch across the full eligible per-source train pools (`2,550` Cityscapes `train`, `6,647` Surface `train`), reshuffling with `sampling_seed + epoch` on epoch exhaustion.
-   - Note: `PortraitDataset.iter_samples` uses `random.Random(dataset.seed + epoch)` for both record ordering and sample augmentation; changing `--sampling-seed` changes both sample ordering and augmentation RNG relative to `--seed 42` while keeping Phase 2 matched across Arm A and Arm B.
+   - Note: `PortraitDataset._ordered_records` and `PortraitDataset.iter_samples` each create a separate `random.Random(dataset.seed + epoch)` instance with the same seed (`dataset.seed + epoch`) for record ordering and sample augmentation (`_augment_sample`), respectively; changing `--sampling-seed` changes both sample ordering and augmentation RNG relative to `--seed 42` while keeping Phase 2 matched across Arm A and Arm B.
    - Persists per-phase `ordered_samples.jsonl` and `microbatch_exposure.jsonl`, recording ordered sample IDs, group IDs, pool ranks, pre-augmentation manifest pixel/image counts, converted `.semantic.png` mask verification for selected crosswalk-positive samples, and post-augmentation real supervised pixel/image counts (`semantic_source == 1` and `semantic_weight > 0`).
    - Fails clearly before completion if any mixed phase consumes zero real crosswalk supervision.
 3. **Fixed Shared Class Weights**:
