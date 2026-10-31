@@ -1,8 +1,11 @@
 # Model A Controlled Two-Arm Strategy Experiment Runner
 
-**Experiment ID**: `ARIA-STRATEGY-AB-PILOT-20261031`  
-**Preregistered Protocol**: `docs/VISION_TRAINING_STRATEGY_EXPERIMENT_2026-10-31.md`  
-**Runner Module**: `tools/vision/training/strategy_experiment.py`  
+**Experiment ID**: `ARIA-STRATEGY-AB-PILOT-20261031`
+
+**Preregistered Protocol**: `docs/VISION_TRAINING_STRATEGY_EXPERIMENT_2026-10-31.md`
+
+**Runner Module**: `tools/vision/training/strategy_experiment.py`
+
 **Unit Test Suite**: `tools/vision/training/tests/test_strategy_experiment.py`
 
 ## Overview
