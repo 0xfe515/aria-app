@@ -53,15 +53,26 @@ from tools.vision.training.strategy_experiment import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_PHASE1_UPDATES,
     DEFAULT_PHASE2_UPDATES,
+    DEFAULT_SAMPLING_SEED_RERUN,
     EXPECTED_MANIFEST_SHA256,
     EXPECTED_SPLIT_COUNTS,
     MIXED_SCHEDULE_10,
+    PRIOR_SEED42_PHASE_IDS_SHA256,
+    PRIOR_SHARED_INIT_ALL_TENSOR_SHA256,
+    PRIOR_SHARED_INIT_FILE_SHA256,
+    PRIOR_SHARED_INIT_NON_TRAINABLE_TENSOR_SHA256,
+    PRIOR_SHARED_INIT_TRAINABLE_TENSOR_SHA256,
+    audit_and_compare_sampling_seeds,
     audit_manifest_and_compute_shared_weights,
     build_experiment_datasets,
+    build_manifest_train_catalog,
     compare_arms,
+    compute_batch_post_augmentation_exposure,
     compute_subset_macro_iou,
     evaluate_model_a_validation,
+    iter_source_microbatches,
     planned_schedule_sources,
+    reconstruct_phase_sampling_from_manifest,
     run_strategy_experiment,
     summarize_domain_confusion,
     update_confusion_matrix_fast,
@@ -562,6 +573,380 @@ class TestTwoArmExperimentExecution(unittest.TestCase):
             self.assertEqual(h0["trainable_variable_paths"], h1["trainable_variable_paths"])
             self.assertGreater(h0["trainable_variable_count"], 0)
             self.assertGreater(h0["non_trainable_variable_count"], 0)
+
+    def test_real_model_a_previous_shared_init_weights_parity_if_present(self):
+        import gc
+        from tools.vision.training.strategy_experiment import (
+            _default_model_factory,
+            compute_model_weights_tensor_sha256,
+            compute_sha256,
+            set_deterministic_seeds,
+        )
+
+        prior_init = (
+            _REPO_ROOT
+            / "build"
+            / "vision-training"
+            / "ab-strategy-20261031"
+            / "experiment"
+            / "shared_init"
+            / "shared_initial.weights.h5"
+        )
+        if not prior_init.is_file():
+            self.skipTest("Prior shared_initial.weights.h5 not present in this checkout.")
+
+        self.assertEqual(compute_sha256(prior_init), PRIOR_SHARED_INIT_FILE_SHA256)
+
+        keras.backend.clear_session()
+        gc.collect()
+        set_deterministic_seeds(42)
+        model = _default_model_factory(None)
+        model.load_weights(str(prior_init))
+        hashes = compute_model_weights_tensor_sha256(model)
+        del model
+        keras.backend.clear_session()
+        gc.collect()
+
+        self.assertEqual(hashes["all_weights_tensor_sha256"], PRIOR_SHARED_INIT_ALL_TENSOR_SHA256)
+        self.assertEqual(
+            hashes["trainable_weights_tensor_sha256"],
+            PRIOR_SHARED_INIT_TRAINABLE_TENSOR_SHA256,
+        )
+        self.assertEqual(
+            hashes["non_trainable_weights_tensor_sha256"],
+            PRIOR_SHARED_INIT_NON_TRAINABLE_TENSOR_SHA256,
+        )
+        self.assertEqual(hashes["total_variable_count"], 271)
+        self.assertEqual(hashes["trainable_variable_count"], 20)
+        self.assertEqual(hashes["non_trainable_variable_count"], 251)
+
+
+class TestRandomSamplingAndExposureAudit(unittest.TestCase):
+    """Covers sampling_seed decoupling, full-pool sampling, epoch exhaustion, and exposure ledgers."""
+
+    def test_deterministic_repeatability_and_sampling_seed_decoupling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = _write_fixture_dataset(
+                root / "data",
+                city_train_count=6,
+                surface_train_count=6,
+            )
+
+            # 1. Run with seed=42, sampling_seed=None (legacy default -> 42)
+            res_42 = run_strategy_experiment(
+                manifest_path=manifest_path,
+                output_dir=root / "out_42",
+                device="cpu",
+                weights=None,
+                seed=42,
+                sampling_seed=None,
+                batch_size=2,
+                accumulate_steps=1,
+                phase1_updates=2,
+                phase2_updates=2,
+                require_expected_manifest_hash=False,
+                model_factory=_build_stub_model_a,
+            )
+            self.assertEqual(res_42["configuration"]["model_seed"], 42)
+            self.assertEqual(res_42["configuration"]["sampling_seed"], 42)
+            self.assertFalse(res_42["configuration"]["sampling_seed_explicit"])
+
+            # 2. Run with seed=42, sampling_seed=20261031
+            res_new_a = run_strategy_experiment(
+                manifest_path=manifest_path,
+                output_dir=root / "out_new_a",
+                device="cpu",
+                weights=None,
+                seed=42,
+                sampling_seed=DEFAULT_SAMPLING_SEED_RERUN,
+                batch_size=2,
+                accumulate_steps=1,
+                phase1_updates=2,
+                phase2_updates=2,
+                require_expected_manifest_hash=False,
+                model_factory=_build_stub_model_a,
+            )
+            self.assertEqual(res_new_a["configuration"]["model_seed"], 42)
+            self.assertEqual(res_new_a["configuration"]["sampling_seed"], DEFAULT_SAMPLING_SEED_RERUN)
+            self.assertTrue(res_new_a["configuration"]["sampling_seed_explicit"])
+
+            # Model initialization tensor hash must remain identical despite changed sampling_seed
+            init_sha_42 = res_42["shared_initialization"]["shared_initial_tensor_hashes"][
+                "all_weights_tensor_sha256"
+            ]
+            init_sha_new = res_new_a["shared_initialization"]["shared_initial_tensor_hashes"][
+                "all_weights_tensor_sha256"
+            ]
+            self.assertEqual(init_sha_42, init_sha_new)
+
+            # Sample ordering and exposure digests must change when sampling_seed changes
+            self.assertNotEqual(
+                res_42["arms"]["arm_b"]["phase1"]["input_digest"]["ids_sha256"],
+                res_new_a["arms"]["arm_b"]["phase1"]["input_digest"]["ids_sha256"],
+            )
+            self.assertNotEqual(
+                res_42["arms"]["arm_a"]["phase2"]["exposure_audit"]["ordered_sample_ids_sha256"],
+                res_new_a["arms"]["arm_a"]["phase2"]["exposure_audit"]["ordered_sample_ids_sha256"],
+            )
+
+            # 3. Repeat with same (seed=42, sampling_seed=20261031) and explicit initial_weights_path
+            saved_init_path = Path(
+                res_42["shared_initialization"]["shared_initial_weights_path"]
+            )
+            res_new_b = run_strategy_experiment(
+                manifest_path=manifest_path,
+                output_dir=root / "out_new_b",
+                device="cpu",
+                weights=None,
+                seed=42,
+                sampling_seed=DEFAULT_SAMPLING_SEED_RERUN,
+                initial_weights_path=saved_init_path,
+                expected_initial_weights_file_sha256=res_42["shared_initialization"][
+                    "shared_initial_weights_file_sha256"
+                ],
+                expected_initial_tensor_sha256=init_sha_42,
+                batch_size=2,
+                accumulate_steps=1,
+                phase1_updates=2,
+                phase2_updates=2,
+                require_expected_manifest_hash=False,
+                model_factory=_build_stub_model_a,
+            )
+            self.assertEqual(
+                res_new_b["shared_initialization"]["initialization_mode"],
+                "loaded_immutable_shared_init",
+            )
+            self.assertEqual(
+                res_new_a["arms"]["arm_a"]["phase2"]["input_digest"],
+                res_new_b["arms"]["arm_a"]["phase2"]["input_digest"],
+            )
+            self.assertEqual(
+                res_new_a["arms"]["arm_a"]["final_weights_tensor_hashes"]["all_weights_tensor_sha256"],
+                res_new_b["arms"]["arm_a"]["final_weights_tensor_hashes"]["all_weights_tensor_sha256"],
+            )
+            self.assertEqual(
+                res_new_a["arms"]["arm_b"]["final_weights_tensor_hashes"]["all_weights_tensor_sha256"],
+                res_new_b["arms"]["arm_b"]["final_weights_tensor_hashes"]["all_weights_tensor_sha256"],
+            )
+
+            # 4. Mismatched expected initial hash must be rejected
+            with self.assertRaises(ValueError):
+                run_strategy_experiment(
+                    manifest_path=manifest_path,
+                    output_dir=root / "out_bad_init",
+                    device="cpu",
+                    weights=None,
+                    seed=42,
+                    initial_weights_path=saved_init_path,
+                    expected_initial_tensor_sha256="0" * 64,
+                    require_expected_manifest_hash=False,
+                    model_factory=_build_stub_model_a,
+                )
+
+    def test_full_pool_sampling_not_prefix_and_epoch_exhaustion_no_duplicates_or_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Pool of 7 city and 25 surface records (odd counts to test batch_size=2 carry across epochs)
+            manifest_path = _write_fixture_dataset(
+                root / "data",
+                city_train_count=7,
+                surface_train_count=25,
+            )
+            catalog = build_manifest_train_catalog(manifest_path)
+
+            # 1. Small budget (6 Surface presentations out of 25) originates across full pool, not prefix [0..5]
+            rec_small = reconstruct_phase_sampling_from_manifest(
+                catalog,
+                sampling_seed=DEFAULT_SAMPLING_SEED_RERUN,
+                mode="mixed_70_30",
+                updates=1,
+                accumulate_steps=4,
+                batch_size=2,
+                start_epoch=0,
+            )
+            surf_rank = rec_small["source_rank_distribution"]["surface"]
+            self.assertEqual(surf_rank["presentations"], 6)
+            self.assertGreater(surf_rank["sampled_beyond_manifest_prefix_count"], 0)
+            self.assertGreater(surf_rank["sampled_beyond_sorted_prefix_count"], 0)
+            self.assertGreaterEqual(surf_rank["manifest_source_index_max"], 10)
+
+            # 2. Multi-epoch exhaustion on odd pool (7 Cityscapes records, 14 microbatches = 28 presentations = 4 full epochs)
+            datasets = build_experiment_datasets(
+                manifest_path,
+                seed=42,
+                sampling_seed=DEFAULT_SAMPLING_SEED_RERUN,
+            )
+            city_ds = datasets["city_train"]
+            stats: Dict[str, Any] = {}
+            stream = iter_source_microbatches(
+                city_ds,
+                batch_size=2,
+                start_epoch=0,
+                augment=False,
+                stats_out=stats,
+            )
+            drawn_ids: List[str] = []
+            for _ in range(14):
+                b = next(stream)
+                drawn_ids.extend(str(x) for x in b["id"])
+
+            self.assertEqual(len(drawn_ids), 28)
+            self.assertEqual(stats["epochs_started"], 4)
+            self.assertEqual(stats["reshuffles_on_exhaustion"], 3)
+
+            expected_full_set = {f"cityscapes-train-{i:03d}" for i in range(7)}
+            epoch_orders: List[List[str]] = []
+            for ep in range(4):
+                chunk = drawn_ids[ep * 7 : (ep + 1) * 7]
+                # Every epoch chunk has all 7 unique records (0 lost, 0 duplicate within epoch)
+                self.assertEqual(len(chunk), 7)
+                self.assertEqual(set(chunk), expected_full_set)
+                epoch_orders.append(chunk)
+
+            # Reshuffling with sampling_seed + epoch changes order between epochs
+            self.assertNotEqual(epoch_orders[0], epoch_orders[1])
+
+    def test_pre_and_post_augmentation_class_counting_and_ordered_exposure_logs(self):
+        # 1. Synthetic batch with real (source=1, weight=1.0), ignored (source=0/255 or weight=0), and pseudo (source=2, weight=0.25)
+        sem = np.full((2, 4, 6), IGNORE, dtype=np.int32)
+        src = np.zeros((2, 4, 6), dtype=np.uint8)
+        wt = np.zeros((2, 4, 6), dtype=np.float32)
+
+        # Sample 0: 3 pixels road (1), 5 pixels crosswalk (3), 2 pixels pseudo person (4), rest ignored
+        sem[0, 0, :3] = 1
+        src[0, 0, :3] = 1
+        wt[0, 0, :3] = 1.0
+
+        sem[0, 1, :5] = 3
+        src[0, 1, :5] = 1
+        wt[0, 1, :5] = 1.0
+
+        sem[0, 2, :2] = 4
+        src[0, 2, :2] = 2
+        wt[0, 2, :2] = 0.25
+
+        # Sample 0 row 3 has source=1 but weight=0.0 -> must be treated as ignored, not real supervised
+        sem[0, 3, :2] = 3
+        src[0, 3, :2] = 1
+        wt[0, 3, :2] = 0.0
+
+        # Sample 1: 4 pixels sidewalk (2), 0 crosswalk
+        sem[1, 0, :4] = 2
+        src[1, 0, :4] = 1
+        wt[1, 0, :4] = 1.0
+
+        exposure = compute_batch_post_augmentation_exposure(
+            {"semantic": sem, "semantic_source": src, "semantic_weight": wt}
+        )
+        self.assertEqual(exposure["batch_class_pixel_counts"]["road"], 3)
+        self.assertEqual(exposure["batch_class_pixel_counts"]["sidewalk"], 4)
+        self.assertEqual(exposure["batch_class_pixel_counts"]["crosswalk"], 5)
+        self.assertEqual(exposure["batch_class_pixel_counts"]["person"], 0)
+        self.assertEqual(exposure["batch_crosswalk_pixels"], 5)
+        self.assertEqual(exposure["batch_crosswalk_positive_images"], 1)
+        self.assertEqual(exposure["batch_real_supervised_pixels"], 12)
+        self.assertEqual(exposure["batch_pseudo_pixels"], 2)
+        self.assertEqual(exposure["batch_ignored_pixels"], 48 - 12 - 2)
+
+        # 2. Verify JSONL files, non-train exclusion, and clear failure if mixed phase has 0 crosswalk supervision
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = _write_fixture_dataset(
+                root / "data",
+                city_train_count=3,
+                surface_train_count=3,
+            )
+            out_dir = root / "exp_logs"
+            results = run_strategy_experiment(
+                manifest_path=manifest_path,
+                output_dir=out_dir,
+                device="cpu",
+                weights=None,
+                seed=42,
+                sampling_seed=DEFAULT_SAMPLING_SEED_RERUN,
+                batch_size=2,
+                accumulate_steps=2,
+                phase1_updates=1,
+                phase2_updates=2,
+                require_expected_manifest_hash=False,
+                model_factory=_build_stub_model_a,
+            )
+
+            p2_a = results["arms"]["arm_a"]["phase2"]["exposure_audit"]
+            p2_b = results["arms"]["arm_b"]["exposure_audit"]
+            self.assertEqual(
+                p2_a["ordered_samples_jsonl_sha256"],
+                results["arms"]["arm_b"]["phase2"]["exposure_audit"]["ordered_samples_jsonl_sha256"],
+            )
+            samples_lines = (
+                Path(p2_a["ordered_samples_jsonl_path"]).read_text(encoding="utf-8").strip().splitlines()
+            )
+            mb_lines = (
+                Path(p2_a["microbatch_exposure_jsonl_path"]).read_text(encoding="utf-8").strip().splitlines()
+            )
+            self.assertEqual(len(samples_lines), 8)
+            self.assertEqual(len(mb_lines), 4)
+            for line in samples_lines:
+                row = json.loads(line)
+                self.assertEqual(row["split"], "train")
+                self.assertNotIn("-val-", row["id"])
+                self.assertNotIn("-test-", row["id"])
+            self.assertGreater(p2_b["crosswalk_exposure"]["post_augmentation"]["total_pixels"], 0)
+
+    def test_production_seed42_vs_seed20261031_audit_and_mask_verification_if_present(self):
+        prod_manifest = _REPO_ROOT / "build" / "vision-training" / "data" / "manifest.json"
+        if not prod_manifest.is_file():
+            self.skipTest("Production manifest not present in this checkout.")
+
+        audit = audit_and_compare_sampling_seeds(
+            prod_manifest,
+            old_sampling_seed=42,
+            new_sampling_seed=DEFAULT_SAMPLING_SEED_RERUN,
+            verify_converted_masks=True,
+        )
+        self.assertTrue(audit["old_run_recorded_ids_sha256_match_verified"])
+        self.assertEqual(audit["eligible_train_pools"]["surface"]["eligible_record_count"], 6647)
+        self.assertEqual(audit["eligible_train_pools"]["surface"]["crosswalk_positive_record_count"], 579)
+        self.assertEqual(audit["eligible_train_pools"]["surface"]["crosswalk_total_pixels"], 7350939)
+        self.assertEqual(audit["eligible_train_pools"]["cityscapes"]["eligible_record_count"], 2550)
+
+        old_b1 = audit["old_seed_audit"]["arm_b_phase1_mixed"]["crosswalk_pre_augmentation"]
+        old_p2 = audit["old_seed_audit"]["common_phase2_mixed"]["crosswalk_pre_augmentation"]
+        self.assertEqual(old_b1["presentations"], 39)
+        self.assertEqual(old_b1["unique_images"], 39)
+        self.assertEqual(old_b1["total_pixels"], 695818)
+        self.assertEqual(old_p2["presentations"], 111)
+        self.assertEqual(old_p2["unique_images"], 111)
+        self.assertEqual(old_p2["total_pixels"], 1428290)
+
+        new_b1 = audit["new_seed_audit"]["arm_b_phase1_mixed"]["crosswalk_pre_augmentation"]
+        new_p2 = audit["new_seed_audit"]["common_phase2_mixed"]["crosswalk_pre_augmentation"]
+        self.assertEqual(new_b1["presentations"], 31)
+        self.assertEqual(new_b1["unique_images"], 31)
+        self.assertEqual(new_b1["total_pixels"], 349296)
+        self.assertEqual(new_p2["presentations"], 94)
+        self.assertEqual(new_p2["unique_images"], 94)
+        self.assertEqual(new_p2["total_pixels"], 1201430)
+
+        # New Phase 2 spans all 87 Surface train groups and manifest indices 5..6640
+        new_p2_surf = audit["new_seed_audit"]["common_phase2_mixed"]
+        self.assertEqual(new_p2_surf["unique_group_ids_by_source"]["surface"], 87)
+        self.assertEqual(
+            new_p2_surf["source_rank_distribution"]["surface"]["manifest_source_index_min"],
+            5,
+        )
+        self.assertEqual(
+            new_p2_surf["source_rank_distribution"]["surface"]["manifest_source_index_max"],
+            6640,
+        )
+
+        # Union of 237 unique crosswalk masks decoded and verified against manifest
+        mask_ver = audit["union_converted_mask_verification"]
+        self.assertIsNotNone(mask_ver)
+        self.assertEqual(mask_ver["verified_unique_mask_count"], 237)
+        self.assertTrue(mask_ver["all_verified_masks_match_manifest"])
+        self.assertEqual(mask_ver["verified_crosswalk_pixels_sum"], 3213787)
 
 
 if __name__ == "__main__":

@@ -25,18 +25,20 @@ import json
 import math
 import platform
 import random
+import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
+from PIL import Image
 import tensorflow as tf
 from tensorflow import keras
 
@@ -72,7 +74,9 @@ from tools.vision.training.train import (
 from tools.vision.training.train_data import PortraitDataset
 
 EXPERIMENT_ID: str = "ARIA-STRATEGY-AB-PILOT-20261031"
+RANDOM_SAMPLING_TASK_ID: str = "ARIA-RANDOM-SAMPLING-AB-20261031"
 PROTOCOL_DOC: str = "docs/VISION_TRAINING_STRATEGY_EXPERIMENT_2026-10-31.md"
+RANDOM_SAMPLING_PROTOCOL_DOC: str = "docs/VISION_RANDOM_SAMPLING_EXPERIMENT_2026-10-31.md"
 EXPECTED_MANIFEST_SHA256: str = (
     "e83b495d9ca0220115f8a59735765ed1a4683452f249c1e7254502d8ff0e66b9"
 )
@@ -86,12 +90,33 @@ EXPECTED_SPLIT_COUNTS: Dict[str, int] = {
     "total_records": 13033,
 }
 
+DEFAULT_SAMPLING_SEED_RERUN: int = 20261031
+PRIOR_SHARED_INIT_FILE_SHA256: str = (
+    "f47c4e3c3e25697595aec2781711ba9d2255f96fe7bac7e0d0999ecdfd716487"
+)
+PRIOR_SHARED_INIT_ALL_TENSOR_SHA256: str = (
+    "dbca1ef6451f0078a5fa135121711067ee80f39f97822985ee415e9e44be4fd2"
+)
+PRIOR_SHARED_INIT_TRAINABLE_TENSOR_SHA256: str = (
+    "b2e9037bb1c9cd9a24307452ac35a80a601aa52ddf3220ae431bd4ad4dbc013d"
+)
+PRIOR_SHARED_INIT_NON_TRAINABLE_TENSOR_SHA256: str = (
+    "882c42262ec798ba6fac2ea5f14e2737fa7856bd68ba754eadb51b4da9bf3b39"
+)
+PRIOR_SEED42_PHASE_IDS_SHA256: Dict[str, str] = {
+    "arm_a_phase1": "b4b1fb878bac173bf835668044fa9effd593e71f3cf2365a08e22f7c8ee2837d",
+    "arm_b_phase1": "98ae8349ce0fceaed8626712279600a6f0162f16685af2de48749cf89333be38",
+    "phase2": "1c8f1200c496a65bba06d6a84399fb217f1abf4267745fb0caf71cc68564edcb",
+}
+
 DEFAULT_PHASE1_UPDATES: int = 64
 DEFAULT_PHASE2_UPDATES: int = 192
 DEFAULT_PHASE1_LR: float = 1e-3
 DEFAULT_PHASE2_LR: float = 3e-4
 PHASE1_BASE_EPOCH: int = 0
 PHASE2_BASE_EPOCH: int = 1
+CROSSWALK_CLASS_NAME: str = "crosswalk"
+CROSSWALK_CLASS_INDEX: int = CLASS_NAMES.index("crosswalk")
 
 WALKABLE_CLASS_NAMES: Tuple[str, ...] = ("sidewalk", "crosswalk")
 MIXED_SCHEDULE_10: Tuple[str, ...] = (
@@ -106,6 +131,20 @@ MIXED_SCHEDULE_10: Tuple[str, ...] = (
     "cityscapes",
     "surface",
 )
+
+
+def _validate_non_negative_seed(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}.")
+    return int(value)
+
+
+def resolve_sampling_seed(seed: int, sampling_seed: Optional[int] = None) -> int:
+    """Resolves explicit sampling_seed, defaulting to model seed when omitted."""
+    _validate_non_negative_seed(seed, "seed")
+    if sampling_seed is None:
+        return int(seed)
+    return _validate_non_negative_seed(sampling_seed, "sampling_seed")
 
 
 def set_deterministic_seeds(seed: int) -> None:
@@ -309,16 +348,377 @@ def audit_manifest_and_compute_shared_weights(
     }
 
 
-def build_experiment_datasets(manifest_path: Path, seed: int = DEFAULT_SEED) -> Dict[str, PortraitDataset]:
-    """Constructs the four train/val per-source PortraitDataset objects once (pseudo OFF, test excluded)."""
+def build_manifest_train_catalog(
+    manifest_path: Path,
+    *,
+    raw_manifest: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Builds an in-memory catalog of eligible train records and split-disjointness sets from manifest JSON."""
     manifest_path = manifest_path.expanduser().resolve()
+    raw = dict(raw_manifest) if raw_manifest is not None else json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = raw.get("records")
+    if not isinstance(records, list) or not records:
+        raise ValueError("Manifest records must be a non-empty list.")
+
+    expected_class_keys = set(CLASS_NAMES)
+    non_train_ids: Set[str] = set()
+    non_train_groups: Set[str] = set()
+    non_train_hashes: Set[str] = set()
+    train_groups: Set[str] = set()
+    train_hashes: Set[str] = set()
+
+    manifest_order_by_source: Dict[str, List[Dict[str, Any]]] = {
+        "cityscapes": [],
+        "surface": [],
+    }
+
+    for rec_idx, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            raise ValueError(f"Record {rec_idx} is not a JSON object.")
+        rec_id = str(rec.get("id", ""))
+        source = str(rec.get("source", ""))
+        split = str(rec.get("split", ""))
+        group_id = str(rec.get("group_id", ""))
+        image_sha = str(rec.get("image_sha256", ""))
+        if source not in ("cityscapes", "surface") or split not in ("train", "val", "test"):
+            raise ValueError(f"Record {rec_id!r} has invalid source={source!r} or split={split!r}.")
+
+        if split != "train":
+            non_train_ids.add(rec_id)
+            non_train_groups.add(group_id)
+            non_train_hashes.add(image_sha)
+            continue
+
+        train_groups.add(group_id)
+        train_hashes.add(image_sha)
+        px_map = rec.get("class_pixel_counts")
+        if not isinstance(px_map, dict) or set(px_map.keys()) != expected_class_keys:
+            raise ValueError(f"Train record {rec_id!r} has malformed class_pixel_counts.")
+
+        px_dict: Dict[str, int] = {}
+        px_vec: List[int] = []
+        for c_name in CLASS_NAMES:
+            val = px_map[c_name]
+            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+                raise ValueError(
+                    f"Train record {rec_id!r} class_pixel_counts[{c_name!r}] must be a non-negative int."
+                )
+            px_dict[c_name] = int(val)
+            px_vec.append(int(val))
+
+        src_idx = len(manifest_order_by_source[source])
+        entry: Dict[str, Any] = {
+            "id": rec_id,
+            "source": source,
+            "split": "train",
+            "group_id": group_id,
+            "image_sha256": image_sha,
+            "semantic_path": str(rec.get("semantic_path", "")),
+            "semantic_source_path": str(rec.get("semantic_source_path", "")),
+            "semantic_weight_path": str(rec.get("semantic_weight_path", "")),
+            "class_pixel_counts": px_dict,
+            "class_pixel_counts_vector": px_vec,
+            "manifest_record_index": rec_idx,
+            "manifest_source_index": src_idx,
+            "sorted_pool_rank": -1,
+            "crosswalk_pool_rank": None,
+        }
+        manifest_order_by_source[source].append(entry)
+
+    if train_groups & non_train_groups:
+        overlap = sorted(train_groups & non_train_groups)[:5]
+        raise ValueError(f"Train/val-test group_id overlap detected: {overlap}")
+    if train_hashes & non_train_hashes:
+        overlap = sorted(train_hashes & non_train_hashes)[:5]
+        raise ValueError(f"Train/val-test image_sha256 overlap detected: {overlap}")
+
+    sorted_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    train_records_by_id: Dict[str, Dict[str, Any]] = {}
+    pool_summary: Dict[str, Any] = {}
+
+    for source in ("cityscapes", "surface"):
+        src_list = manifest_order_by_source[source]
+        sorted_list = sorted(src_list, key=lambda r: r["id"])
+        cw_rank = 0
+        cw_groups: Set[str] = set()
+        all_groups: Set[str] = set()
+        cw_total_px = 0
+
+        for rank_idx, item in enumerate(sorted_list):
+            item["sorted_pool_rank"] = rank_idx
+            all_groups.add(item["group_id"])
+            cw_px = item["class_pixel_counts"][CROSSWALK_CLASS_NAME]
+            if cw_px > 0:
+                item["crosswalk_pool_rank"] = cw_rank
+                cw_rank += 1
+                cw_groups.add(item["group_id"])
+                cw_total_px += cw_px
+            train_records_by_id[item["id"]] = item
+
+        sorted_by_source[source] = sorted_list
+        pool_summary[source] = {
+            "eligible_record_count": len(sorted_list),
+            "eligible_group_count": len(all_groups),
+            "crosswalk_positive_record_count": cw_rank,
+            "crosswalk_positive_group_count": len(cw_groups),
+            "crosswalk_total_pixels": cw_total_px,
+            "first_manifest_id": src_list[0]["id"] if src_list else None,
+            "last_manifest_id": src_list[-1]["id"] if src_list else None,
+            "first_sorted_id": sorted_list[0]["id"] if sorted_list else None,
+            "last_sorted_id": sorted_list[-1]["id"] if sorted_list else None,
+        }
+
+    return {
+        "manifest_path": str(manifest_path),
+        "manifest_dir": str(manifest_path.parent),
+        "train_records_by_id": train_records_by_id,
+        "manifest_order_by_source": manifest_order_by_source,
+        "sorted_train_records_by_source": sorted_by_source,
+        "non_train_ids": non_train_ids,
+        "non_train_groups": non_train_groups,
+        "non_train_hashes": non_train_hashes,
+        "pool_summary": pool_summary,
+    }
+
+
+def verify_converted_masks_against_manifest(
+    manifest_path: Path,
+    catalog: Mapping[str, Any],
+    record_ids: Sequence[str],
+    *,
+    cache: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Decodes converted .semantic.png masks for selected record IDs and verifies exact match with manifest counts."""
+    manifest_dir = manifest_path.expanduser().resolve().parent
+    train_by_id: Mapping[str, Mapping[str, Any]] = catalog["train_records_by_id"]
+
+    unique_ids: List[str] = []
+    seen: Set[str] = set()
+    for rid in record_ids:
+        s_rid = str(rid)
+        if s_rid not in seen:
+            seen.add(s_rid)
+            unique_ids.append(s_rid)
+
+    total_vec = [0] * NUM_SEMANTIC_CLASSES
+    digest_hasher = hashlib.sha256()
+    sample_verified: List[Dict[str, Any]] = []
+
+    for rid in unique_ids:
+        if rid not in train_by_id:
+            raise ValueError(f"Cannot verify mask for non-train or unknown record ID {rid!r}.")
+        rec = train_by_id[rid]
+        if cache is not None and rid in cache:
+            decoded_vec = list(cache[rid]["decoded_counts"])
+        else:
+            sem_rel = rec.get("semantic_path")
+            if not sem_rel:
+                raise ValueError(f"Record {rid!r} has no semantic_path in manifest.")
+            sem_path = (manifest_dir / str(sem_rel)).resolve()
+            if not sem_path.is_file():
+                raise FileNotFoundError(f"Converted semantic mask missing for {rid!r}: {sem_path}")
+            with Image.open(sem_path) as sem_img:
+                sem_arr = np.asarray(sem_img)
+            if sem_arr.dtype != np.uint8 or sem_arr.ndim != 2:
+                raise ValueError(f"Invalid semantic mask array shape/dtype for {rid!r}: {sem_arr.shape}, {sem_arr.dtype}")
+            valid_sem = sem_arr[sem_arr != IGNORE_LABEL]
+            if np.any((valid_sem < 0) | (valid_sem >= NUM_SEMANTIC_CLASSES)):
+                raise ValueError(f"Out-of-range semantic class in mask for {rid!r}.")
+            decoded_vec = np.bincount(valid_sem, minlength=NUM_SEMANTIC_CLASSES).tolist()
+            if cache is not None:
+                cache[rid] = {"id": rid, "decoded_counts": list(decoded_vec)}
+
+        expected_vec = list(rec["class_pixel_counts_vector"])
+        if decoded_vec != expected_vec:
+            raise ValueError(
+                f"Converted mask pixel counts mismatch for {rid!r}: decoded {decoded_vec} != manifest {expected_vec}."
+            )
+        for c_idx in range(NUM_SEMANTIC_CLASSES):
+            total_vec[c_idx] += int(decoded_vec[c_idx])
+        digest_hasher.update(
+            f"{rid}|cw={decoded_vec[CROSSWALK_CLASS_INDEX]}|vec={','.join(str(x) for x in decoded_vec)}\n".encode(
+                "utf-8"
+            )
+        )
+        if len(sample_verified) < 10:
+            sample_verified.append(
+                {
+                    "id": rid,
+                    "source": rec["source"],
+                    "group_id": rec["group_id"],
+                    "manifest_source_index": rec["manifest_source_index"],
+                    "sorted_pool_rank": rec["sorted_pool_rank"],
+                    "crosswalk_pool_rank": rec["crosswalk_pool_rank"],
+                    "manifest_crosswalk_pixels": int(expected_vec[CROSSWALK_CLASS_INDEX]),
+                    "decoded_mask_crosswalk_pixels": int(decoded_vec[CROSSWALK_CLASS_INDEX]),
+                }
+            )
+
+    return {
+        "verified_unique_mask_count": len(unique_ids),
+        "all_verified_masks_match_manifest": True,
+        "verified_total_pixels_by_class": dict(zip(CLASS_NAMES, total_vec)),
+        "verified_crosswalk_pixels_sum": int(total_vec[CROSSWALK_CLASS_INDEX]),
+        "verified_records_sha256": digest_hasher.hexdigest(),
+        "verified_record_ids": unique_ids,
+        "sample_verified_records": sample_verified,
+    }
+
+
+def _compute_quartile_counts(ranks: Sequence[int], pool_size: int) -> List[int]:
+    if pool_size <= 0 or not ranks:
+        return [0, 0, 0, 0]
+    counts = [0, 0, 0, 0]
+    for r in ranks:
+        q = min(3, max(0, int((r * 4) // pool_size)))
+        counts[q] += 1
+    return counts
+
+
+def _summarize_rank_distribution(
+    sorted_ranks: Sequence[int],
+    manifest_indices: Sequence[int],
+    pool_size: int,
+    presentations_count: int,
+) -> Dict[str, Any]:
+    if not sorted_ranks or pool_size <= 0:
+        return {
+            "pool_size": pool_size,
+            "presentations": 0,
+            "sorted_pool_rank_min": None,
+            "sorted_pool_rank_max": None,
+            "sorted_pool_rank_median": None,
+            "manifest_source_index_min": None,
+            "manifest_source_index_max": None,
+            "manifest_source_index_median": None,
+            "sorted_pool_quartile_counts": [0, 0, 0, 0],
+            "manifest_order_quartile_counts": [0, 0, 0, 0],
+            "sampled_beyond_sorted_prefix_count": 0,
+            "sampled_beyond_manifest_prefix_count": 0,
+        }
+    s_sorted = sorted(int(x) for x in sorted_ranks)
+    m_sorted = sorted(int(x) for x in manifest_indices)
+    mid = len(s_sorted) // 2
+    s_med = (
+        float(s_sorted[mid])
+        if len(s_sorted) % 2 == 1
+        else 0.5 * (s_sorted[mid - 1] + s_sorted[mid])
+    )
+    m_med = (
+        float(m_sorted[mid])
+        if len(m_sorted) % 2 == 1
+        else 0.5 * (m_sorted[mid - 1] + m_sorted[mid])
+    )
+    return {
+        "pool_size": pool_size,
+        "presentations": presentations_count,
+        "sorted_pool_rank_min": s_sorted[0],
+        "sorted_pool_rank_max": s_sorted[-1],
+        "sorted_pool_rank_median": s_med,
+        "manifest_source_index_min": m_sorted[0],
+        "manifest_source_index_max": m_sorted[-1],
+        "manifest_source_index_median": m_med,
+        "sorted_pool_quartile_counts": _compute_quartile_counts(s_sorted, pool_size),
+        "manifest_order_quartile_counts": _compute_quartile_counts(m_sorted, pool_size),
+        "sampled_beyond_sorted_prefix_count": sum(1 for x in s_sorted if x >= presentations_count),
+        "sampled_beyond_manifest_prefix_count": sum(1 for x in m_sorted if x >= presentations_count),
+    }
+
+
+def compute_batch_post_augmentation_exposure(batch: Mapping[str, Any]) -> Dict[str, Any]:
+    """Computes per-sample and batch-total post-augmentation class pixel counts using semantic_source==1 and weight>0."""
+    sem_batch = np.asarray(batch["semantic"], dtype=np.int32)
+    src_batch = np.asarray(batch["semantic_source"], dtype=np.uint8)
+    wt_batch = np.asarray(batch["semantic_weight"], dtype=np.float32)
+
+    if sem_batch.ndim != 3 or src_batch.shape != sem_batch.shape or wt_batch.shape != sem_batch.shape:
+        raise ValueError(
+            f"Batch semantic/source/weight shapes must match (B, H, W), got "
+            f"{sem_batch.shape}, {src_batch.shape}, {wt_batch.shape}."
+        )
+    if np.any(~np.isin(src_batch, (0, 1, 2))):
+        raise ValueError("Batch semantic_source contains unknown provenance values outside (0, 1, 2).")
+
+    batch_size = int(sem_batch.shape[0])
+    per_sample: List[Dict[str, Any]] = []
+    batch_pixels_vec = [0] * NUM_SEMANTIC_CLASSES
+    batch_pos_images_vec = [0] * NUM_SEMANTIC_CLASSES
+    batch_real_pixels = 0
+    batch_ignored_pixels = 0
+    batch_pseudo_pixels = 0
+
+    for idx in range(batch_size):
+        sem_i = sem_batch[idx]
+        src_i = src_batch[idx]
+        wt_i = wt_batch[idx]
+
+        real_mask = (src_i == 1) & (wt_i > 0.0)
+        pseudo_mask = (src_i == 2) & (wt_i > 0.0)
+        ignored_mask = ~real_mask & ~pseudo_mask
+
+        if np.any(sem_i[real_mask] == IGNORE_LABEL):
+            raise ValueError("Real supervised pixel (semantic_source==1 and weight>0) has IGNORE_LABEL (255).")
+        if np.any((sem_i[real_mask] < 0) | (sem_i[real_mask] >= NUM_SEMANTIC_CLASSES)):
+            raise ValueError("Real supervised pixel has out-of-range semantic class ID.")
+
+        counts_vec = np.bincount(sem_i[real_mask], minlength=NUM_SEMANTIC_CLASSES).tolist()
+        real_px = int(sum(counts_vec))
+        pseudo_px = int(np.sum(pseudo_mask))
+        ignored_px = int(np.sum(ignored_mask))
+
+        for c_idx in range(NUM_SEMANTIC_CLASSES):
+            px_val = int(counts_vec[c_idx])
+            batch_pixels_vec[c_idx] += px_val
+            if px_val > 0:
+                batch_pos_images_vec[c_idx] += 1
+
+        batch_real_pixels += real_px
+        batch_ignored_pixels += ignored_px
+        batch_pseudo_pixels += pseudo_px
+
+        per_sample.append(
+            {
+                "class_pixel_counts_vector": [int(x) for x in counts_vec],
+                "class_pixel_counts": dict(zip(CLASS_NAMES, (int(x) for x in counts_vec))),
+                "crosswalk_pixels": int(counts_vec[CROSSWALK_CLASS_INDEX]),
+                "real_supervised_pixels": real_px,
+                "ignored_pixels": ignored_px,
+                "pseudo_pixels": pseudo_px,
+            }
+        )
+
+    return {
+        "per_sample": per_sample,
+        "batch_class_pixel_counts_vector": batch_pixels_vec,
+        "batch_class_pixel_counts": dict(zip(CLASS_NAMES, batch_pixels_vec)),
+        "batch_class_positive_image_counts": dict(zip(CLASS_NAMES, batch_pos_images_vec)),
+        "batch_crosswalk_pixels": int(batch_pixels_vec[CROSSWALK_CLASS_INDEX]),
+        "batch_crosswalk_positive_images": int(batch_pos_images_vec[CROSSWALK_CLASS_INDEX]),
+        "batch_real_supervised_pixels": batch_real_pixels,
+        "batch_ignored_pixels": batch_ignored_pixels,
+        "batch_pseudo_pixels": batch_pseudo_pixels,
+    }
+
+
+def build_experiment_datasets(
+    manifest_path: Path,
+    seed: int = DEFAULT_SEED,
+    sampling_seed: Optional[int] = None,
+) -> Dict[str, PortraitDataset]:
+    """Constructs the four train/val per-source PortraitDataset objects once (pseudo OFF, test excluded).
+
+    Train datasets use effective sampling_seed (defaulting to seed when omitted); validation datasets use
+    model seed so validation batch ordering remains invariant across sampling-seed experiments.
+    """
+    manifest_path = manifest_path.expanduser().resolve()
+    effective_sampling_seed = resolve_sampling_seed(seed, sampling_seed)
     datasets = {
         "city_train": PortraitDataset(
             manifest_path,
             split="train",
             sources="cityscapes",
             pseudo_manifest_path=None,
-            seed=seed,
+            seed=effective_sampling_seed,
             require_complete=True,
         ),
         "surface_train": PortraitDataset(
@@ -326,7 +726,7 @@ def build_experiment_datasets(manifest_path: Path, seed: int = DEFAULT_SEED) -> 
             split="train",
             sources="surface",
             pseudo_manifest_path=None,
-            seed=seed,
+            seed=effective_sampling_seed,
             require_complete=True,
         ),
         "city_val": PortraitDataset(
@@ -422,6 +822,989 @@ def planned_schedule_sources(mode: str, total_microbatches: int) -> List[str]:
     raise ValueError(f"Unknown phase schedule mode: {mode!r}")
 
 
+class PhaseExposureTracker:
+    """Tracks ordered sample IDs, pre-augmentation manifest counts, and post-augmentation real supervision."""
+
+    def __init__(
+        self,
+        *,
+        catalog: Mapping[str, Any],
+        manifest_path: Path,
+        phase_output_dir: Path,
+        start_epoch: int,
+        accumulate_steps: int,
+        mask_verification_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
+        self.catalog = catalog
+        self.manifest_path = manifest_path.expanduser().resolve()
+        self.phase_output_dir = phase_output_dir
+        self.start_epoch = start_epoch
+        self.accumulate_steps = accumulate_steps
+        self.mask_verification_cache = mask_verification_cache
+
+        self.train_by_id: Mapping[str, Mapping[str, Any]] = catalog["train_records_by_id"]
+        self.non_train_ids: Set[str] = set(catalog["non_train_ids"])
+        self.non_train_groups: Set[str] = set(catalog["non_train_groups"])
+        self.non_train_hashes: Set[str] = set(catalog["non_train_hashes"])
+        self.pool_summary: Mapping[str, Any] = catalog["pool_summary"]
+
+        self.ordered_samples_path = phase_output_dir / "ordered_samples.jsonl"
+        self.microbatch_exposure_path = phase_output_dir / "microbatch_exposure.jsonl"
+        self._samples_fh = self.ordered_samples_path.open("w", encoding="utf-8")
+        self._microbatches_fh = self.microbatch_exposure_path.open("w", encoding="utf-8")
+
+        self.ordered_ids_hasher = hashlib.sha256()
+        self.exposure_digest_hasher = hashlib.sha256()
+
+        self.total_presentations = 0
+        self.total_microbatches = 0
+        self.non_train_split_ids_encountered = 0
+        self.duplicate_presentations_within_epoch = 0
+
+        self.presentations_by_source: Dict[str, int] = {"surface": 0, "cityscapes": 0}
+        self.unique_ids_all: Set[str] = set()
+        self.unique_groups_all: Set[str] = set()
+        self.unique_ids_by_source: Dict[str, Set[str]] = {"surface": set(), "cityscapes": set()}
+        self.unique_groups_by_source: Dict[str, Set[str]] = {"surface": set(), "cityscapes": set()}
+        self.seen_in_epoch_by_source: Dict[Tuple[str, int], Set[str]] = {}
+        self.epochs_touched_by_source: Dict[str, Set[int]] = {"surface": set(), "cityscapes": set()}
+        self.sorted_ranks_by_source: Dict[str, List[int]] = {"surface": [], "cityscapes": []}
+        self.manifest_indices_by_source: Dict[str, List[int]] = {"surface": [], "cityscapes": []}
+        self.ordered_presentation_records: List[Dict[str, Any]] = []
+
+        self.pre_aug_pixels_vec = [0] * NUM_SEMANTIC_CLASSES
+        self.pre_aug_pos_presentations_vec = [0] * NUM_SEMANTIC_CLASSES
+        self.pre_aug_pos_unique_ids: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+        self.pre_aug_pos_unique_groups: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+        self.pre_aug_pos_microbatches_vec = [0] * NUM_SEMANTIC_CLASSES
+
+        self.post_aug_pixels_vec = [0] * NUM_SEMANTIC_CLASSES
+        self.post_aug_pos_presentations_vec = [0] * NUM_SEMANTIC_CLASSES
+        self.post_aug_pos_unique_ids: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+        self.post_aug_pos_unique_groups: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+        self.post_aug_pos_microbatches_vec = [0] * NUM_SEMANTIC_CLASSES
+        self.post_aug_real_supervised_pixels = 0
+        self.post_aug_ignored_pixels = 0
+        self.post_aug_pseudo_pixels = 0
+
+        self.cw_selected_unique_ids_ordered: List[str] = []
+        self.cw_selected_unique_ids_set: Set[str] = set()
+        self.cw_surface_sorted_ranks: List[int] = []
+        self.cw_surface_manifest_indices: List[int] = []
+        self.cw_pool_ranks: List[int] = []
+        self.cw_presentations_zeroed_by_aug = 0
+
+    def update(self, microbatch_index: int, batch: Mapping[str, Any]) -> None:
+        ids = [str(x) for x in batch["id"]]
+        sources = [str(x) for x in batch["source"]]
+        splits = [str(x) for x in batch["split"]]
+        group_ids = [str(x) for x in batch["group_id"]]
+        update_index = microbatch_index // self.accumulate_steps
+
+        post_batch = compute_batch_post_augmentation_exposure(batch)
+        per_sample_post = post_batch["per_sample"]
+
+        mb_pre_vec = [0] * NUM_SEMANTIC_CLASSES
+        mb_pre_pos_imgs = [0] * NUM_SEMANTIC_CLASSES
+        mb_post_vec = list(post_batch["batch_class_pixel_counts_vector"])
+        mb_post_pos_imgs = [
+            int(post_batch["batch_class_positive_image_counts"][c_name]) for c_name in CLASS_NAMES
+        ]
+
+        for slot_idx, rid in enumerate(ids):
+            src = sources[slot_idx]
+            sp = splits[slot_idx]
+            gid = group_ids[slot_idx]
+
+            if sp != "train" or rid in self.non_train_ids or gid in self.non_train_groups:
+                self.non_train_split_ids_encountered += 1
+                raise RuntimeError(
+                    f"Non-train record or group encountered in training stream: id={rid!r}, split={sp!r}, group={gid!r}."
+                )
+            if rid not in self.train_by_id:
+                raise RuntimeError(f"Training record ID {rid!r} not found in manifest train catalog.")
+
+            rec = self.train_by_id[rid]
+            if rec["image_sha256"] in self.non_train_hashes:
+                self.non_train_split_ids_encountered += 1
+                raise RuntimeError(f"Training record {rid!r} shares image_sha256 with val/test split.")
+            if rec["source"] != src or rec["group_id"] != gid:
+                raise RuntimeError(f"Record {rid!r} metadata mismatch against manifest catalog.")
+
+            pool_size = int(self.pool_summary[src]["eligible_record_count"])
+            src_ord = self.presentations_by_source[src]
+            sample_epoch = self.start_epoch + (src_ord // pool_size if pool_size > 0 else 0)
+            ord_in_epoch = src_ord % pool_size if pool_size > 0 else src_ord
+
+            epoch_set = self.seen_in_epoch_by_source.setdefault((src, sample_epoch), set())
+            if rid in epoch_set:
+                self.duplicate_presentations_within_epoch += 1
+                raise RuntimeError(
+                    f"Duplicate sample {rid!r} within source={src!r} epoch={sample_epoch} before exhaustion!"
+                )
+            epoch_set.add(rid)
+            self.epochs_touched_by_source[src].add(sample_epoch)
+
+            self.presentations_by_source[src] += 1
+            self.unique_ids_all.add(rid)
+            self.unique_groups_all.add(gid)
+            self.unique_ids_by_source[src].add(rid)
+            self.unique_groups_by_source[src].add(gid)
+
+            sorted_rank = int(rec["sorted_pool_rank"])
+            manifest_idx = int(rec["manifest_source_index"])
+            cw_rank = rec["crosswalk_pool_rank"]
+            self.sorted_ranks_by_source[src].append(sorted_rank)
+            self.manifest_indices_by_source[src].append(manifest_idx)
+
+            pre_vec = list(rec["class_pixel_counts_vector"])
+            post_sample = per_sample_post[slot_idx]
+            post_vec = list(post_sample["class_pixel_counts_vector"])
+
+            for c_idx in range(NUM_SEMANTIC_CLASSES):
+                pre_px = int(pre_vec[c_idx])
+                post_px = int(post_vec[c_idx])
+                self.pre_aug_pixels_vec[c_idx] += pre_px
+                mb_pre_vec[c_idx] += pre_px
+                if pre_px > 0:
+                    self.pre_aug_pos_presentations_vec[c_idx] += 1
+                    self.pre_aug_pos_unique_ids[c_idx].add(rid)
+                    self.pre_aug_pos_unique_groups[c_idx].add(gid)
+                    mb_pre_pos_imgs[c_idx] += 1
+
+                self.post_aug_pixels_vec[c_idx] += post_px
+                if post_px > 0:
+                    self.post_aug_pos_presentations_vec[c_idx] += 1
+                    self.post_aug_pos_unique_ids[c_idx].add(rid)
+                    self.post_aug_pos_unique_groups[c_idx].add(gid)
+
+            pre_cw = int(pre_vec[CROSSWALK_CLASS_INDEX])
+            post_cw = int(post_vec[CROSSWALK_CLASS_INDEX])
+            if pre_cw > 0:
+                if rid not in self.cw_selected_unique_ids_set:
+                    self.cw_selected_unique_ids_set.add(rid)
+                    self.cw_selected_unique_ids_ordered.append(rid)
+                if src == "surface":
+                    self.cw_surface_sorted_ranks.append(sorted_rank)
+                    self.cw_surface_manifest_indices.append(manifest_idx)
+                if cw_rank is not None:
+                    self.cw_pool_ranks.append(int(cw_rank))
+                if post_cw == 0:
+                    self.cw_presentations_zeroed_by_aug += 1
+
+            self.post_aug_real_supervised_pixels += int(post_sample["real_supervised_pixels"])
+            self.post_aug_ignored_pixels += int(post_sample["ignored_pixels"])
+            self.post_aug_pseudo_pixels += int(post_sample["pseudo_pixels"])
+
+            pres_idx = self.total_presentations
+            self.total_presentations += 1
+
+            self.ordered_ids_hasher.update(
+                f"pres={pres_idx}|mb={microbatch_index}|slot={slot_idx}|epoch={sample_epoch}|id={rid}|src={src}|grp={gid}\n".encode(
+                    "utf-8"
+                )
+            )
+            self.exposure_digest_hasher.update(
+                f"pres={pres_idx}|id={rid}|src={src}|pre={','.join(str(x) for x in pre_vec)}|post={','.join(str(x) for x in post_vec)}\n".encode(
+                    "utf-8"
+                )
+            )
+
+            sample_row = {
+                "presentation_index": pres_idx,
+                "update_index": update_index,
+                "microbatch_index": microbatch_index,
+                "slot_in_microbatch": slot_idx,
+                "source_epoch": sample_epoch,
+                "ordinal_in_source_epoch": ord_in_epoch,
+                "id": rid,
+                "source": src,
+                "group_id": gid,
+                "split": sp,
+                "sorted_pool_rank": sorted_rank,
+                "manifest_source_index": manifest_idx,
+                "crosswalk_pool_rank": cw_rank,
+                "pre_augmentation_class_pixel_counts": dict(zip(CLASS_NAMES, pre_vec)),
+                "post_augmentation_class_pixel_counts": dict(zip(CLASS_NAMES, post_vec)),
+                "pre_aug_crosswalk_pixels": pre_cw,
+                "post_aug_crosswalk_pixels": post_cw,
+                "post_aug_real_supervised_pixels": int(post_sample["real_supervised_pixels"]),
+                "post_aug_ignored_pixels": int(post_sample["ignored_pixels"]),
+                "post_aug_pseudo_pixels": int(post_sample["pseudo_pixels"]),
+            }
+            self._samples_fh.write(json.dumps(sample_row) + "\n")
+            self.ordered_presentation_records.append(
+                {
+                    "id": rid,
+                    "source": src,
+                    "group_id": gid,
+                    "pre_vec": pre_vec,
+                    "post_vec": post_vec,
+                    "sorted_pool_rank": sorted_rank,
+                    "manifest_source_index": manifest_idx,
+                    "crosswalk_pool_rank": cw_rank,
+                }
+            )
+
+        for c_idx in range(NUM_SEMANTIC_CLASSES):
+            if mb_pre_pos_imgs[c_idx] > 0:
+                self.pre_aug_pos_microbatches_vec[c_idx] += 1
+            if mb_post_pos_imgs[c_idx] > 0:
+                self.post_aug_pos_microbatches_vec[c_idx] += 1
+
+        mb_row = {
+            "microbatch_index": microbatch_index,
+            "update_index": update_index,
+            "source": sources[0] if len(set(sources)) == 1 else "mixed",
+            "ids": ids,
+            "group_ids": group_ids,
+            "pre_augmentation_class_pixel_counts": dict(zip(CLASS_NAMES, mb_pre_vec)),
+            "pre_augmentation_class_positive_image_counts": dict(zip(CLASS_NAMES, mb_pre_pos_imgs)),
+            "post_augmentation_class_pixel_counts": dict(zip(CLASS_NAMES, mb_post_vec)),
+            "post_augmentation_class_positive_image_counts": dict(zip(CLASS_NAMES, mb_post_pos_imgs)),
+            "pre_aug_crosswalk_images": int(mb_pre_pos_imgs[CROSSWALK_CLASS_INDEX]),
+            "pre_aug_crosswalk_pixels": int(mb_pre_vec[CROSSWALK_CLASS_INDEX]),
+            "post_aug_crosswalk_images": int(mb_post_pos_imgs[CROSSWALK_CLASS_INDEX]),
+            "post_aug_crosswalk_pixels": int(mb_post_vec[CROSSWALK_CLASS_INDEX]),
+            "post_aug_real_supervised_pixels": int(post_batch["batch_real_supervised_pixels"]),
+            "post_aug_ignored_pixels": int(post_batch["batch_ignored_pixels"]),
+            "post_aug_pseudo_pixels": int(post_batch["batch_pseudo_pixels"]),
+        }
+        self._microbatches_fh.write(json.dumps(mb_row) + "\n")
+        self.total_microbatches += 1
+
+    def finalize(self) -> Dict[str, Any]:
+        if not self._samples_fh.closed:
+            self._samples_fh.flush()
+            self._samples_fh.close()
+        if not self._microbatches_fh.closed:
+            self._microbatches_fh.flush()
+            self._microbatches_fh.close()
+
+        ordered_samples_sha256 = compute_sha256(self.ordered_samples_path)
+        microbatch_exposure_sha256 = compute_sha256(self.microbatch_exposure_path)
+
+        mask_verification = verify_converted_masks_against_manifest(
+            self.manifest_path,
+            self.catalog,
+            self.cw_selected_unique_ids_ordered,
+            cache=self.mask_verification_cache,
+        )
+
+        surf_pool_size = int(self.pool_summary["surface"]["eligible_record_count"])
+        city_pool_size = int(self.pool_summary["cityscapes"]["eligible_record_count"])
+        cw_pool_size = int(self.pool_summary["surface"]["crosswalk_positive_record_count"])
+        cw_unique_px_sum = int(mask_verification["verified_crosswalk_pixels_sum"])
+        pre_cw_total_px = int(self.pre_aug_pixels_vec[CROSSWALK_CLASS_INDEX])
+        post_cw_total_px = int(self.post_aug_pixels_vec[CROSSWALK_CLASS_INDEX])
+
+        by_source_summary: Dict[str, Any] = {}
+        for src, p_size in (("surface", surf_pool_size), ("cityscapes", city_pool_size)):
+            by_source_summary[src] = {
+                "eligible_pool_size": p_size,
+                "eligible_group_count": int(self.pool_summary[src]["eligible_group_count"]),
+                "presentations": self.presentations_by_source[src],
+                "unique_sample_ids": len(self.unique_ids_by_source[src]),
+                "unique_group_ids": len(self.unique_groups_by_source[src]),
+                "epochs_touched": sorted(self.epochs_touched_by_source[src]),
+                "rank_distribution": _summarize_rank_distribution(
+                    self.sorted_ranks_by_source[src],
+                    self.manifest_indices_by_source[src],
+                    p_size,
+                    self.presentations_by_source[src],
+                ),
+            }
+
+        cw_idx = CROSSWALK_CLASS_INDEX
+        surf_pres = self.presentations_by_source["surface"]
+        crosswalk_exposure = {
+            "eligible_surface_pool_records": surf_pool_size,
+            "eligible_crosswalk_positive_pool_records": cw_pool_size,
+            "eligible_crosswalk_positive_pool_groups": int(
+                self.pool_summary["surface"]["crosswalk_positive_group_count"]
+            ),
+            "eligible_crosswalk_positive_pool_pixels": int(
+                self.pool_summary["surface"]["crosswalk_total_pixels"]
+            ),
+            "pre_augmentation": {
+                "presentations": int(self.pre_aug_pos_presentations_vec[cw_idx]),
+                "unique_images": len(self.pre_aug_pos_unique_ids[cw_idx]),
+                "unique_groups": len(self.pre_aug_pos_unique_groups[cw_idx]),
+                "microbatches": int(self.pre_aug_pos_microbatches_vec[cw_idx]),
+                "total_pixels": pre_cw_total_px,
+                "unique_image_pixels": cw_unique_px_sum,
+                "surface_sorted_pool_rank_min": (
+                    min(self.cw_surface_sorted_ranks) if self.cw_surface_sorted_ranks else None
+                ),
+                "surface_sorted_pool_rank_max": (
+                    max(self.cw_surface_sorted_ranks) if self.cw_surface_sorted_ranks else None
+                ),
+                "surface_manifest_index_min": (
+                    min(self.cw_surface_manifest_indices) if self.cw_surface_manifest_indices else None
+                ),
+                "surface_manifest_index_max": (
+                    max(self.cw_surface_manifest_indices) if self.cw_surface_manifest_indices else None
+                ),
+                "crosswalk_pool_rank_min": min(self.cw_pool_ranks) if self.cw_pool_ranks else None,
+                "crosswalk_pool_rank_max": max(self.cw_pool_ranks) if self.cw_pool_ranks else None,
+                "surface_pool_quartile_counts": _compute_quartile_counts(
+                    self.cw_surface_sorted_ranks, surf_pool_size
+                ),
+                "manifest_order_quartile_counts": _compute_quartile_counts(
+                    self.cw_surface_manifest_indices, surf_pool_size
+                ),
+                "sampled_beyond_surface_prefix_count": sum(
+                    1 for r in self.cw_surface_manifest_indices if r >= surf_pres
+                ),
+            },
+            "post_augmentation": {
+                "presentations": int(self.post_aug_pos_presentations_vec[cw_idx]),
+                "unique_images": len(self.post_aug_pos_unique_ids[cw_idx]),
+                "unique_groups": len(self.post_aug_pos_unique_groups[cw_idx]),
+                "microbatches": int(self.post_aug_pos_microbatches_vec[cw_idx]),
+                "total_pixels": post_cw_total_px,
+                "presentations_zeroed_by_augmentation": self.cw_presentations_zeroed_by_aug,
+                "pixel_retention_ratio_vs_pre_aug": (
+                    float(post_cw_total_px) / float(pre_cw_total_px) if pre_cw_total_px > 0 else None
+                ),
+            },
+            "converted_mask_verification": mask_verification,
+        }
+
+        return {
+            "ordered_samples_jsonl_path": str(self.ordered_samples_path),
+            "ordered_samples_jsonl_sha256": ordered_samples_sha256,
+            "microbatch_exposure_jsonl_path": str(self.microbatch_exposure_path),
+            "microbatch_exposure_jsonl_sha256": microbatch_exposure_sha256,
+            "ordered_sample_ids_sha256": self.ordered_ids_hasher.hexdigest(),
+            "exposure_digest_sha256": self.exposure_digest_hasher.hexdigest(),
+            "total_presentations": self.total_presentations,
+            "total_microbatches": self.total_microbatches,
+            "unique_sample_ids_total": len(self.unique_ids_all),
+            "unique_group_ids_total": len(self.unique_groups_all),
+            "duplicate_presentations_within_epoch": self.duplicate_presentations_within_epoch,
+            "non_train_split_ids_encountered": self.non_train_split_ids_encountered,
+            "by_source": by_source_summary,
+            "pre_augmentation_by_class": {
+                "pixel_counts": dict(zip(CLASS_NAMES, self.pre_aug_pixels_vec)),
+                "positive_presentation_counts": dict(
+                    zip(CLASS_NAMES, self.pre_aug_pos_presentations_vec)
+                ),
+                "positive_unique_image_counts": {
+                    c_name: len(self.pre_aug_pos_unique_ids[i])
+                    for i, c_name in enumerate(CLASS_NAMES)
+                },
+                "positive_unique_group_counts": {
+                    c_name: len(self.pre_aug_pos_unique_groups[i])
+                    for i, c_name in enumerate(CLASS_NAMES)
+                },
+                "positive_microbatch_counts": dict(
+                    zip(CLASS_NAMES, self.pre_aug_pos_microbatches_vec)
+                ),
+            },
+            "post_augmentation_by_class": {
+                "pixel_counts": dict(zip(CLASS_NAMES, self.post_aug_pixels_vec)),
+                "positive_presentation_counts": dict(
+                    zip(CLASS_NAMES, self.post_aug_pos_presentations_vec)
+                ),
+                "positive_unique_image_counts": {
+                    c_name: len(self.post_aug_pos_unique_ids[i])
+                    for i, c_name in enumerate(CLASS_NAMES)
+                },
+                "positive_unique_group_counts": {
+                    c_name: len(self.post_aug_pos_unique_groups[i])
+                    for i, c_name in enumerate(CLASS_NAMES)
+                },
+                "positive_microbatch_counts": dict(
+                    zip(CLASS_NAMES, self.post_aug_pos_microbatches_vec)
+                ),
+                "total_real_supervised_pixels": self.post_aug_real_supervised_pixels,
+                "total_ignored_pixels": self.post_aug_ignored_pixels,
+                "total_pseudo_pixels": self.post_aug_pseudo_pixels,
+            },
+            "crosswalk_exposure": crosswalk_exposure,
+        }
+
+
+def aggregate_arm_exposure_audit(
+    phase1_tracker: PhaseExposureTracker,
+    phase2_tracker: PhaseExposureTracker,
+    phase1_exposure: Mapping[str, Any],
+    phase2_exposure: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Combines Phase 1 and Phase 2 exposure tracking into an arm-wide audit with true unique sets."""
+    combined_records = (
+        phase1_tracker.ordered_presentation_records + phase2_tracker.ordered_presentation_records
+    )
+    unique_ids_all = {r["id"] for r in combined_records}
+    unique_groups_all = {r["group_id"] for r in combined_records}
+    unique_ids_by_source = {
+        src: {r["id"] for r in combined_records if r["source"] == src}
+        for src in ("surface", "cityscapes")
+    }
+    unique_groups_by_source = {
+        src: {r["group_id"] for r in combined_records if r["source"] == src}
+        for src in ("surface", "cityscapes")
+    }
+
+    pre_px_vec = [0] * NUM_SEMANTIC_CLASSES
+    pre_pres_vec = [0] * NUM_SEMANTIC_CLASSES
+    pre_uids: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+    pre_ugroups: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+
+    post_px_vec = [0] * NUM_SEMANTIC_CLASSES
+    post_pres_vec = [0] * NUM_SEMANTIC_CLASSES
+    post_uids: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+    post_ugroups: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+
+    for r in combined_records:
+        rid = r["id"]
+        gid = r["group_id"]
+        for c_idx in range(NUM_SEMANTIC_CLASSES):
+            pre_val = int(r["pre_vec"][c_idx])
+            post_val = int(r["post_vec"][c_idx])
+            pre_px_vec[c_idx] += pre_val
+            if pre_val > 0:
+                pre_pres_vec[c_idx] += 1
+                pre_uids[c_idx].add(rid)
+                pre_ugroups[c_idx].add(gid)
+            post_px_vec[c_idx] += post_val
+            if post_val > 0:
+                post_pres_vec[c_idx] += 1
+                post_uids[c_idx].add(rid)
+                post_ugroups[c_idx].add(gid)
+
+    cw_idx = CROSSWALK_CLASS_INDEX
+    train_by_id = phase1_tracker.train_by_id
+    cw_unique_px = sum(
+        int(train_by_id[rid]["class_pixel_counts"][CROSSWALK_CLASS_NAME])
+        for rid in pre_uids[cw_idx]
+    )
+
+    return {
+        "total_presentations": len(combined_records),
+        "total_microbatches": int(
+            phase1_exposure["total_microbatches"] + phase2_exposure["total_microbatches"]
+        ),
+        "unique_sample_ids_total": len(unique_ids_all),
+        "unique_group_ids_total": len(unique_groups_all),
+        "unique_sample_ids_by_source": {k: len(v) for k, v in unique_ids_by_source.items()},
+        "unique_group_ids_by_source": {k: len(v) for k, v in unique_groups_by_source.items()},
+        "duplicate_presentations_within_epoch": int(
+            phase1_exposure["duplicate_presentations_within_epoch"]
+            + phase2_exposure["duplicate_presentations_within_epoch"]
+        ),
+        "non_train_split_ids_encountered": int(
+            phase1_exposure["non_train_split_ids_encountered"]
+            + phase2_exposure["non_train_split_ids_encountered"]
+        ),
+        "pre_augmentation_by_class": {
+            "pixel_counts": dict(zip(CLASS_NAMES, pre_px_vec)),
+            "positive_presentation_counts": dict(zip(CLASS_NAMES, pre_pres_vec)),
+            "positive_unique_image_counts": {
+                c_name: len(pre_uids[i]) for i, c_name in enumerate(CLASS_NAMES)
+            },
+            "positive_unique_group_counts": {
+                c_name: len(pre_ugroups[i]) for i, c_name in enumerate(CLASS_NAMES)
+            },
+        },
+        "post_augmentation_by_class": {
+            "pixel_counts": dict(zip(CLASS_NAMES, post_px_vec)),
+            "positive_presentation_counts": dict(zip(CLASS_NAMES, post_pres_vec)),
+            "positive_unique_image_counts": {
+                c_name: len(post_uids[i]) for i, c_name in enumerate(CLASS_NAMES)
+            },
+            "positive_unique_group_counts": {
+                c_name: len(post_ugroups[i]) for i, c_name in enumerate(CLASS_NAMES)
+            },
+            "total_real_supervised_pixels": int(
+                phase1_exposure["post_augmentation_by_class"]["total_real_supervised_pixels"]
+                + phase2_exposure["post_augmentation_by_class"]["total_real_supervised_pixels"]
+            ),
+            "total_ignored_pixels": int(
+                phase1_exposure["post_augmentation_by_class"]["total_ignored_pixels"]
+                + phase2_exposure["post_augmentation_by_class"]["total_ignored_pixels"]
+            ),
+            "total_pseudo_pixels": int(
+                phase1_exposure["post_augmentation_by_class"]["total_pseudo_pixels"]
+                + phase2_exposure["post_augmentation_by_class"]["total_pseudo_pixels"]
+            ),
+        },
+        "crosswalk_exposure": {
+            "pre_augmentation": {
+                "presentations": int(pre_pres_vec[cw_idx]),
+                "unique_images": len(pre_uids[cw_idx]),
+                "unique_groups": len(pre_ugroups[cw_idx]),
+                "microbatches": int(
+                    phase1_exposure["crosswalk_exposure"]["pre_augmentation"]["microbatches"]
+                    + phase2_exposure["crosswalk_exposure"]["pre_augmentation"]["microbatches"]
+                ),
+                "total_pixels": int(pre_px_vec[cw_idx]),
+                "unique_image_pixels": cw_unique_px,
+            },
+            "post_augmentation": {
+                "presentations": int(post_pres_vec[cw_idx]),
+                "unique_images": len(post_uids[cw_idx]),
+                "unique_groups": len(post_ugroups[cw_idx]),
+                "microbatches": int(
+                    phase1_exposure["crosswalk_exposure"]["post_augmentation"]["microbatches"]
+                    + phase2_exposure["crosswalk_exposure"]["post_augmentation"]["microbatches"]
+                ),
+                "total_pixels": int(post_px_vec[cw_idx]),
+                "presentations_zeroed_by_augmentation": int(
+                    phase1_exposure["crosswalk_exposure"]["post_augmentation"][
+                        "presentations_zeroed_by_augmentation"
+                    ]
+                    + phase2_exposure["crosswalk_exposure"]["post_augmentation"][
+                        "presentations_zeroed_by_augmentation"
+                    ]
+                ),
+                "pixel_retention_ratio_vs_pre_aug": (
+                    float(post_px_vec[cw_idx]) / float(pre_px_vec[cw_idx])
+                    if pre_px_vec[cw_idx] > 0
+                    else None
+                ),
+            },
+        },
+    }
+
+
+def reconstruct_phase_sampling_from_manifest(
+    catalog: Mapping[str, Any],
+    *,
+    sampling_seed: int,
+    mode: str,
+    updates: int,
+    accumulate_steps: int,
+    batch_size: int,
+    start_epoch: int,
+) -> Dict[str, Any]:
+    """Reconstructs exact PortraitDataset._ordered_records sampling and pre-augmentation exposure from manifest."""
+    _validate_non_negative_seed(sampling_seed, "sampling_seed")
+    if updates < 1 or accumulate_steps < 1 or batch_size < 1:
+        raise ValueError("updates, accumulate_steps, and batch_size must be positive.")
+
+    total_microbatches = updates * accumulate_steps
+    schedule = planned_schedule_sources(mode, total_microbatches)
+    sorted_by_source: Mapping[str, Sequence[Mapping[str, Any]]] = catalog[
+        "sorted_train_records_by_source"
+    ]
+    pool_summary: Mapping[str, Any] = catalog["pool_summary"]
+
+    def _source_record_stream(
+        source_name: str,
+        stats: Dict[str, Any],
+    ) -> Iterator[Tuple[int, Mapping[str, Any]]]:
+        pool = list(sorted_by_source[source_name])
+        if not pool:
+            raise ValueError(f"Empty train pool for source={source_name!r}")
+        ep = start_epoch
+        stats["start_epoch"] = start_epoch
+        stats["epochs_started"] = 0
+        stats["reshuffles_on_exhaustion"] = 0
+        stats["last_epoch"] = start_epoch
+        while True:
+            if stats["epochs_started"] > 0:
+                stats["reshuffles_on_exhaustion"] += 1
+            stats["epochs_started"] += 1
+            stats["last_epoch"] = ep
+            ordered = list(pool)
+            random.Random(sampling_seed + ep).shuffle(ordered)
+            for rec in ordered:
+                yield ep, rec
+            ep += 1
+
+    city_stats: Dict[str, Any] = {}
+    surf_stats: Dict[str, Any] = {}
+    city_gen = _source_record_stream("cityscapes", city_stats)
+    surf_gen = _source_record_stream("surface", surf_stats) if mode == "mixed_70_30" else None
+
+    ids_hasher = hashlib.sha256()
+    ordered_ids_hasher = hashlib.sha256()
+
+    presentations_by_source = {"surface": 0, "cityscapes": 0}
+    microbatches_by_source = {"surface": 0, "cityscapes": 0}
+    unique_ids_by_source: Dict[str, Set[str]] = {"surface": set(), "cityscapes": set()}
+    unique_groups_by_source: Dict[str, Set[str]] = {"surface": set(), "cityscapes": set()}
+    seen_in_epoch: Dict[Tuple[str, int], Set[str]] = {}
+    duplicate_within_epoch = 0
+
+    sorted_ranks_by_source: Dict[str, List[int]] = {"surface": [], "cityscapes": []}
+    manifest_indices_by_source: Dict[str, List[int]] = {"surface": [], "cityscapes": []}
+
+    pre_px_vec = [0] * NUM_SEMANTIC_CLASSES
+    pre_pos_pres_vec = [0] * NUM_SEMANTIC_CLASSES
+    pre_pos_uids: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+    pre_pos_ugroups: List[Set[str]] = [set() for _ in range(NUM_SEMANTIC_CLASSES)]
+    pre_pos_mbs_vec = [0] * NUM_SEMANTIC_CLASSES
+
+    cw_unique_ids_ordered: List[str] = []
+    cw_unique_ids_set: Set[str] = set()
+    cw_surface_sorted_ranks: List[int] = []
+    cw_surface_manifest_indices: List[int] = []
+    cw_pool_ranks: List[int] = []
+    ordered_ids_list: List[str] = []
+
+    pres_idx = 0
+    for mb_idx, src_name in enumerate(schedule):
+        gen = city_gen if src_name == "cityscapes" else surf_gen
+        assert gen is not None
+        batch_items = [next(gen) for _ in range(batch_size)]
+        ids = [str(r["id"]) for _, r in batch_items]
+        sources = [str(r["source"]) for _, r in batch_items]
+        header = f"step={mb_idx}|ids={','.join(ids)}|sources={','.join(sources)}\n".encode("utf-8")
+        ids_hasher.update(header)
+        microbatches_by_source[src_name] += 1
+
+        mb_pos = [0] * NUM_SEMANTIC_CLASSES
+        for slot_idx, (ep, rec) in enumerate(batch_items):
+            rid = str(rec["id"])
+            gid = str(rec["group_id"])
+            ep_set = seen_in_epoch.setdefault((src_name, ep), set())
+            if rid in ep_set:
+                duplicate_within_epoch += 1
+            ep_set.add(rid)
+
+            presentations_by_source[src_name] += 1
+            unique_ids_by_source[src_name].add(rid)
+            unique_groups_by_source[src_name].add(gid)
+            ordered_ids_list.append(rid)
+
+            s_rank = int(rec["sorted_pool_rank"])
+            m_idx = int(rec["manifest_source_index"])
+            sorted_ranks_by_source[src_name].append(s_rank)
+            manifest_indices_by_source[src_name].append(m_idx)
+
+            vec = rec["class_pixel_counts_vector"]
+            for c_idx in range(NUM_SEMANTIC_CLASSES):
+                px = int(vec[c_idx])
+                pre_px_vec[c_idx] += px
+                if px > 0:
+                    pre_pos_pres_vec[c_idx] += 1
+                    pre_pos_uids[c_idx].add(rid)
+                    pre_pos_ugroups[c_idx].add(gid)
+                    mb_pos[c_idx] += 1
+
+            cw_px = int(vec[CROSSWALK_CLASS_INDEX])
+            if cw_px > 0:
+                if rid not in cw_unique_ids_set:
+                    cw_unique_ids_set.add(rid)
+                    cw_unique_ids_ordered.append(rid)
+                if src_name == "surface":
+                    cw_surface_sorted_ranks.append(s_rank)
+                    cw_surface_manifest_indices.append(m_idx)
+                if rec["crosswalk_pool_rank"] is not None:
+                    cw_pool_ranks.append(int(rec["crosswalk_pool_rank"]))
+
+            ordered_ids_hasher.update(
+                f"pres={pres_idx}|mb={mb_idx}|slot={slot_idx}|epoch={ep}|id={rid}|src={src_name}|grp={gid}\n".encode(
+                    "utf-8"
+                )
+            )
+            pres_idx += 1
+
+        for c_idx in range(NUM_SEMANTIC_CLASSES):
+            if mb_pos[c_idx] > 0:
+                pre_pos_mbs_vec[c_idx] += 1
+
+    train_by_id = catalog["train_records_by_id"]
+    cw_unique_px_sum = sum(
+        int(train_by_id[rid]["class_pixel_counts"][CROSSWALK_CLASS_NAME])
+        for rid in cw_unique_ids_ordered
+    )
+    surf_pool_size = int(pool_summary["surface"]["eligible_record_count"])
+    city_pool_size = int(pool_summary["cityscapes"]["eligible_record_count"])
+    surf_pres = presentations_by_source["surface"]
+    cw_idx = CROSSWALK_CLASS_INDEX
+
+    return {
+        "sampling_seed": sampling_seed,
+        "schedule_mode": mode,
+        "start_epoch": start_epoch,
+        "effective_rng_seed": sampling_seed + start_epoch,
+        "updates": updates,
+        "accumulate_steps": accumulate_steps,
+        "batch_size": batch_size,
+        "total_microbatches": total_microbatches,
+        "total_presentations": pres_idx,
+        "ids_sha256": ids_hasher.hexdigest(),
+        "ordered_sample_ids_sha256": ordered_ids_hasher.hexdigest(),
+        "duplicate_presentations_within_epoch": duplicate_within_epoch,
+        "microbatches_by_source": microbatches_by_source,
+        "presentations_by_source": presentations_by_source,
+        "unique_sample_ids_by_source": {k: len(v) for k, v in unique_ids_by_source.items()},
+        "unique_group_ids_by_source": {k: len(v) for k, v in unique_groups_by_source.items()},
+        "stream_exhaustion_stats": {
+            "cityscapes": city_stats,
+            "surface": surf_stats if mode == "mixed_70_30" else None,
+        },
+        "source_rank_distribution": {
+            "surface": _summarize_rank_distribution(
+                sorted_ranks_by_source["surface"],
+                manifest_indices_by_source["surface"],
+                surf_pool_size,
+                presentations_by_source["surface"],
+            ),
+            "cityscapes": _summarize_rank_distribution(
+                sorted_ranks_by_source["cityscapes"],
+                manifest_indices_by_source["cityscapes"],
+                city_pool_size,
+                presentations_by_source["cityscapes"],
+            ),
+        },
+        "pre_augmentation_by_class": {
+            "pixel_counts": dict(zip(CLASS_NAMES, pre_px_vec)),
+            "positive_presentation_counts": dict(zip(CLASS_NAMES, pre_pos_pres_vec)),
+            "positive_unique_image_counts": {
+                c_name: len(pre_pos_uids[i]) for i, c_name in enumerate(CLASS_NAMES)
+            },
+            "positive_unique_group_counts": {
+                c_name: len(pre_pos_ugroups[i]) for i, c_name in enumerate(CLASS_NAMES)
+            },
+            "positive_microbatch_counts": dict(zip(CLASS_NAMES, pre_pos_mbs_vec)),
+        },
+        "crosswalk_pre_augmentation": {
+            "presentations": int(pre_pos_pres_vec[cw_idx]),
+            "unique_images": len(cw_unique_ids_ordered),
+            "unique_groups": len(pre_pos_ugroups[cw_idx]),
+            "microbatches": int(pre_pos_mbs_vec[cw_idx]),
+            "total_pixels": int(pre_px_vec[cw_idx]),
+            "unique_image_pixels": cw_unique_px_sum,
+            "selected_unique_ids": cw_unique_ids_ordered,
+            "surface_sorted_pool_rank_min": (
+                min(cw_surface_sorted_ranks) if cw_surface_sorted_ranks else None
+            ),
+            "surface_sorted_pool_rank_max": (
+                max(cw_surface_sorted_ranks) if cw_surface_sorted_ranks else None
+            ),
+            "surface_manifest_index_min": (
+                min(cw_surface_manifest_indices) if cw_surface_manifest_indices else None
+            ),
+            "surface_manifest_index_max": (
+                max(cw_surface_manifest_indices) if cw_surface_manifest_indices else None
+            ),
+            "crosswalk_pool_rank_min": min(cw_pool_ranks) if cw_pool_ranks else None,
+            "crosswalk_pool_rank_max": max(cw_pool_ranks) if cw_pool_ranks else None,
+            "surface_pool_quartile_counts": _compute_quartile_counts(
+                cw_surface_sorted_ranks, surf_pool_size
+            ),
+            "manifest_order_quartile_counts": _compute_quartile_counts(
+                cw_surface_manifest_indices, surf_pool_size
+            ),
+            "sampled_beyond_surface_prefix_count": sum(
+                1 for r in cw_surface_manifest_indices if r >= surf_pres
+            ),
+        },
+        "_surface_unique_ids_set": unique_ids_by_source["surface"],
+        "_ordered_ids_list": ordered_ids_list,
+    }
+
+
+def _strip_internal_keys(d: Mapping[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in d.items() if not k.startswith("_")}
+
+
+def audit_and_compare_sampling_seeds(
+    manifest_path: Path,
+    *,
+    old_sampling_seed: int = DEFAULT_SEED,
+    new_sampling_seed: int = DEFAULT_SAMPLING_SEED_RERUN,
+    phase1_updates: int = DEFAULT_PHASE1_UPDATES,
+    phase2_updates: int = DEFAULT_PHASE2_UPDATES,
+    accumulate_steps: int = DEFAULT_ACCUMULATE_STEPS,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    verify_converted_masks: bool = True,
+    catalog: Optional[Mapping[str, Any]] = None,
+    mask_verification_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Reconstructs and compares old (seed 42) and new (sampling_seed 20261031) pre-augmentation sampling orders."""
+    manifest_path = manifest_path.expanduser().resolve()
+    cat = dict(catalog) if catalog is not None else build_manifest_train_catalog(manifest_path)
+
+    def _reconstruct_seed(s_seed: int) -> Dict[str, Any]:
+        a_p1 = reconstruct_phase_sampling_from_manifest(
+            cat,
+            sampling_seed=s_seed,
+            mode="city_only",
+            updates=phase1_updates,
+            accumulate_steps=accumulate_steps,
+            batch_size=batch_size,
+            start_epoch=PHASE1_BASE_EPOCH,
+        )
+        b_p1 = reconstruct_phase_sampling_from_manifest(
+            cat,
+            sampling_seed=s_seed,
+            mode="mixed_70_30",
+            updates=phase1_updates,
+            accumulate_steps=accumulate_steps,
+            batch_size=batch_size,
+            start_epoch=PHASE1_BASE_EPOCH,
+        )
+        common_p2 = reconstruct_phase_sampling_from_manifest(
+            cat,
+            sampling_seed=s_seed,
+            mode="mixed_70_30",
+            updates=phase2_updates,
+            accumulate_steps=accumulate_steps,
+            batch_size=batch_size,
+            start_epoch=PHASE2_BASE_EPOCH,
+        )
+        b_cw_union_ids = list(
+            dict.fromkeys(
+                b_p1["crosswalk_pre_augmentation"]["selected_unique_ids"]
+                + common_p2["crosswalk_pre_augmentation"]["selected_unique_ids"]
+            )
+        )
+        train_by_id = cat["train_records_by_id"]
+        b_cw_union_groups = {train_by_id[rid]["group_id"] for rid in b_cw_union_ids}
+        b_cw_union_px = sum(
+            int(train_by_id[rid]["class_pixel_counts"][CROSSWALK_CLASS_NAME])
+            for rid in b_cw_union_ids
+        )
+        b_surf_union_ids = b_p1["_surface_unique_ids_set"] | common_p2["_surface_unique_ids_set"]
+
+        return {
+            "sampling_seed": s_seed,
+            "arm_a_phase1_city_only": _strip_internal_keys(a_p1),
+            "arm_b_phase1_mixed": _strip_internal_keys(b_p1),
+            "common_phase2_mixed": _strip_internal_keys(common_p2),
+            "arm_a_combined_pre_augmentation": {
+                "surface_presentations": common_p2["presentations_by_source"]["surface"],
+                "surface_unique_images": common_p2["unique_sample_ids_by_source"]["surface"],
+                "crosswalk_presentations": common_p2["crosswalk_pre_augmentation"]["presentations"],
+                "crosswalk_unique_images": common_p2["crosswalk_pre_augmentation"]["unique_images"],
+                "crosswalk_unique_groups": common_p2["crosswalk_pre_augmentation"]["unique_groups"],
+                "crosswalk_total_pre_aug_pixels": common_p2["crosswalk_pre_augmentation"][
+                    "total_pixels"
+                ],
+                "crosswalk_unique_image_pixels": common_p2["crosswalk_pre_augmentation"][
+                    "unique_image_pixels"
+                ],
+            },
+            "arm_b_combined_pre_augmentation": {
+                "surface_presentations": (
+                    b_p1["presentations_by_source"]["surface"]
+                    + common_p2["presentations_by_source"]["surface"]
+                ),
+                "surface_unique_images": len(b_surf_union_ids),
+                "crosswalk_presentations": (
+                    b_p1["crosswalk_pre_augmentation"]["presentations"]
+                    + common_p2["crosswalk_pre_augmentation"]["presentations"]
+                ),
+                "crosswalk_unique_images": len(b_cw_union_ids),
+                "crosswalk_unique_groups": len(b_cw_union_groups),
+                "crosswalk_total_pre_aug_pixels": (
+                    b_p1["crosswalk_pre_augmentation"]["total_pixels"]
+                    + common_p2["crosswalk_pre_augmentation"]["total_pixels"]
+                ),
+                "crosswalk_unique_image_pixels": b_cw_union_px,
+            },
+            "_cw_union_ids": b_cw_union_ids,
+            "_b_p1_surf_ids": b_p1["_surface_unique_ids_set"],
+            "_p2_surf_ids": common_p2["_surface_unique_ids_set"],
+        }
+
+    old_rec = _reconstruct_seed(old_sampling_seed)
+    new_rec = _reconstruct_seed(new_sampling_seed)
+
+    union_cw_ids = list(dict.fromkeys(old_rec["_cw_union_ids"] + new_rec["_cw_union_ids"]))
+    mask_verification = (
+        verify_converted_masks_against_manifest(
+            manifest_path,
+            cat,
+            union_cw_ids,
+            cache=mask_verification_cache,
+        )
+        if verify_converted_masks
+        else None
+    )
+
+    is_prod_default_shape = (
+        old_sampling_seed == DEFAULT_SEED
+        and phase1_updates == DEFAULT_PHASE1_UPDATES
+        and phase2_updates == DEFAULT_PHASE2_UPDATES
+        and accumulate_steps == DEFAULT_ACCUMULATE_STEPS
+        and batch_size == DEFAULT_BATCH_SIZE
+        and cat["pool_summary"]["surface"]["eligible_record_count"]
+        == EXPECTED_SPLIT_COUNTS["surface_train"]
+        and cat["pool_summary"]["cityscapes"]["eligible_record_count"]
+        == EXPECTED_SPLIT_COUNTS["cityscapes_train"]
+    )
+    prior_ids_digest_verified = False
+    if is_prod_default_shape:
+        prior_ids_digest_verified = (
+            old_rec["arm_a_phase1_city_only"]["ids_sha256"]
+            == PRIOR_SEED42_PHASE_IDS_SHA256["arm_a_phase1"]
+            and old_rec["arm_b_phase1_mixed"]["ids_sha256"]
+            == PRIOR_SEED42_PHASE_IDS_SHA256["arm_b_phase1"]
+            and old_rec["common_phase2_mixed"]["ids_sha256"]
+            == PRIOR_SEED42_PHASE_IDS_SHA256["phase2"]
+        )
+        if not prior_ids_digest_verified:
+            raise RuntimeError(
+                "Reconstructed seed=42 phase ids_sha256 did not match recorded ARIA-STRATEGY-AB-PILOT-20261031 digests!"
+            )
+
+    old_cw_set = set(old_rec["_cw_union_ids"])
+    new_cw_set = set(new_rec["_cw_union_ids"])
+
+    return {
+        "manifest_path": str(manifest_path),
+        "eligible_train_pools": cat["pool_summary"],
+        "sampler_contract": {
+            "algorithm": (
+                "PortraitDataset._ordered_records: sort full source train pool by record_id, "
+                "then random.Random(sampling_seed + epoch).shuffle(ordered) without replacement"
+            ),
+            "epoch_exhaustion_policy": (
+                "Increment epoch by +1 and reshuffle full source train pool with "
+                "random.Random(sampling_seed + epoch)"
+            ),
+            "sequential_manifest_prefix_used": False,
+            "stratified_or_label_biased_oversampling_used": False,
+            "augmentation_rng_note": (
+                "PortraitDataset.iter_samples uses random.Random(dataset.seed + epoch) for both "
+                "record ordering and sample augmentation; changing sampling_seed changes both sample "
+                "order and augmentation RNG relative to old seed=42 while keeping Phase 2 matched "
+                "across Arm A and Arm B."
+            ),
+            "old_run_reconstruction_scope": (
+                "Manifest and converted-mask pre-augmentation reconstruction only (cryptographically "
+                "matched to old GPU run via phase input_digest.ids_sha256); old post-augmentation "
+                "tensors were not logged as per-class pixel counts during the prior run and are not claimed here."
+            ),
+        },
+        "old_seed_audit": _strip_internal_keys(old_rec),
+        "new_seed_audit": _strip_internal_keys(new_rec),
+        "old_run_recorded_ids_sha256_match_verified": prior_ids_digest_verified,
+        "seed_comparison": {
+            "old_sampling_seed": old_sampling_seed,
+            "new_sampling_seed": new_sampling_seed,
+            "phase1_arm_a_ids_sha256_changed": (
+                old_rec["arm_a_phase1_city_only"]["ids_sha256"]
+                != new_rec["arm_a_phase1_city_only"]["ids_sha256"]
+            ),
+            "phase1_arm_b_ids_sha256_changed": (
+                old_rec["arm_b_phase1_mixed"]["ids_sha256"]
+                != new_rec["arm_b_phase1_mixed"]["ids_sha256"]
+            ),
+            "phase2_common_ids_sha256_changed": (
+                old_rec["common_phase2_mixed"]["ids_sha256"]
+                != new_rec["common_phase2_mixed"]["ids_sha256"]
+            ),
+            "phase1_surface_overlap_unique_ids": len(
+                old_rec["_b_p1_surf_ids"] & new_rec["_b_p1_surf_ids"]
+            ),
+            "phase2_surface_overlap_unique_ids": len(
+                old_rec["_p2_surf_ids"] & new_rec["_p2_surf_ids"]
+            ),
+            "crosswalk_positive_union_unique_images": len(union_cw_ids),
+            "crosswalk_positive_overlap_unique_images": len(old_cw_set & new_cw_set),
+        },
+        "union_converted_mask_verification": mask_verification,
+    }
+
+
 class PhaseInputDigestTracker:
     """Computes deterministic SHA-256 digests over actual phase inputs (IDs, image, semantic, weight)."""
 
@@ -487,11 +1870,23 @@ def run_training_phase(
     seed: int,
     phase_output_dir: Path,
     log_every_updates: int = 8,
+    catalog: Optional[Mapping[str, Any]] = None,
+    mask_verification_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    require_crosswalk_in_mixed: bool = True,
+    tracker_out: Optional[List[PhaseExposureTracker]] = None,
 ) -> Dict[str, Any]:
-    """Executes one controlled phase with fresh Adam optimizer and exact update/microbatch accounting."""
+    """Executes one controlled phase with fresh Adam optimizer and exact update/microbatch/exposure accounting."""
     if updates < 1 or batch_size < 1 or accumulate_steps < 1:
         raise ValueError("updates, batch_size, and accumulate_steps must be positive integers.")
     phase_output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = city_train_ds.manifest_path
+    cat = (
+        dict(catalog)
+        if catalog is not None
+        else build_manifest_train_catalog(manifest_path)
+    )
+    sampling_seed = int(city_train_ds.seed)
 
     # Reset RNG state identically for the phase start
     phase_seed = seed + (0 if phase_name == "phase1" else 1000)
@@ -542,6 +1937,17 @@ def run_training_phase(
     )
 
     digest_tracker = PhaseInputDigestTracker()
+    exposure_tracker = PhaseExposureTracker(
+        catalog=cat,
+        manifest_path=manifest_path,
+        phase_output_dir=phase_output_dir,
+        start_epoch=start_epoch,
+        accumulate_steps=accumulate_steps,
+        mask_verification_cache=mask_verification_cache,
+    )
+    if tracker_out is not None:
+        tracker_out.append(exposure_tracker)
+
     microbatches_by_source = {"surface": 0, "cityscapes": 0}
     samples_by_source = {"surface": 0, "cityscapes": 0}
     completed_updates = 0
@@ -551,68 +1957,87 @@ def run_training_phase(
     window_sample_count = 0
     started_at = time.time()
 
-    for micro_idx, source_name in enumerate(schedule):
-        if source_name == "cityscapes":
-            batch = next(city_stream)
-        elif source_name == "surface":
-            assert surface_stream is not None
-            batch = next(surface_stream)
-        else:
-            raise ValueError(f"Unexpected source {source_name!r}")
+    try:
+        for micro_idx, source_name in enumerate(schedule):
+            if source_name == "cityscapes":
+                batch = next(city_stream)
+            elif source_name == "surface":
+                assert surface_stream is not None
+                batch = next(surface_stream)
+            else:
+                raise ValueError(f"Unexpected source {source_name!r}")
 
-        count = len(batch["id"])
-        if count != batch_size:
-            raise RuntimeError(f"Expected microbatch size {batch_size}, got {count}.")
-        if any(s != source_name for s in batch["source"]):
-            raise RuntimeError(f"Batch source mismatch: expected {source_name}, got {batch['source']}.")
-        if any(sp != "train" for sp in batch["split"]):
-            raise RuntimeError(f"Non-train record encountered in training phase: {batch['split']}.")
-        if np.any(~np.isin(batch["semantic_source"], (0, 1))):
-            raise RuntimeError("Pseudo-label source detected during training; pseudo must be OFF.")
+            count = len(batch["id"])
+            if count != batch_size:
+                raise RuntimeError(f"Expected microbatch size {batch_size}, got {count}.")
+            if any(s != source_name for s in batch["source"]):
+                raise RuntimeError(f"Batch source mismatch: expected {source_name}, got {batch['source']}.")
+            if any(sp != "train" for sp in batch["split"]):
+                raise RuntimeError(f"Non-train record encountered in training phase: {batch['split']}.")
+            if np.any(~np.isin(batch["semantic_source"], (0, 1))):
+                raise RuntimeError("Pseudo-label source detected during training; pseudo must be OFF.")
 
-        digest_tracker.update(micro_idx, batch)
-        microbatches_by_source[source_name] += 1
-        samples_by_source[source_name] += count
+            digest_tracker.update(micro_idx, batch)
+            exposure_tracker.update(micro_idx, batch)
+            microbatches_by_source[source_name] += 1
+            samples_by_source[source_name] += count
 
-        image_t = tf.convert_to_tensor(batch["image"], dtype=tf.float32)
-        semantic_t = tf.convert_to_tensor(batch["semantic"], dtype=tf.int32)
-        weight_t = tf.convert_to_tensor(batch["semantic_weight"], dtype=tf.float32)
+            image_t = tf.convert_to_tensor(batch["image"], dtype=tf.float32)
+            semantic_t = tf.convert_to_tensor(batch["semantic"], dtype=tf.int32)
+            weight_t = tf.convert_to_tensor(batch["semantic_weight"], dtype=tf.float32)
 
-        stepped, metrics = trainer.train_micro_step(
-            images=image_t,
-            semantic_true=semantic_t,
-            semantic_weight=weight_t,
-            sample_count=count,
-        )
-        loss_val = float(metrics["total_loss"])
-        if not math.isfinite(loss_val):
-            raise FloatingPointError(
-                f"Non-finite training loss {loss_val} at {arm_name}/{phase_name} microbatch {micro_idx + 1}."
+            stepped, metrics = trainer.train_micro_step(
+                images=image_t,
+                semantic_true=semantic_t,
+                semantic_weight=weight_t,
+                sample_count=count,
             )
-        microbatch_losses.append(loss_val)
-        window_loss_sum += loss_val * count
-        window_sample_count += count
-
-        if stepped:
-            completed_updates += 1
-            if trainer.accumulation_counter != 0 or trainer.accumulated_samples != 0:
-                raise RuntimeError("Accumulator was not reset after optimizer update step.")
-            update_loss = window_loss_sum / window_sample_count
-            update_losses.append(update_loss)
-            window_loss_sum = 0.0
-            window_sample_count = 0
-            if (
-                completed_updates == 1
-                or completed_updates % log_every_updates == 0
-                or completed_updates == updates
-            ):
-                elapsed_so_far = time.time() - started_at
-                print(
-                    f"[{arm_name}][{phase_name}] Update {completed_updates}/{updates} "
-                    f"(microbatch {micro_idx + 1}/{total_microbatches}) "
-                    f"| loss={update_loss:.4f} | elapsed={elapsed_so_far:.1f}s",
-                    flush=True,
+            loss_val = float(metrics["total_loss"])
+            if not math.isfinite(loss_val):
+                raise FloatingPointError(
+                    f"Non-finite training loss {loss_val} at {arm_name}/{phase_name} microbatch {micro_idx + 1}."
                 )
+            microbatch_losses.append(loss_val)
+            window_loss_sum += loss_val * count
+            window_sample_count += count
+
+            if stepped:
+                completed_updates += 1
+                if trainer.accumulation_counter != 0 or trainer.accumulated_samples != 0:
+                    raise RuntimeError("Accumulator was not reset after optimizer update step.")
+                update_loss = window_loss_sum / window_sample_count
+                update_losses.append(update_loss)
+                window_loss_sum = 0.0
+                window_sample_count = 0
+                if (
+                    completed_updates == 1
+                    or completed_updates % log_every_updates == 0
+                    or completed_updates == updates
+                ):
+                    elapsed_so_far = time.time() - started_at
+                    print(
+                        f"[{arm_name}][{phase_name}] Update {completed_updates}/{updates} "
+                        f"(microbatch {micro_idx + 1}/{total_microbatches}) "
+                        f"| loss={update_loss:.4f} | elapsed={elapsed_so_far:.1f}s",
+                        flush=True,
+                    )
+    finally:
+        exposure_audit = exposure_tracker.finalize()
+
+    if (
+        mode == "mixed_70_30"
+        and require_crosswalk_in_mixed
+        and int(cat["pool_summary"]["surface"]["crosswalk_positive_record_count"]) > 0
+    ):
+        pre_cw_px = int(exposure_audit["crosswalk_exposure"]["pre_augmentation"]["total_pixels"])
+        post_cw_px = int(exposure_audit["crosswalk_exposure"]["post_augmentation"]["total_pixels"])
+        post_cw_pres = int(exposure_audit["crosswalk_exposure"]["post_augmentation"]["presentations"])
+        if pre_cw_px <= 0 or post_cw_px <= 0 or post_cw_pres <= 0:
+            raise RuntimeError(
+                f"Mixed training phase {arm_name}/{phase_name} consumed zero real crosswalk supervision "
+                f"(pre_aug_pixels={pre_cw_px}, post_aug_pixels={post_cw_px}, post_aug_presentations={post_cw_pres}); "
+                "failing clearly without label-biased resampling."
+            )
 
     if completed_updates != updates:
         raise RuntimeError(f"Expected {updates} optimizer updates, completed {completed_updates}.")
@@ -659,6 +2084,8 @@ def run_training_phase(
         "phase": phase_name,
         "schedule_mode": mode,
         "start_epoch": start_epoch,
+        "sampling_seed": sampling_seed,
+        "effective_sampling_rng_seed": sampling_seed + start_epoch,
         "phase_seed": phase_seed,
         "learning_rate": learning_rate,
         "fresh_adam_optimizer_initialized": True,
@@ -682,6 +2109,7 @@ def run_training_phase(
             "surface": surface_stream_stats if mode == "mixed_70_30" else None,
         },
         "input_digest": digest_tracker.summary(),
+        "exposure_audit": exposure_audit,
         "initial_weights_tensor_hashes": initial_tensor_hashes,
         "final_weights_tensor_hashes": final_tensor_hashes,
         "saved_weights_path": str(weights_path),
@@ -1294,6 +2722,10 @@ def run_strategy_experiment(
     device: str = "gpu",
     weights: Optional[str] = "imagenet",
     seed: int = DEFAULT_SEED,
+    sampling_seed: Optional[int] = None,
+    initial_weights_path: Optional[Path] = None,
+    expected_initial_weights_file_sha256: Optional[str] = None,
+    expected_initial_tensor_sha256: Optional[str] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     accumulate_steps: int = DEFAULT_ACCUMULATE_STEPS,
     phase1_updates: int = DEFAULT_PHASE1_UPDATES,
@@ -1302,10 +2734,12 @@ def run_strategy_experiment(
     phase2_lr: float = DEFAULT_PHASE2_LR,
     clipnorm: float = DEFAULT_CLIPNORM,
     require_expected_manifest_hash: bool = True,
+    require_crosswalk_in_mixed: bool = True,
     model_factory: Optional[Callable[[Optional[str]], keras.Model]] = None,
 ) -> Dict[str, Any]:
     """Runs the complete two-arm controlled strategy experiment and persists machine-readable results."""
     started_at = time.time()
+    effective_sampling_seed = resolve_sampling_seed(seed, sampling_seed)
     output_dir = output_dir.expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(
@@ -1321,7 +2755,8 @@ def run_strategy_experiment(
     print(f"Manifest: {manifest_path}", flush=True)
     print(f"Output Dir: {output_dir}", flush=True)
     print(
-        f"Device: {device} | Weights: {weights} | Seed: {seed} | "
+        f"Device: {device} | Weights: {weights} | Model Seed: {seed} | "
+        f"Sampling Seed: {effective_sampling_seed} | "
         f"Phase1: {phase1_updates} updates (LR {phase1_lr}) | "
         f"Phase2: {phase2_updates} updates (LR {phase2_lr}) | "
         f"Batch: {batch_size} x Accum: {accumulate_steps}",
@@ -1329,9 +2764,31 @@ def run_strategy_experiment(
     )
     print("=" * 78, flush=True)
 
-    # 1. Construct datasets once and audit manifest + provenance
+    # 1. Build manifest train catalog, static old/new sampling audit, and PortraitDataset splits once
+    catalog = build_manifest_train_catalog(manifest_path)
+    mask_verification_cache: Dict[str, Dict[str, Any]] = {}
+    sampling_audit = audit_and_compare_sampling_seeds(
+        manifest_path,
+        old_sampling_seed=DEFAULT_SEED,
+        new_sampling_seed=effective_sampling_seed,
+        phase1_updates=phase1_updates,
+        phase2_updates=phase2_updates,
+        accumulate_steps=accumulate_steps,
+        batch_size=batch_size,
+        verify_converted_masks=True,
+        catalog=catalog,
+        mask_verification_cache=mask_verification_cache,
+    )
+    (output_dir / "sampling_seed_audit.json").write_text(
+        json.dumps(sampling_audit, indent=2, allow_nan=False), encoding="utf-8"
+    )
+
     t0 = time.time()
-    datasets = build_experiment_datasets(manifest_path, seed=seed)
+    datasets = build_experiment_datasets(
+        manifest_path,
+        seed=seed,
+        sampling_seed=effective_sampling_seed,
+    )
     dataset_init_seconds = time.time() - t0
     print(f"[Init] Constructed 4 PortraitDataset splits in {dataset_init_seconds:.2f}s.", flush=True)
 
@@ -1351,24 +2808,87 @@ def run_strategy_experiment(
         flush=True,
     )
 
-    # 2. Build shared initial model and save shared initial weights
+    # 2. Build shared initial model and save/verify shared initial weights
     factory = model_factory or _default_model_factory
     keras.backend.clear_session()
     gc.collect()
     set_deterministic_seeds(seed)
-    init_model = factory(weights)
+
     shared_init_dir = output_dir / "shared_init"
     shared_init_dir.mkdir(parents=True, exist_ok=True)
     shared_init_weights_path = shared_init_dir / "shared_initial.weights.h5"
-    init_model.save_weights(str(shared_init_weights_path))
-    shared_init_file_sha256 = compute_sha256(shared_init_weights_path)
-    shared_init_tensor_hashes = compute_model_weights_tensor_sha256(init_model)
+    source_initial_weights_path_str: Optional[str] = None
+    source_initial_weights_file_sha256: Optional[str] = None
+
+    if initial_weights_path is not None:
+        src_init_path = Path(initial_weights_path).expanduser().resolve()
+        if not src_init_path.is_file():
+            raise FileNotFoundError(f"Initial weights file not found: {src_init_path}")
+        source_initial_weights_path_str = str(src_init_path)
+        source_initial_weights_file_sha256 = compute_sha256(src_init_path)
+        expected_file_sha = expected_initial_weights_file_sha256 or (
+            PRIOR_SHARED_INIT_FILE_SHA256 if require_expected_manifest_hash else None
+        )
+        if expected_file_sha and source_initial_weights_file_sha256 != expected_file_sha:
+            raise ValueError(
+                f"Initial weights file SHA-256 mismatch: expected {expected_file_sha}, "
+                f"got {source_initial_weights_file_sha256}."
+            )
+        init_model = factory(None)
+        init_model.load_weights(str(src_init_path))
+        shared_init_tensor_hashes = compute_model_weights_tensor_sha256(init_model)
+        expected_tensor_sha = expected_initial_tensor_sha256 or (
+            PRIOR_SHARED_INIT_ALL_TENSOR_SHA256 if require_expected_manifest_hash else None
+        )
+        if (
+            expected_tensor_sha
+            and shared_init_tensor_hashes["all_weights_tensor_sha256"] != expected_tensor_sha
+        ):
+            raise ValueError(
+                f"Initial weights tensor SHA-256 mismatch: expected {expected_tensor_sha}, "
+                f"got {shared_init_tensor_hashes['all_weights_tensor_sha256']}."
+            )
+        if require_expected_manifest_hash and expected_initial_tensor_sha256 is None:
+            if (
+                shared_init_tensor_hashes["trainable_weights_tensor_sha256"]
+                != PRIOR_SHARED_INIT_TRAINABLE_TENSOR_SHA256
+                or shared_init_tensor_hashes["non_trainable_weights_tensor_sha256"]
+                != PRIOR_SHARED_INIT_NON_TRAINABLE_TENSOR_SHA256
+            ):
+                raise ValueError(
+                    "Initial weights trainable/non-trainable tensor SHA-256 mismatch against prior shared init."
+                )
+        if src_init_path != shared_init_weights_path:
+            shutil.copyfile(src_init_path, shared_init_weights_path)
+        shared_init_file_sha256 = compute_sha256(shared_init_weights_path)
+    else:
+        init_model = factory(weights)
+        init_model.save_weights(str(shared_init_weights_path))
+        shared_init_file_sha256 = compute_sha256(shared_init_weights_path)
+        shared_init_tensor_hashes = compute_model_weights_tensor_sha256(init_model)
+        if (
+            expected_initial_weights_file_sha256
+            and shared_init_file_sha256 != expected_initial_weights_file_sha256
+        ):
+            raise ValueError(
+                f"Initial weights file SHA-256 mismatch: expected {expected_initial_weights_file_sha256}, "
+                f"got {shared_init_file_sha256}."
+            )
+        if (
+            expected_initial_tensor_sha256
+            and shared_init_tensor_hashes["all_weights_tensor_sha256"] != expected_initial_tensor_sha256
+        ):
+            raise ValueError(
+                f"Initial weights tensor SHA-256 mismatch: expected {expected_initial_tensor_sha256}, "
+                f"got {shared_init_tensor_hashes['all_weights_tensor_sha256']}."
+            )
+
     del init_model
     keras.backend.clear_session()
     gc.collect()
 
     print(
-        f"[Init] Saved shared initial weights: file_sha256={shared_init_file_sha256[:16]}..., "
+        f"[Init] Shared initial weights ready: file_sha256={shared_init_file_sha256[:16]}..., "
         f"tensor_sha256={shared_init_tensor_hashes['all_weights_tensor_sha256'][:16]}...",
         flush=True,
     )
@@ -1406,6 +2926,7 @@ def run_strategy_experiment(
             raise RuntimeError(f"{arm_key} trainable_variable_paths mismatch.")
 
         print(f"\n--- Starting {arm_key} ({arm_label}) ---", flush=True)
+        p1_trackers: List[PhaseExposureTracker] = []
         phase1_summary = run_training_phase(
             model=model,
             arm_name=arm_key,
@@ -1422,8 +2943,13 @@ def run_strategy_experiment(
             start_epoch=PHASE1_BASE_EPOCH,
             seed=seed,
             phase_output_dir=arm_dir / "phase1",
+            catalog=catalog,
+            mask_verification_cache=mask_verification_cache,
+            require_crosswalk_in_mixed=require_crosswalk_in_mixed,
+            tracker_out=p1_trackers,
         )
 
+        p2_trackers: List[PhaseExposureTracker] = []
         phase2_summary = run_training_phase(
             model=model,
             arm_name=arm_key,
@@ -1440,6 +2966,17 @@ def run_strategy_experiment(
             start_epoch=PHASE2_BASE_EPOCH,
             seed=seed,
             phase_output_dir=arm_dir / "phase2",
+            catalog=catalog,
+            mask_verification_cache=mask_verification_cache,
+            require_crosswalk_in_mixed=require_crosswalk_in_mixed,
+            tracker_out=p2_trackers,
+        )
+
+        arm_exposure_audit = aggregate_arm_exposure_audit(
+            p1_trackers[0],
+            p2_trackers[0],
+            phase1_summary["exposure_audit"],
+            phase2_summary["exposure_audit"],
         )
 
         print(f"[{arm_key}] Evaluating full validation split...", flush=True)
@@ -1493,6 +3030,7 @@ def run_strategy_experiment(
                 "surface": total_surface_samples / total_arm_samples if total_arm_samples else 0.0,
                 "cityscapes": total_city_samples / total_arm_samples if total_arm_samples else 0.0,
             },
+            "exposure_audit": arm_exposure_audit,
             "phase1": phase1_summary,
             "phase2": phase2_summary,
             "validation": val_summary,
@@ -1509,9 +3047,15 @@ def run_strategy_experiment(
         keras.backend.clear_session()
         gc.collect()
 
-    # 3. Verify strict cross-arm invariants
+    # 3. Verify strict cross-arm invariants (preserving all 9 original keys + exposure audit controls)
     arm_a = arm_results["arm_a"]
     arm_b = arm_results["arm_b"]
+    a_p1_exp = arm_a["phase1"]["exposure_audit"]
+    b_p1_exp = arm_b["phase1"]["exposure_audit"]
+    a_p2_exp = arm_a["phase2"]["exposure_audit"]
+    b_p2_exp = arm_b["phase2"]["exposure_audit"]
+    has_pool_crosswalk = int(catalog["pool_summary"]["surface"]["crosswalk_positive_record_count"]) > 0
+
     invariants = {
         "shared_initial_tensor_sha256_equal": (
             arm_a["initial_weights_tensor_hashes"]["all_weights_tensor_sha256"]
@@ -1553,6 +3097,39 @@ def run_strategy_experiment(
         "validation_images_equal": (
             arm_a["validation"]["images_by_domain"] == arm_b["validation"]["images_by_domain"]
         ),
+        "phase2_exposure_audit_equal": (
+            a_p2_exp["ordered_sample_ids_sha256"] == b_p2_exp["ordered_sample_ids_sha256"]
+            and a_p2_exp["exposure_digest_sha256"] == b_p2_exp["exposure_digest_sha256"]
+            and a_p2_exp["ordered_samples_jsonl_sha256"] == b_p2_exp["ordered_samples_jsonl_sha256"]
+            and a_p2_exp["microbatch_exposure_jsonl_sha256"]
+            == b_p2_exp["microbatch_exposure_jsonl_sha256"]
+        ),
+        "phase1_exposure_audit_distinct": (
+            a_p1_exp["ordered_sample_ids_sha256"] != b_p1_exp["ordered_sample_ids_sha256"]
+            and a_p1_exp["exposure_digest_sha256"] != b_p1_exp["exposure_digest_sha256"]
+        ),
+        "no_within_epoch_duplicate_samples": (
+            arm_a["exposure_audit"]["duplicate_presentations_within_epoch"] == 0
+            and arm_b["exposure_audit"]["duplicate_presentations_within_epoch"] == 0
+        ),
+        "no_val_or_test_samples_in_training": (
+            arm_a["exposure_audit"]["non_train_split_ids_encountered"] == 0
+            and arm_b["exposure_audit"]["non_train_split_ids_encountered"] == 0
+        ),
+        "mixed_phases_have_real_crosswalk_supervision": (
+            (not require_crosswalk_in_mixed or not has_pool_crosswalk)
+            or (
+                b_p1_exp["crosswalk_exposure"]["post_augmentation"]["total_pixels"] > 0
+                and a_p2_exp["crosswalk_exposure"]["post_augmentation"]["total_pixels"] > 0
+                and b_p2_exp["crosswalk_exposure"]["post_augmentation"]["total_pixels"] > 0
+                and b_p1_exp["crosswalk_exposure"]["converted_mask_verification"][
+                    "all_verified_masks_match_manifest"
+                ]
+                and a_p2_exp["crosswalk_exposure"]["converted_mask_verification"][
+                    "all_verified_masks_match_manifest"
+                ]
+            )
+        ),
     }
     if not all(invariants.values()):
         raise RuntimeError(f"Cross-arm protocol invariant check failed: {invariants}")
@@ -1563,7 +3140,9 @@ def run_strategy_experiment(
     results_payload: Dict[str, Any] = {
         "schema_version": 1,
         "experiment_id": EXPERIMENT_ID,
+        "random_sampling_task_id": RANDOM_SAMPLING_TASK_ID,
         "protocol_document": PROTOCOL_DOC,
+        "random_sampling_protocol_document": RANDOM_SAMPLING_PROTOCOL_DOC,
         "status": "COMPLETED",
         "exit_code": 0,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1576,6 +3155,15 @@ def run_strategy_experiment(
             "encoder_policy": "freeze_all",
             "freeze_bn": True,
             "seed": seed,
+            "model_seed": seed,
+            "sampling_seed": effective_sampling_seed,
+            "sampling_seed_explicit": sampling_seed is not None,
+            "sampler_algorithm": sampling_audit["sampler_contract"]["algorithm"],
+            "epoch_exhaustion_policy": sampling_audit["sampler_contract"]["epoch_exhaustion_policy"],
+            "eligible_train_pool_counts": {
+                "cityscapes": int(catalog["pool_summary"]["cityscapes"]["eligible_record_count"]),
+                "surface": int(catalog["pool_summary"]["surface"]["eligible_record_count"]),
+            },
             "device": device,
             "batch_size": batch_size,
             "accumulate_steps": accumulate_steps,
@@ -1595,10 +3183,27 @@ def run_strategy_experiment(
             "pseudo_labels_enabled": False,
         },
         "manifest_and_class_weights": manifest_audit,
+        "sampling_seed_audit": sampling_audit,
         "shared_initialization": {
+            "initialization_mode": (
+                "loaded_immutable_shared_init"
+                if initial_weights_path is not None
+                else "fresh_seed_initialized"
+            ),
+            "checkpoint_kind": "untrained_shared_initialization",
+            "production_stage_predecessor_eligible": False,
+            "source_initial_weights_path": source_initial_weights_path_str,
+            "source_initial_weights_file_sha256": source_initial_weights_file_sha256,
             "shared_initial_weights_path": str(shared_init_weights_path),
             "shared_initial_weights_file_sha256": shared_init_file_sha256,
             "shared_initial_tensor_hashes": shared_init_tensor_hashes,
+            "matches_prior_pilot_shared_init_file_sha256": (
+                shared_init_file_sha256 == PRIOR_SHARED_INIT_FILE_SHA256
+            ),
+            "matches_prior_pilot_shared_init_tensor_sha256": (
+                shared_init_tensor_hashes["all_weights_tensor_sha256"]
+                == PRIOR_SHARED_INIT_ALL_TENSOR_SHA256
+            ),
         },
         "invariants_verified": invariants,
         "arms": arm_results,
@@ -1653,6 +3258,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Backbone initialization ('imagenet' or 'none'). Default: imagenet.",
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--sampling-seed",
+        type=int,
+        default=None,
+        help="Explicit dataset sampling/augmentation seed (defaults to --seed when omitted).",
+    )
+    parser.add_argument(
+        "--initial-weights-path",
+        type=Path,
+        default=None,
+        help="Optional immutable untrained shared_initial.weights.h5 to load and verify before Phase 1.",
+    )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--accumulate-steps", type=int, default=DEFAULT_ACCUMULATE_STEPS)
     parser.add_argument("--phase1-updates", type=int, default=DEFAULT_PHASE1_UPDATES)
@@ -1679,6 +3296,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         device=args.device,
         weights=weights,
         seed=args.seed,
+        sampling_seed=args.sampling_seed,
+        initial_weights_path=args.initial_weights_path,
         batch_size=args.batch_size,
         accumulate_steps=args.accumulate_steps,
         phase1_updates=args.phase1_updates,
