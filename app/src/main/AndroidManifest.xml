@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.ar" android:required="false" />
 
     <queries>
         <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
@@ -47,6 +48,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <meta-data
+            android:name="com.google.ar.core"
+            android:value="optional" />
+        <activity
+            android:name=".distance.DistanceActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Aria" />
     </application>
 
 </manifest>

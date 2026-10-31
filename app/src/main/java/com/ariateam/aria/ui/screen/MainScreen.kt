@@ -50,6 +50,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ariateam.aria.DebugDestination
 import com.ariateam.aria.PendingCameraStartGate
+import com.ariateam.aria.distance.DistanceActivity
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceViewModel
 import com.ariateam.aria.startup.DefaultStartupSoundPlayer
@@ -123,6 +124,7 @@ fun MainScreen(
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var debugDestination by rememberSaveable { mutableStateOf(DebugDestination.None) }
     var showLicenses by rememberSaveable { mutableStateOf(false) }
+    var isDistanceModeForeground by rememberSaveable { mutableStateOf(false) }
     val pendingCameraGate = remember { PendingCameraStartGate() }
 
     val isVisionRestoreCompleted by visionModel.isInitialRestoreCompleted.collectAsStateWithLifecycle()
@@ -206,6 +208,7 @@ fun MainScreen(
             if (event == Lifecycle.Event.ON_STOP || event == Lifecycle.Event.ON_DESTROY) {
                 invalidatePendingAndStopCamera()
             } else if (event == Lifecycle.Event.ON_RESUME) {
+                isDistanceModeForeground = false
                 val missingPermissions = refreshRuntimePermissions()
                 val lostPermissions = startupModel.observeGrantedPermissions(
                     requiredRuntimePermissions.filterNot(missingPermissions::contains).toSet(),
@@ -414,7 +417,7 @@ fun MainScreen(
             isStartupSettingsVisible = startupModel.isStartupSettingsVisible,
             permissionLossDetected = permissionLossDetected,
         )
-        if (!isScreenEligible || !isResumed) {
+        if (!isScreenEligible || !isResumed || isDistanceModeForeground) {
             invalidatePendingAndStopCamera()
         } else if (StartupPermissionInventory.CAMERA !in refreshRuntimePermissions()) {
             pendingCameraGate.invalidate()
@@ -440,6 +443,11 @@ fun MainScreen(
                 Uri.parse("package:${context.packageName}"),
             )
         )
+    }
+    val openDistanceMode = {
+        isDistanceModeForeground = true
+        invalidatePendingAndStopCamera()
+        context.startActivity(DistanceActivity.createIntent(context))
     }
     val openStartupSettings = {
         when {
@@ -514,6 +522,7 @@ fun MainScreen(
                                 onStart = { requestAction(1) },
                                 onFinish = model::finishDictation,
                                 onOpenSettings = openSettings,
+                                onOpenDistanceMode = openDistanceMode,
                                 onStartWaiting = { requestAction(0) },
                                 onStop = model::stop,
                                 modifier = Modifier
@@ -527,7 +536,7 @@ fun MainScreen(
                                 visionUiState = visionUiState,
                                 visionModelState = visionModelState,
                                 hasCameraPermission = StartupPermissionInventory.CAMERA !in missingRuntimePermissions,
-                                isHomeVisible = screenVisible && selectedTab == 0 && startupModel.hasBeenAdmitted && !permissionLossDetected,
+                                isHomeVisible = screenVisible && selectedTab == 0 && startupModel.hasBeenAdmitted && !permissionLossDetected && !isDistanceModeForeground,
                                 onStartCamera = { provider, rotation ->
                                     requestStartCamera(provider, VisionPipelineMode.PREPROCESS_OR_INFERENCE, rotation)
                                 },
@@ -653,6 +662,7 @@ fun MainScreen(
                                     debugDestination = DebugDestination.PresentationDemo
                                 },
                                 onOpenLicenses = { showLicenses = true },
+                                onOpenDistanceMode = openDistanceMode,
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(bottom = navSafeBottomPadding + transcriptContentClearance),

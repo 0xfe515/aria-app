@@ -77,6 +77,7 @@ fun VoiceDemoScreen(
     modifier: Modifier = Modifier,
     onStartWaiting: () -> Unit = onStart,
     onStop: () -> Unit = {},
+    onOpenDistanceMode: () -> Unit = {},
 ) {
     var retrySeconds by remember { mutableLongStateOf(0L) }
     LaunchedEffect(state.phase, state.retryAtMillis) {
@@ -125,7 +126,7 @@ fun VoiceDemoScreen(
                 ) {
                     HomeStatusInfo(state, retrySeconds)
                     TapHintPill()
-                    HomeActionButtons(state, onOpenSettings)
+                    HomeActionButtons(state, onOpenSettings, onOpenDistanceMode)
                 }
             }
         } else {
@@ -139,7 +140,7 @@ fun VoiceDemoScreen(
                 PowerControl(state, accent, buttonSize, onStartWaiting, onStop)
                 HomeStatusInfo(state, retrySeconds)
                 TapHintPill()
-                HomeActionButtons(state, onOpenSettings)
+                HomeActionButtons(state, onOpenSettings, onOpenDistanceMode)
             }
         }
     }
@@ -211,6 +212,7 @@ private fun TapHintPill() {
 private fun HomeActionButtons(
     state: VoiceState,
     onOpenSettings: () -> Unit,
+    onOpenDistanceMode: () -> Unit,
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -224,6 +226,18 @@ private fun HomeActionButtons(
             ) {
                 Text(stringResource(R.string.open_app_settings))
             }
+        }
+        OutlinedButton(
+            onClick = onOpenDistanceMode,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, AriaSky.copy(alpha = 0.5f)),
+        ) {
+            Text(
+                stringResource(R.string.distance_open_button),
+                color = AriaSky,
+                style = MaterialTheme.typography.labelLarge,
+            )
         }
     }
 }

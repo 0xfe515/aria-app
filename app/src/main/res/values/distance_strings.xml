@@ -1,0 +1,51 @@
+<resources>
+    <string name="distance_mode_title">보행 장애물 거리 감지</string>
+    <string name="distance_mode_short_title">거리 감지</string>
+    <string name="distance_open_button">보행 거리 감지 (AR)</string>
+    <string name="distance_open_summary">ARCore Raw Depth 기반 보행 전방 장애물 거리 측정 및 진동 알림</string>
+    <string name="distance_close">닫기</string>
+    <string name="distance_recalibrate">재보정</string>
+
+    <!-- Onboarding / Guidance -->
+    <string name="distance_onboarding_title">안전한 보행 거리 감지 안내</string>
+    <string name="distance_onboarding_step1_title">1. 자연스러운 자세</string>
+    <string name="distance_onboarding_step1_desc">스마트폰을 가슴이나 허리 높이에서 수직에 가깝게 자연스럽게 들고, 카메라가 걷는 방향을 향하도록 유지해 주세요.</string>
+    <string name="distance_onboarding_step2_title">2. 정지 상태 초기 스캔</string>
+    <string name="distance_onboarding_step2_desc">안전한 제자리에 멈춰 선 상태에서 카메라를 전방과 바닥 쪽으로 천천히 비춰주세요. 바닥과 주변 공간이 인식될 때까지 잠시 기다려 주세요.</string>
+    <string name="distance_onboarding_step3_title">3. 바닥 및 공간 인식 후 보행</string>
+    <string name="distance_onboarding_step3_desc">지면 인식이 완료되면 장애물과의 추정 거리가 실시간으로 계산되며, 이동 중 위험 감지 시 진동으로 경고합니다.</string>
+    <string name="distance_onboarding_confirm">확인 및 시작</string>
+    <string name="distance_onboarding_checkbox">다시 보지 않기</string>
+
+    <!-- Readiness & Quality Gates -->
+    <string name="distance_readiness_init">AR 시스템 및 센서 준비 중…</string>
+    <string name="distance_readiness_floor_searching">바닥 인식 중: 안전한 제자리에서 바닥과 전방을 천천히 비춰주세요</string>
+    <string name="distance_readiness_floor_detected">바닥 인식 완료 (카메라 기준: %1$.2fm)</string>
+    <string name="distance_readiness_tracking_lost">공간 추적 불안정: 기기를 천천히 움직여 주세요</string>
+    <string name="distance_readiness_raw_depth_active">ARCore Raw Depth 동작 중</string>
+
+    <!-- Errors / Unsupported -->
+    <string name="distance_error_arcore_unavailable">이 기기에서는 Google Play AR 서비스를 사용할 수 없습니다.</string>
+    <string name="distance_error_arcore_install_required">ARCore 서비스 설치 또는 업데이트가 필요합니다.</string>
+    <string name="distance_error_raw_depth_unsupported">이 기기는 ARCore Raw Depth 모드를 지원하지 않습니다.</string>
+    <string name="distance_error_permission_denied">거리 측정을 위해 카메라 권한이 필요합니다.</string>
+    <string name="distance_return_to_main">Aria 홈으로 돌아가기</string>
+
+    <!-- Measurement Status & Risk -->
+    <string name="distance_status_preparing">준비 중</string>
+    <string name="distance_status_tracking">측정 중</string>
+    <string name="distance_status_unavailable">측정 불가</string>
+
+    <string name="distance_risk_urgent">경고: 전방 근접 장애물</string>
+    <string name="distance_risk_caution">주의: 전방 장애물 접근</string>
+    <string name="distance_risk_clear">측정 범위 내 경고 조건 미감지</string>
+    <string name="distance_risk_unknown">거리 확인 불가 (주의 필요)</string>
+
+    <string name="distance_meters_format">%.1f m</string>
+    <string name="distance_meters_empty">-- m</string>
+
+    <!-- Guidance and Disclaimers -->
+    <string name="distance_experimental_notice">실험적 보행 보조 기능: 카메라 기준 전방 보행 복도(폭 ±0.45m) 내 장애물을 감지합니다. 바닥 반사, 투명체, 저조도 환경에서는 오차가 발생할 수 있으므로 보행 시 반드시 주변을 직접 확인하세요.</string>
+    <string name="distance_threshold_guide">경고 기준: 1.5m 이하 즉각 진동 경고 | 주의 기준: 3.0m 이하 주의 진동</string>
+    <string name="distance_samples_count">유효 포인트: %1$d개</string>
+</resources>

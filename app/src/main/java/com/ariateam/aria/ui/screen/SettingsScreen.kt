@@ -56,6 +56,7 @@ fun SettingsScreen(
     onOpenPresentationDemo: () -> Unit = {},
     initialDebugExpanded: Boolean = false,
     onOpenLicenses: () -> Unit = {},
+    onOpenDistanceMode: () -> Unit = {},
 ) {
     var page by rememberSaveable {
         mutableStateOf(if (initialDebugExpanded) SettingsPage.Diagnostics else SettingsPage.Root)
@@ -107,6 +108,7 @@ fun SettingsScreen(
                 onOpenVisionDiagnostics = onOpenVisionDiagnostics,
                 onOpenVoiceDiagnostics = onOpenVoiceDiagnostics,
                 onOpenPresentationDemo = onOpenPresentationDemo,
+                onOpenDistanceMode = onOpenDistanceMode,
                 onBack = { page = SettingsPage.Root },
             )
 
@@ -309,10 +311,16 @@ private fun DiagnosticsSettings(
     onOpenVisionDiagnostics: () -> Unit,
     onOpenVoiceDiagnostics: () -> Unit,
     onOpenPresentationDemo: () -> Unit,
+    onOpenDistanceMode: () -> Unit,
     onBack: () -> Unit,
 ) {
     SettingsPageHeader(stringResource(R.string.settings_diagnostics_title), onBack)
     SettingsSectionTitle(stringResource(R.string.settings_diagnostics_group))
+    SettingsNavigationRow(
+        title = stringResource(R.string.distance_mode_title),
+        summary = stringResource(R.string.distance_open_summary),
+        onClick = onOpenDistanceMode,
+    )
     SettingsNavigationRow(
         title = stringResource(R.string.debug_open_vision),
         summary = stringResource(R.string.settings_vision_diagnostics_summary),
