@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import ntpath
 import os
 import random
@@ -66,6 +67,8 @@ class PortraitDataset:
         seed: int = 42,
         require_complete: bool = True,
         *,
+        sampling_seed: int | None = None,
+        augmentation_seed: int | None = None,
         path_resolver: Any = None,
         _is_windows: bool | None = None,
     ) -> None:
@@ -73,12 +76,23 @@ class PortraitDataset:
             raise PortraitDatasetError(f"Unknown split {split!r}; expected train, val, or test.")
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise PortraitDatasetError("seed must be a non-negative integer.")
+        if sampling_seed is None:
+            sampling_seed = seed
+        if isinstance(sampling_seed, bool) or not isinstance(sampling_seed, int) or sampling_seed < 0:
+            raise PortraitDatasetError("sampling_seed must be a non-negative integer.")
+        self._legacy_augmentation_stream = augmentation_seed is None
+        if augmentation_seed is None:
+            augmentation_seed = seed
+        if isinstance(augmentation_seed, bool) or not isinstance(augmentation_seed, int) or augmentation_seed < 0:
+            raise PortraitDatasetError("augmentation_seed must be a non-negative integer.")
         if not isinstance(require_complete, bool):
             raise PortraitDatasetError("require_complete must be a boolean.")
 
         self.manifest_path = Path(manifest_path).expanduser().resolve()
         self.split = split
         self.seed = seed
+        self.sampling_seed = sampling_seed
+        self.augmentation_seed = augmentation_seed
         self.require_complete = require_complete
         self._path_resolver = path_resolver
         self._is_windows = _is_windows
@@ -334,7 +348,7 @@ class PortraitDataset:
             raise PortraitDatasetError("epoch must be a non-negative integer.")
         if not isinstance(balanced, bool):
             raise PortraitDatasetError("balanced must be a boolean.")
-        rng = random.Random(self.seed + epoch)
+        rng = random.Random(self.sampling_seed + epoch)
         if not balanced:
             ordered = sorted(self._records, key=lambda record: record.record_id)
             rng.shuffle(ordered)
@@ -374,12 +388,18 @@ class PortraitDataset:
         if not isinstance(augment, bool) or not isinstance(balanced, bool):
             raise PortraitDatasetError("augment and balanced must be booleans.")
         records = self._ordered_records(epoch, balanced)
-        rng = random.Random(self.seed + epoch)
 
         def generate() -> Iterator[dict[str, Any]]:
+            legacy_rng = random.Random(self.seed + epoch) if augment and self._legacy_augmentation_stream else None
             for record in records:
                 sample, content_valid = self._load_sample(record)
                 if augment:
+                    if legacy_rng is not None:
+                        rng = legacy_rng
+                    else:
+                        seed_material = f"{self.augmentation_seed}:{epoch}:{record.record_id}".encode("utf-8")
+                        record_seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
+                        rng = random.Random(record_seed)
                     sample = _augment_sample(sample, content_valid, rng, self._np, self._Image,
                                              self._ImageEnhance, self._ImageFilter)
                 yield sample

@@ -704,21 +704,27 @@ def build_experiment_datasets(
     manifest_path: Path,
     seed: int = DEFAULT_SEED,
     sampling_seed: Optional[int] = None,
+    augmentation_seed: Optional[int] = None,
 ) -> Dict[str, PortraitDataset]:
     """Constructs the four train/val per-source PortraitDataset objects once (pseudo OFF, test excluded).
 
-    Train datasets use effective sampling_seed (defaulting to seed when omitted); validation datasets use
-    model seed so validation batch ordering remains invariant across sampling-seed experiments.
+    Train datasets use independent effective sampling/augmentation seeds; both default to seed.
+    Validation datasets retain model-seed ordering across sampling-seed experiments.
     """
     manifest_path = manifest_path.expanduser().resolve()
     effective_sampling_seed = resolve_sampling_seed(seed, sampling_seed)
+    effective_augmentation_seed = seed if augmentation_seed is None else _validate_non_negative_seed(
+        augmentation_seed, "augmentation_seed"
+    )
     datasets = {
         "city_train": PortraitDataset(
             manifest_path,
             split="train",
             sources="cityscapes",
             pseudo_manifest_path=None,
-            seed=effective_sampling_seed,
+            seed=seed,
+            sampling_seed=effective_sampling_seed,
+            augmentation_seed=effective_augmentation_seed,
             require_complete=True,
         ),
         "surface_train": PortraitDataset(
@@ -726,7 +732,9 @@ def build_experiment_datasets(
             split="train",
             sources="surface",
             pseudo_manifest_path=None,
-            seed=effective_sampling_seed,
+            seed=seed,
+            sampling_seed=effective_sampling_seed,
+            augmentation_seed=effective_augmentation_seed,
             require_complete=True,
         ),
         "city_val": PortraitDataset(
@@ -1763,10 +1771,10 @@ def audit_and_compare_sampling_seeds(
             "sequential_manifest_prefix_used": False,
             "stratified_or_label_biased_oversampling_used": False,
             "augmentation_rng_note": (
-                "PortraitDataset.iter_samples uses random.Random(dataset.seed + epoch) for both "
-                "record ordering and sample augmentation; changing sampling_seed changes both sample "
-                "order and augmentation RNG relative to old seed=42 while keeping Phase 2 matched "
-                "across Arm A and Arm B."
+                "Current loader uses sampling_seed + epoch for ordering and a stable per-record RNG "
+                "derived from augmentation_seed, epoch, and record ID for transforms. Historical "
+                "run reconstruction describes pre-augmentation order only; new experiments report "
+                "both effective seeds, and Phase 2 remains paired across arms."
             ),
             "old_run_reconstruction_scope": (
                 "Manifest and converted-mask pre-augmentation reconstruction only (cryptographically "
@@ -1886,7 +1894,7 @@ def run_training_phase(
         if catalog is not None
         else build_manifest_train_catalog(manifest_path)
     )
-    sampling_seed = int(city_train_ds.seed)
+    sampling_seed = int(city_train_ds.sampling_seed)
 
     # Reset RNG state identically for the phase start
     phase_seed = seed + (0 if phase_name == "phase1" else 1000)
@@ -2086,6 +2094,7 @@ def run_training_phase(
         "start_epoch": start_epoch,
         "sampling_seed": sampling_seed,
         "effective_sampling_rng_seed": sampling_seed + start_epoch,
+        "augmentation_seed": int(city_train_ds.augmentation_seed),
         "phase_seed": phase_seed,
         "learning_rate": learning_rate,
         "fresh_adam_optimizer_initialized": True,
@@ -2723,6 +2732,7 @@ def run_strategy_experiment(
     weights: Optional[str] = "imagenet",
     seed: int = DEFAULT_SEED,
     sampling_seed: Optional[int] = None,
+    augmentation_seed: Optional[int] = None,
     initial_weights_path: Optional[Path] = None,
     expected_initial_weights_file_sha256: Optional[str] = None,
     expected_initial_tensor_sha256: Optional[str] = None,
@@ -2740,6 +2750,9 @@ def run_strategy_experiment(
     """Runs the complete two-arm controlled strategy experiment and persists machine-readable results."""
     started_at = time.time()
     effective_sampling_seed = resolve_sampling_seed(seed, sampling_seed)
+    effective_augmentation_seed = seed if augmentation_seed is None else _validate_non_negative_seed(
+        augmentation_seed, "augmentation_seed"
+    )
     output_dir = output_dir.expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(
@@ -2788,6 +2801,7 @@ def run_strategy_experiment(
         manifest_path,
         seed=seed,
         sampling_seed=effective_sampling_seed,
+        augmentation_seed=effective_augmentation_seed,
     )
     dataset_init_seconds = time.time() - t0
     print(f"[Init] Constructed 4 PortraitDataset splits in {dataset_init_seconds:.2f}s.", flush=True)
@@ -3158,6 +3172,8 @@ def run_strategy_experiment(
             "model_seed": seed,
             "sampling_seed": effective_sampling_seed,
             "sampling_seed_explicit": sampling_seed is not None,
+            "augmentation_seed": effective_augmentation_seed,
+            "augmentation_seed_explicit": augmentation_seed is not None,
             "sampler_algorithm": sampling_audit["sampler_contract"]["algorithm"],
             "epoch_exhaustion_policy": sampling_audit["sampler_contract"]["epoch_exhaustion_policy"],
             "eligible_train_pool_counts": {
@@ -3262,7 +3278,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--sampling-seed",
         type=int,
         default=None,
-        help="Explicit dataset sampling/augmentation seed (defaults to --seed when omitted).",
+        help="Record ordering seed (defaults to --seed when omitted).",
+    )
+    parser.add_argument(
+        "--augmentation-seed",
+        type=int,
+        default=None,
+        help="Per-record augmentation seed (defaults to --seed when omitted).",
     )
     parser.add_argument(
         "--initial-weights-path",
@@ -3297,6 +3319,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         weights=weights,
         seed=args.seed,
         sampling_seed=args.sampling_seed,
+        augmentation_seed=args.augmentation_seed,
         initial_weights_path=args.initial_weights_path,
         batch_size=args.batch_size,
         accumulate_steps=args.accumulate_steps,

@@ -24,9 +24,141 @@ EXPECTED_PLANNED_BATCHES = 1275
 WSL_DISTRO = "Ubuntu-26.04"
 WSL_PYTHON = "/home/user/.venvs/aria_wsl/bin/python"
 RUN_WSL_TRAINING = "/mnt/c/Users/felice/orca/aria-app/tools/vision/training/environment/run_wsl_training.py"
+GLOBAL_TRAINER_PGREP_PATTERN = "[r]un_wsl_training.py"
 GUEST_BASE_DIR = "/home/user/.local/share/aria-training/full-training-20261031"
 GUEST_DATA_DIR = f"{GUEST_BASE_DIR}/data"
 GUEST_STAGE_DIR = f"{GUEST_BASE_DIR}/city_warmup"
+
+MIN_ALLOWED_EPOCHS = 1
+MAX_ALLOWED_EPOCHS = 100
+
+SUPPORTED_STAGES: Tuple[str, ...] = (
+    "city_warmup",
+    "city_full",
+    "mixed_decoder",
+    "mixed_block13",
+    "stage_b_head",
+    "stage_b_joint",
+    "stage_c",
+)
+
+STAGE_PREDECESSORS: Dict[str, Tuple[str, str]] = {
+    "city_full": ("city_warmup", "model_a"),
+    "mixed_decoder": ("city_full", "model_a"),
+    "mixed_block13": ("mixed_decoder", "model_a"),
+    "stage_b_head": ("mixed_block13", "model_a"),
+    "stage_b_joint": ("stage_b_head", "model_b"),
+}
+
+SUPPORTED_CHECKPOINT_WEIGHT_NAMES: Tuple[str, ...] = (
+    "model_weights.weights.h5",
+    "weights.keras",
+    "weights.weights.h5",
+    "checkpoint",
+)
+SUPPORTED_CHECKPOINT_WEIGHT_FILENAMES = SUPPORTED_CHECKPOINT_WEIGHT_NAMES
+
+STAGE_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "city_warmup": {
+        "architecture": "model_a",
+        "epochs": 5,
+        "learning_rate": 0.001,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "planned_batches": 1275,
+        "encoder_policy": "freeze_all",
+        "freeze_bn": True,
+        "dataset_filter": "cityscapes",
+    },
+    "city_full": {
+        "architecture": "model_a",
+        "epochs": 30,
+        "learning_rate": 0.0001,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "planned_batches": 1275,
+        "encoder_policy": "unfreeze_all",
+        "freeze_bn": True,
+        "dataset_filter": "cityscapes",
+    },
+    "mixed_decoder": {
+        "architecture": "model_a",
+        "epochs": 5,
+        "learning_rate": 0.0003,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "planned_batches": None,
+        "encoder_policy": "freeze_all",
+        "freeze_bn": True,
+        "dataset_filter": "mixed",
+    },
+    "mixed_block13": {
+        "architecture": "model_a",
+        "epochs": 20,
+        "learning_rate": 0.00001,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "planned_batches": None,
+        "encoder_policy": "block13_plus",
+        "freeze_bn": True,
+        "dataset_filter": "mixed",
+    },
+    "stage_b_head": {
+        "architecture": "model_b",
+        "epochs": 3,
+        "learning_rate": 0.0003,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "planned_batches": None,
+        "encoder_policy": "freeze_all",
+        "freeze_bn": True,
+        "dataset_filter": "mixed",
+    },
+    "stage_b_joint": {
+        "architecture": "model_b",
+        "epochs": 20,
+        "learning_rate": 0.00001,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "planned_batches": None,
+        "encoder_policy": "block13_plus",
+        "freeze_bn": True,
+        "dataset_filter": "mixed",
+    },
+    "stage_c": {
+        "architecture": "model_c",
+        "epochs": 25,
+        "learning_rate": 0.0001,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "planned_batches": None,
+        "encoder_policy": "block13_plus",
+        "freeze_bn": True,
+        "dataset_filter": "mixed",
+    },
+}
+
+
+def validate_stage(stage: str) -> str:
+    clean = stage.strip()
+    if clean not in SUPPORTED_STAGES:
+        raise ValueError(
+            f"Unsupported stage '{clean}'. Supported stages are: {SUPPORTED_STAGES}"
+        )
+    return clean
+
+
+def validate_epochs(epochs: Optional[int], stage: str) -> int:
+    if epochs is None:
+        return STAGE_DEFAULTS[stage]["epochs"]
+    if not isinstance(epochs, int) or isinstance(epochs, bool):
+        raise ValueError(f"Epoch count must be an integer, got {epochs!r}")
+    if epochs < MIN_ALLOWED_EPOCHS or epochs > MAX_ALLOWED_EPOCHS:
+        raise ValueError(
+            f"Epoch count must be a positive integer between {MIN_ALLOWED_EPOCHS} "
+            f"and {MAX_ALLOWED_EPOCHS}, got {epochs}"
+        )
+    return epochs
 
 
 def sha256_file(path: Path) -> str:
@@ -37,9 +169,16 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def run_wsl(cmd: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_wsl(
+    cmd: str,
+    check: bool = True,
+    encoding: str = "utf-8",
+    errors: str = "replace",
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["wsl", "-d", WSL_DISTRO, "-e", "/bin/bash", "-c", cmd],
+        encoding=encoding,
+        errors=errors,
         capture_output=True,
         text=True,
         check=check,
@@ -62,20 +201,174 @@ def check_gpu_status() -> Dict[str, Any]:
     }
 
 
-def resolve_attempt_paths(attempt_id: str = "attempt_02") -> Dict[str, str]:
+def resolve_attempt_paths(
+    attempt_id: str = "attempt_02",
+    stage: str = "city_warmup",
+    guest_base_dir: str = GUEST_BASE_DIR,
+) -> Dict[str, str]:
+    validated_stage = validate_stage(stage)
     clean_id = attempt_id.strip()
     if not clean_id:
-        output_dir = GUEST_BASE_DIR
+        output_dir = guest_base_dir
         unit_suffix = ""
     else:
-        output_dir = f"{GUEST_BASE_DIR}/{clean_id}"
+        output_dir = f"{guest_base_dir}/{clean_id}"
         unit_suffix = f"-{clean_id.replace('_', '-')}"
+    stage_slug = validated_stage.replace("_", "-")
     return {
         "attempt_id": clean_id or "attempt_01",
+        "stage": validated_stage,
         "output_dir": output_dir,
-        "stage_dir": f"{output_dir}/city_warmup",
-        "systemd_unit": f"aria-city-warmup-20261031{unit_suffix}",
+        "stage_dir": f"{output_dir}/{validated_stage}",
+        "systemd_unit": f"aria-{stage_slug}-20261031{unit_suffix}",
     }
+
+
+def resolve_host_paths(
+    attempt_id: str = "attempt_02",
+    stage: str = "city_warmup",
+    receipt_arg: Optional[Path] = None,
+    keeper_dir_arg: Optional[Path] = None,
+    host_base: Path = Path("build/vision-training/full-training-20261031"),
+) -> Dict[str, Path]:
+    validated_stage = validate_stage(stage)
+    clean_id = attempt_id.strip()
+
+    if clean_id == "attempt_02" and validated_stage == "city_warmup" and receipt_arg is None:
+        receipt_path = host_base / "launch_receipt.json"
+        status_path = host_base / "launch_attempt_status.json"
+        keeper_dir = keeper_dir_arg or host_base
+    else:
+        attempt_dir = (host_base / clean_id) if clean_id else host_base
+        stage_dir = attempt_dir / validated_stage
+        receipt_path = receipt_arg or (stage_dir / "launch_receipt.json")
+        status_path = stage_dir / "launch_attempt_status.json"
+        keeper_dir = keeper_dir_arg or (receipt_arg.parent if receipt_arg else stage_dir)
+
+    return {
+        "receipt_path": receipt_path,
+        "status_path": status_path,
+        "keeper_dir": keeper_dir,
+    }
+
+
+def validate_checkpoint_metadata(
+    metadata: Dict[str, Any],
+    stage: str,
+    manifest_hash: str = EXPECTED_BASE_MANIFEST_SHA256,
+) -> None:
+    if stage not in STAGE_PREDECESSORS:
+        return
+    expected_stage, expected_arch = STAGE_PREDECESSORS[stage]
+    actual_stage = metadata.get("stage")
+    actual_arch = metadata.get("architecture")
+    actual_epoch = metadata.get("epoch")
+    actual_hash = metadata.get("data_manifest_hash")
+
+    if actual_stage != expected_stage or actual_arch != expected_arch:
+        raise ValueError(
+            f"Initialization checkpoint must be {expected_stage}/{expected_arch}; "
+            f"found {actual_stage}/{actual_arch}."
+        )
+    if actual_hash != manifest_hash:
+        raise ValueError(
+            f"Initialization checkpoint manifest hash ({actual_hash}) does not match "
+            f"expected dataset manifest hash ({manifest_hash})."
+        )
+    if actual_epoch is None or actual_epoch < 1:
+        raise ValueError(
+            f"Initialization checkpoint for {expected_stage} records no completed training epoch "
+            f"(epoch={actual_epoch}); it holds only that stage's own untrained initial weights. "
+            "Use a checkpoint from a stage run that improved at least once."
+        )
+
+def check_checkpoint_weights_exist(
+    init_checkpoint: str,
+    supported_filenames: Tuple[str, ...] = SUPPORTED_CHECKPOINT_WEIGHT_NAMES,
+) -> bool:
+    clean_ckpt = init_checkpoint.rstrip("/")
+    conditions = " || ".join(
+        f"[ -f {shlex.quote(f'{clean_ckpt}/{name}')} ]"
+        for name in supported_filenames
+    )
+    weights_check = run_wsl(
+        f"if {conditions}; then echo exists; else echo missing; fi",
+        check=False,
+    )
+    return weights_check.stdout.strip() == "exists"
+
+
+
+def build_trainer_command(
+    stage: str,
+    output_dir: str,
+    manifest_path: str = f"{GUEST_DATA_DIR}/manifest.json",
+    epochs: Optional[int] = None,
+    init_checkpoint: Optional[str] = None,
+    learning_rate: Optional[float] = None,
+    batch_size: int = 2,
+    accumulate_steps: int = 4,
+    seed: int = 42,
+    device: str = "gpu",
+    allow_growth: bool = True,
+    wsl_python: str = WSL_PYTHON,
+    run_wsl_training: str = RUN_WSL_TRAINING,
+) -> List[str]:
+    validated_stage = validate_stage(stage)
+    resolved_epochs = validate_epochs(epochs, validated_stage)
+    resolved_lr = (
+        learning_rate
+        if learning_rate is not None
+        else STAGE_DEFAULTS[validated_stage]["learning_rate"]
+    )
+
+    if validated_stage == "city_warmup":
+        if init_checkpoint:
+            raise ValueError(
+                "Stage 'city_warmup' cannot accept --init-checkpoint; it must start from fresh ImageNet weights."
+            )
+    elif validated_stage in STAGE_PREDECESSORS:
+        if not init_checkpoint:
+            expected_stage, _ = STAGE_PREDECESSORS[validated_stage]
+            raise ValueError(
+                f"Stage '{validated_stage}' requires an --init-checkpoint from predecessor stage '{expected_stage}'."
+            )
+
+    cmd = [
+        wsl_python,
+        run_wsl_training,
+    ]
+    if allow_growth:
+        cmd.append("--allow-growth")
+    cmd.extend([
+        "--",
+        "--manifest",
+        manifest_path,
+        "--stage",
+        validated_stage,
+    ])
+    if validated_stage == "city_warmup":
+        cmd.extend(["--weights", "imagenet"])
+    elif init_checkpoint:
+        cmd.extend(["--init-checkpoint", init_checkpoint])
+
+    cmd.extend([
+        "--epochs",
+        str(resolved_epochs),
+        "--learning-rate",
+        str(resolved_lr),
+        "--batch-size",
+        str(batch_size),
+        "--accumulate-steps",
+        str(accumulate_steps),
+        "--seed",
+        str(seed),
+        "--device",
+        device,
+        "--output-dir",
+        output_dir,
+    ])
+    return cmd
 
 
 def archive_failed_attempt_01(host_archive_root: Path) -> Dict[str, Any]:
@@ -88,7 +381,7 @@ def archive_failed_attempt_01(host_archive_root: Path) -> Dict[str, Any]:
     run_wsl(f"mkdir -p {shlex.quote(guest_archive_dir)}")
     copied_files: List[str] = []
     for fname in ("training.log", "exit_code.txt", "supervisor.pid", "trainer.pid", "supervisor.py"):
-        cp_res = run_wsl(
+        run_wsl(
             f"if [ -f {shlex.quote(src_stage_dir)}/{fname} ]; then cp -p {shlex.quote(src_stage_dir)}/{fname} {shlex.quote(guest_archive_dir)}/{fname}; fi",
             check=False,
         )
@@ -143,7 +436,18 @@ def archive_failed_attempt_01(host_archive_root: Path) -> Dict[str, Any]:
     return forensic
 
 
-def prelaunch_validation(source_dir: Path, stage_dir: str = GUEST_STAGE_DIR) -> None:
+def prelaunch_validation(
+    source_dir: Path,
+    attempt_paths: Dict[str, str],
+    stage: str = "city_warmup",
+    epochs: Optional[int] = None,
+    init_checkpoint: Optional[str] = None,
+) -> None:
+    validated_stage = validate_stage(stage)
+    validate_epochs(epochs, validated_stage)
+    stage_dir = attempt_paths["stage_dir"]
+    systemd_unit = attempt_paths["systemd_unit"]
+
     # 1. Source manifest check
     source_manifest = source_dir / "manifest.json"
     if not source_manifest.is_file():
@@ -161,7 +465,42 @@ def prelaunch_validation(source_dir: Path, stage_dir: str = GUEST_STAGE_DIR) -> 
     if staged_hash != EXPECTED_BASE_MANIFEST_SHA256:
         raise ValueError(f"Guest manifest SHA256 mismatch: {staged_hash}")
 
-    # 3. Duplicate protection: check if an existing trainer is already alive
+    # 3. Checkpoint predecessor validation for stages requiring predecessor
+    if validated_stage == "city_warmup":
+        if init_checkpoint:
+            raise ValueError(
+                "Stage 'city_warmup' cannot accept --init-checkpoint; it must start from fresh ImageNet weights."
+            )
+    elif validated_stage in STAGE_PREDECESSORS:
+        if not init_checkpoint:
+            expected_stage, _ = STAGE_PREDECESSORS[validated_stage]
+            raise ValueError(
+                f"Stage '{validated_stage}' requires an --init-checkpoint from predecessor stage '{expected_stage}'."
+            )
+        # Read checkpoint metadata from guest
+        meta_cat = run_wsl(
+            f"cat {shlex.quote(init_checkpoint)}/metadata.json 2>/dev/null",
+            check=False,
+        )
+        if meta_cat.returncode != 0 or not meta_cat.stdout.strip():
+            raise FileNotFoundError(
+                f"Initialization checkpoint metadata not found at: {init_checkpoint}/metadata.json"
+            )
+        try:
+            ckpt_meta = json.loads(meta_cat.stdout.strip())
+        except Exception as exc:
+            raise ValueError(
+                f"Malformed checkpoint metadata in {init_checkpoint}: {exc}"
+            ) from exc
+        validate_checkpoint_metadata(ckpt_meta, validated_stage, manifest_hash=staged_hash)
+
+        # Check weights file presence
+        if not check_checkpoint_weights_exist(init_checkpoint):
+            raise FileNotFoundError(
+                f"No weights file found in initialization checkpoint directory: {init_checkpoint}"
+            )
+
+    # 4. Duplicate protection: check if an existing trainer for this stage is already alive
     trainer_pid_file = f"{stage_dir}/trainer.pid"
     pid_check = run_wsl(f"cat {shlex.quote(trainer_pid_file)}", check=False)
     if pid_check.returncode == 0 and pid_check.stdout.strip().isdigit():
@@ -169,13 +508,40 @@ def prelaunch_validation(source_dir: Path, stage_dir: str = GUEST_STAGE_DIR) -> 
         alive_check = run_wsl(f"kill -0 {existing_pid}", check=False)
         if alive_check.returncode == 0:
             raise RuntimeError(
-                f"Existing training process is already running (PID {existing_pid})! "
-                "Refusing to launch competing training job. Use --observe-only to monitor."
+                f"Existing training process is already running (PID {existing_pid}) for stage '{validated_stage}'! "
+                "Refusing to launch competing training job. Use --status-only to monitor."
             )
 
-    # 4. Checkpoint directory overwrite protection
+    # 5. Systemd unit conflict protection
+    unit_active_check = run_wsl(
+        f"systemctl --user is-active {shlex.quote(systemd_unit)} 2>/dev/null || true",
+        check=False,
+    )
+    if unit_active_check.stdout.strip() == "active":
+        raise RuntimeError(
+            f"Systemd service '{systemd_unit}' is already active! Refusing duplicate launch."
+        )
+
+    # 6. Global conflicting GPU training check in guest
+    global_trainer_check = run_wsl(
+        f"pgrep -f '{GLOBAL_TRAINER_PGREP_PATTERN}' 2>/dev/null || true",
+        check=False,
+    )
+    running_pids = [p.strip() for p in global_trainer_check.stdout.splitlines() if p.strip().isdigit()]
+    for rpid in running_pids:
+        # Check if this PID is the same as the existing recorded PID for this stage (already checked above)
+        if pid_check.returncode == 0 and rpid == pid_check.stdout.strip():
+            continue
+        # Otherwise an active trainer is already running on the shared GPU!
+        raise RuntimeError(
+            f"Another active training process (PID {rpid}) is currently running in WSL! "
+            "Refusing to launch competing GPU training job."
+        )
+
+    # 7. Checkpoint directory overwrite protection
     ckpt_check = run_wsl(
-        f"if [ -d {shlex.quote(stage_dir)}/checkpoints ] && [ \"$(ls -A {shlex.quote(stage_dir)}/checkpoints 2>/dev/null)\" ]; then echo nonempty; else echo empty; fi"
+        f"if [ -d {shlex.quote(stage_dir)}/checkpoints ] && [ \"$(ls -A {shlex.quote(stage_dir)}/checkpoints 2>/dev/null)\" ]; then echo nonempty; else echo empty; fi",
+        check=False,
     )
     if ckpt_check.stdout.strip() == "nonempty":
         raise FileExistsError(
@@ -183,20 +549,58 @@ def prelaunch_validation(source_dir: Path, stage_dir: str = GUEST_STAGE_DIR) -> 
             "Refusing to overwrite existing checkpoint state without explicit resume."
         )
 
+    # 8. Completed stage overwrite protection
+    exit_code_check = run_wsl(
+        f"if [ -f {shlex.quote(stage_dir)}/exit_code.txt ]; then echo exists; else echo missing; fi",
+        check=False,
+    )
+    if exit_code_check.stdout.strip() == "exists":
+        raise FileExistsError(
+            f"Stage directory {stage_dir} already contains a completed run (exit_code.txt found). "
+            "Refusing to overwrite existing stage attempt."
+        )
+
 
 def deploy_and_start_supervisor(
     attempt_paths: Dict[str, str],
+    stage: str = "city_warmup",
+    epochs: Optional[int] = None,
+    init_checkpoint: Optional[str] = None,
+    learning_rate: Optional[float] = None,
+    batch_size: int = 2,
+    accumulate_steps: int = 4,
+    seed: int = 42,
+    device: str = "gpu",
     host_archive_root: Optional[Path] = None,
 ) -> Dict[str, str]:
+    validated_stage = validate_stage(stage)
     output_dir = attempt_paths["output_dir"]
     stage_dir = attempt_paths["stage_dir"]
     systemd_unit = attempt_paths["systemd_unit"]
     run_wsl(f"mkdir -p {shlex.quote(stage_dir)}")
 
-    if host_archive_root is not None:
+    # Archive old attempt_01 only if requested and targeting attempt_02 warmup
+    if host_archive_root is not None and attempt_paths["attempt_id"] == "attempt_02" and validated_stage == "city_warmup":
         archive_failed_attempt_01(host_archive_root)
 
-    # Supervisor script in Python: writes supervisor.pid, starts trainer with Popen, writes trainer.pid, waits, writes exit_code.txt
+    trainer_cmd = build_trainer_command(
+        stage=validated_stage,
+        output_dir=output_dir,
+        manifest_path=f"{GUEST_DATA_DIR}/manifest.json",
+        epochs=epochs,
+        init_checkpoint=init_checkpoint,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        accumulate_steps=accumulate_steps,
+        seed=seed,
+        device=device,
+        allow_growth=True,
+        wsl_python=WSL_PYTHON,
+        run_wsl_training=RUN_WSL_TRAINING,
+    )
+
+    cmd_py_repr = json.dumps(trainer_cmd, indent=8)
+
     supervisor_script = f"""#!/usr/bin/env python3
 import os
 import subprocess
@@ -215,22 +619,7 @@ def main():
     env["PYTHONUNBUFFERED"] = "1"
     env["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
-    cmd = [
-        "{WSL_PYTHON}",
-        "{RUN_WSL_TRAINING}",
-        "--allow-growth",
-        "--",
-        "--manifest", "{GUEST_DATA_DIR}/manifest.json",
-        "--stage", "city_warmup",
-        "--weights", "imagenet",
-        "--epochs", "5",
-        "--learning-rate", "0.001",
-        "--batch-size", "2",
-        "--accumulate-steps", "4",
-        "--seed", "42",
-        "--device", "gpu",
-        "--output-dir", "{output_dir}",
-    ]
+    cmd = {cmd_py_repr}
 
     proc = subprocess.Popen(
         cmd,
@@ -277,6 +666,15 @@ if __name__ == "__main__":
 
 
 def read_proc_identity(pid: str) -> Dict[str, Any]:
+    if not pid or not pid.isdigit():
+        return {
+            "pid": None,
+            "cmdline": "",
+            "ps_info": "",
+            "start_ticks": None,
+            "io_stats": {},
+            "is_alive": False,
+        }
     cmd_res = run_wsl(f"cat /proc/{pid}/cmdline | tr '\\0' ' '", check=False)
     cmdline = cmd_res.stdout.strip()
     stat_res = run_wsl(f"ps -p {pid} -o lstart=,stat=,etime=,time=,vsz=,rss= --no-headers", check=False)
@@ -334,7 +732,18 @@ def ensure_windows_keeper(
     guest_keeper_log = f"{stage_dir}/keeper.log"
     ticks_arg = start_ticks or ""
 
+    # If trainer is not alive or missing ticks, check if an existing keeper was previously recorded
     if not trainer_alive or not ticks_arg:
+        if keeper_json_path.is_file():
+            try:
+                existing = json.loads(keeper_json_path.read_text(encoding="utf-8"))
+                existing_pid = int(existing.get("windows_keeper_pid") or 0)
+                is_keeper_alive = check_windows_pid_alive(existing_pid) if existing_pid > 0 else False
+                existing["is_alive"] = is_keeper_alive
+                existing["reason"] = "trainer_not_alive"
+                return existing
+            except Exception:
+                pass
         return {
             "windows_keeper_pid": None,
             "is_alive": False,
@@ -438,7 +847,6 @@ if __name__ == "__main__":
     keeper_cmd_str = " ".join(keeper_argv)
 
     # Launch via WMI Win32_Process.Create so the process is parented by WmiPrvSE.exe
-    # completely outside any tool/terminal Job Object and console session.
     wmi_ps = (
         "$si = New-CimInstance -ClassName Win32_ProcessStartup -Property @{ ShowWindow = [uint16]0 } -ClientOnly; "
         f"$res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = '{keeper_cmd_str}'; ProcessStartupInformation = $si }}; "
@@ -503,6 +911,8 @@ if __name__ == "__main__":
 
 
 def check_process_alive(pid: str) -> bool:
+    if not pid or not pid.isdigit():
+        return False
     res = run_wsl(f"kill -0 {pid}", check=False)
     return res.returncode == 0
 
@@ -510,6 +920,8 @@ def check_process_alive(pid: str) -> bool:
 def monitor_training_progress(
     trainer_pid: str,
     stage_dir: str = GUEST_STAGE_DIR,
+    stage: str = "city_warmup",
+    epochs: int = 5,
     timeout_seconds: int = 1800,
 ) -> Dict[str, Any]:
     start_time = time.time()
@@ -522,23 +934,45 @@ def monitor_training_progress(
     latest_loss: Optional[float] = None
     batch_history: List[Tuple[int, float]] = []
 
+    arch = STAGE_DEFAULTS.get(stage, {}).get("architecture", "model_a")
+    expected_batches = STAGE_DEFAULTS.get(stage, {}).get("planned_batches", EXPECTED_PLANNED_BATCHES)
+
     print(
         f"Monitoring trainer PID {trainer_pid} in {WSL_DISTRO} ({stage_dir}) "
-        f"for banner (5 epochs, GPU), epoch 0 initial evaluation commit, and advancing batches (1 -> 21+)..."
+        f"for {stage} banner ({epochs} epochs, GPU), epoch 0 initial evaluation commit, and advancing batches (1 -> 21+)..."
     )
 
-    banner_re = re.compile(r"Staged Trainer:\s*city_warmup\s*\(model_a\)")
-    config_re = re.compile(r"Epochs:\s*5\s*\|\s*LR:\s*0\.001")
+    stage_esc = re.escape(stage)
+    arch_esc = re.escape(arch)
+    banner_re = re.compile(rf"Staged Trainer:\s*{stage_esc}\s*\({arch_esc}\)")
+    config_re = re.compile(rf"Epochs:\s*{epochs}\b")
     device_re = re.compile(r"Device:\s*gpu")
-    # Use non-whitespace token (\\S+) to catch nan/inf rather than skipping them
     batch_re = re.compile(r"Batch\s+(\d+)/(\d+)\s+-\s+loss\s+(\S+)")
 
     while time.time() - start_time < timeout_seconds:
         if not check_process_alive(trainer_pid):
-            exit_code_res = run_wsl(f"cat {shlex.quote(stage_dir)}/exit_code.txt", check=False)
-            log_tail = run_wsl(f"tail -n 40 {shlex.quote(stage_dir)}/training.log", check=False).stdout
+            exit_code_res = run_wsl(f"cat {shlex.quote(stage_dir)}/exit_code.txt 2>/dev/null", check=False)
+            exit_code_str = exit_code_res.stdout.strip()
+            log_tail = run_wsl(f"tail -n 40 {shlex.quote(stage_dir)}/training.log 2>/dev/null", check=False).stdout
+            if exit_code_str == "0":
+                print(f"Trainer process {trainer_pid} completed successfully with exit code 0.", flush=True)
+                return {
+                    "observed_banner": observed_banner,
+                    "observed_config": observed_config,
+                    "observed_initial_eval": observed_initial_eval,
+                    "observed_batch_1": observed_batch_1,
+                    "observed_batch_21": observed_batch_21,
+                    "observed_planned_batches": observed_planned_batches,
+                    "planned_batches": expected_batches,
+                    "latest_loss": latest_loss,
+                    "loss_is_finite": latest_loss is not None and math.isfinite(latest_loss),
+                    "batch_history": batch_history,
+                    "final_gpu_status": check_gpu_status(),
+                    "elapsed_seconds": round(time.time() - start_time, 2),
+                    "completed_exit_code": 0,
+                }
             raise RuntimeError(
-                f"Trainer process {trainer_pid} exited prematurely with exit code: {exit_code_res.stdout.strip()}.\n"
+                f"Trainer process {trainer_pid} exited prematurely with exit code: {exit_code_str}.\n"
                 f"Log tail:\n{log_tail}"
             )
 
@@ -558,7 +992,7 @@ def monitor_training_progress(
         if meta_res.returncode == 0 and meta_res.stdout.strip():
             try:
                 meta_json = json.loads(meta_res.stdout.strip())
-                if meta_json.get("epoch") == 0 and meta_json.get("stage") == "city_warmup":
+                if meta_json.get("epoch") == 0 and meta_json.get("stage") == stage:
                     observed_initial_eval = True
             except Exception:
                 pass
@@ -576,12 +1010,16 @@ def monitor_training_progress(
             if not math.isfinite(l_val):
                 raise ValueError(f"Non-finite loss detected at Batch {b_num}: {loss_str}")
 
-            if tot_b == EXPECTED_PLANNED_BATCHES:
-                observed_planned_batches = True
+            if expected_batches is not None:
+                if tot_b == expected_batches:
+                    observed_planned_batches = True
+                else:
+                    raise ValueError(
+                        f"Unexpected planned batches count: got {tot_b}, expected {expected_batches}"
+                    )
             else:
-                raise ValueError(
-                    f"Unexpected planned batches count: got {tot_b}, expected {EXPECTED_PLANNED_BATCHES}"
-                )
+                if tot_b > 0:
+                    observed_planned_batches = True
 
             if b_num == 1:
                 observed_batch_1 = True
@@ -613,7 +1051,10 @@ def monitor_training_progress(
             and latest_loss is not None
             and math.isfinite(latest_loss)
         ):
-            print("Successfully verified: banner, config, initial evaluation commit (epoch 0), and advancing batches (1 -> 21+).", flush=True)
+            print(
+                "Successfully verified: banner, config, initial evaluation commit (epoch 0), and advancing batches (1 -> 21+).",
+                flush=True,
+            )
             return {
                 "observed_banner": observed_banner,
                 "observed_config": observed_config,
@@ -621,7 +1062,7 @@ def monitor_training_progress(
                 "observed_batch_1": observed_batch_1,
                 "observed_batch_21": observed_batch_21,
                 "observed_planned_batches": observed_planned_batches,
-                "planned_batches": EXPECTED_PLANNED_BATCHES,
+                "planned_batches": expected_batches or tot_b,
                 "latest_loss": latest_loss,
                 "loss_is_finite": math.isfinite(latest_loss),
                 "batch_history": batch_history,
@@ -644,7 +1085,18 @@ def create_launch_receipt(
     initial_gpu_status: Dict[str, Any],
     keeper_info: Dict[str, Any],
     host_receipt_path: Path,
+    stage: str = "city_warmup",
+    epochs: Optional[int] = None,
+    init_checkpoint: Optional[str] = None,
+    learning_rate: Optional[float] = None,
 ) -> Dict[str, Any]:
+    validated_stage = validate_stage(stage)
+    resolved_epochs = validate_epochs(epochs, validated_stage)
+    resolved_lr = (
+        learning_rate
+        if learning_rate is not None
+        else STAGE_DEFAULTS[validated_stage]["learning_rate"]
+    )
     trainer_pid = pids["trainer_pid"]
     sup_pid = pids["supervisor_pid"]
     output_dir = attempt_paths["output_dir"]
@@ -655,10 +1107,10 @@ def create_launch_receipt(
     resume_cmd = (
         f"{WSL_PYTHON} {RUN_WSL_TRAINING} --allow-growth -- "
         f"--manifest {GUEST_DATA_DIR}/manifest.json "
-        f"--stage city_warmup "
+        f"--stage {validated_stage} "
         f"--resume {stage_dir}/checkpoints/latest "
-        f"--epochs 5 "
-        f"--learning-rate 0.001 "
+        f"--epochs {resolved_epochs} "
+        f"--learning-rate {resolved_lr} "
         f"--batch-size 2 "
         f"--accumulate-steps 4 "
         f"--seed 42 "
@@ -673,10 +1125,31 @@ def create_launch_receipt(
     )
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    stage_meta = STAGE_DEFAULTS.get(validated_stage, {})
+
+    config_info: Dict[str, Any] = {
+        "stage": validated_stage,
+        "epochs": resolved_epochs,
+        "learning_rate": resolved_lr,
+        "batch_size": 2,
+        "accumulate_steps": 4,
+        "seed": 42,
+        "device": "gpu",
+        "allow_growth": True,
+        "architecture": stage_meta.get("architecture", "model_a"),
+        "encoder_policy": stage_meta.get("encoder_policy", "freeze_all"),
+        "freeze_bn": stage_meta.get("freeze_bn", True),
+        "dataset_filter": stage_meta.get("dataset_filter", "cityscapes"),
+    }
+    if validated_stage == "city_warmup":
+        config_info["weights"] = "imagenet"
+    elif init_checkpoint:
+        config_info["init_checkpoint"] = init_checkpoint
 
     receipt: Dict[str, Any] = {
-        "task_id": "ARIA-CITY-WARMUP-LAUNCH-20261031",
+        "task_id": f"ARIA-{validated_stage.upper().replace('_', '-')}-LAUNCH-20261031",
         "attempt_id": attempt_paths["attempt_id"],
+        "stage": validated_stage,
         "launch_timestamp_utc": now_iso,
         "status": "RUNNING",
         "verified_launch": True,
@@ -684,8 +1157,8 @@ def create_launch_receipt(
         "process_identity": {
             "distro": WSL_DISTRO,
             "systemd_unit": f"{systemd_unit}.service",
-            "trainer_pid": int(trainer_pid),
-            "supervisor_pid": int(sup_pid),
+            "trainer_pid": int(trainer_pid) if trainer_pid.isdigit() else None,
+            "supervisor_pid": int(sup_pid) if sup_pid.isdigit() else None,
             "trainer_cmdline": proc_info["cmdline"],
             "process_start_info": proc_info["ps_info"],
             "start_ticks": proc_info["start_ticks"],
@@ -703,21 +1176,7 @@ def create_launch_receipt(
                 "signal": "SIGTRAP (orphaned 0xcc at rtld:reloc_complete 0xf220 from prior killed gdb)",
             }
         },
-        "configuration": {
-            "stage": "city_warmup",
-            "weights": "imagenet",
-            "epochs": 5,
-            "learning_rate": 0.001,
-            "batch_size": 2,
-            "accumulate_steps": 4,
-            "seed": 42,
-            "device": "gpu",
-            "allow_growth": True,
-            "architecture": "model_a",
-            "encoder_policy": "freeze_all",
-            "freeze_bn": True,
-            "dataset_filter": "cityscapes",
-        },
+        "configuration": config_info,
         "dataset": {
             "manifest_path": f"{GUEST_DATA_DIR}/manifest.json",
             "manifest_sha256": EXPECTED_BASE_MANIFEST_SHA256,
@@ -726,7 +1185,7 @@ def create_launch_receipt(
                 "cityscapes_train": 2550,
                 "cityscapes_val": 425,
                 "cityscapes_test_reserved": 500,
-                "batches_per_epoch": EXPECTED_PLANNED_BATCHES,
+                "batches_per_epoch": stage_meta.get("planned_batches"),
             },
         },
         "paths": {
@@ -760,7 +1219,7 @@ def create_launch_receipt(
             "status_command": status_cmd,
         },
         "caveats_and_limitations": [
-            "This receipt establishes verified stable launch and initial batch progress, not 5-epoch completion.",
+            f"This receipt establishes verified stable launch and initial batch progress for stage '{validated_stage}'.",
             "No claim is made regarding final model convergence, loss trajectory, or mIoU quality.",
             "The durable job retains exclusive GPU ownership and runs asynchronously in the detached Linux session.",
         ],
@@ -769,7 +1228,7 @@ def create_launch_receipt(
     host_receipt_path.parent.mkdir(parents=True, exist_ok=True)
     host_receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
 
-    guest_receipt_path = f"{GUEST_BASE_DIR}/launch_receipt.json"
+    guest_receipt_path = f"{stage_dir}/launch_receipt.json"
     run_wsl(f"cat << 'EOF' > {shlex.quote(guest_receipt_path)}\n{json.dumps(receipt, indent=2)}\nEOF")
 
     return receipt
@@ -780,27 +1239,36 @@ def snapshot_current_state(
     attempt_paths: Dict[str, str],
     keeper_info: Dict[str, Any],
     gpu_status: Dict[str, Any],
+    stage: str = "city_warmup",
 ) -> Dict[str, Any]:
-    trainer_pid = pids["trainer_pid"]
+    validated_stage = validate_stage(stage)
+    trainer_pid = pids.get("trainer_pid", "")
     stage_dir = attempt_paths["stage_dir"]
     proc_info = read_proc_identity(trainer_pid)
-    log_res = run_wsl(f"cat {shlex.quote(stage_dir)}/training.log", check=False)
+    log_res = run_wsl(f"cat {shlex.quote(stage_dir)}/training.log 2>/dev/null", check=False)
     log_lines = log_res.stdout.splitlines() if log_res.returncode == 0 else []
-    meta_res = run_wsl(
+
+    best_meta_res = run_wsl(
         f"cat {shlex.quote(stage_dir)}/checkpoints/best/metadata.json 2>/dev/null",
         check=False,
     )
+    best_metadata: Optional[Dict[str, Any]] = None
     epoch0_committed = False
-    if meta_res.returncode == 0 and meta_res.stdout.strip():
+    if best_meta_res.returncode == 0 and best_meta_res.stdout.strip():
         try:
-            meta_json = json.loads(meta_res.stdout.strip())
-            if meta_json.get("epoch") == 0 and meta_json.get("stage") == "city_warmup":
+            best_metadata = json.loads(best_meta_res.stdout.strip())
+            if best_metadata.get("epoch") == 0 and best_metadata.get("stage") == validated_stage:
                 epoch0_committed = True
         except Exception:
             pass
+
+    exit_code_res = run_wsl(f"cat {shlex.quote(stage_dir)}/exit_code.txt 2>/dev/null", check=False)
+    exit_code_str = exit_code_res.stdout.strip() if exit_code_res.returncode == 0 else ""
+
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "attempt_paths": attempt_paths,
+        "stage": validated_stage,
         "pids": pids,
         "process_identity": proc_info,
         "windows_keeper": keeper_info,
@@ -808,6 +1276,9 @@ def snapshot_current_state(
         "training_log_lines": len(log_lines),
         "training_log_tail": log_lines[-15:],
         "epoch0_checkpoint_committed": epoch0_committed,
+        "best_checkpoint_metadata": best_metadata,
+        "exit_code_txt": exit_code_str,
+        "completed": exit_code_str == "0",
     }
 
 
@@ -822,14 +1293,45 @@ def main() -> None:
     parser.add_argument(
         "--receipt",
         type=Path,
-        default=Path("build/vision-training/full-training-20261031/launch_receipt.json"),
-        help="Path for launch receipt JSON",
+        default=None,
+        help="Path for launch receipt JSON (default: per attempt+stage receipt path)",
     )
     parser.add_argument(
         "--attempt-id",
         type=str,
         default="attempt_02",
         help="Distinct attempt identifier subdirectory (default: attempt_02; pass empty string for root)",
+    )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default="city_warmup",
+        choices=SUPPORTED_STAGES,
+        help="Training stage to launch or observe (default: city_warmup)",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Explicit positive epoch count (default: stage-specific default, e.g. 5 for city_warmup)",
+    )
+    parser.add_argument(
+        "--init-checkpoint",
+        type=str,
+        default=None,
+        help="Guest path to initialization checkpoint for stages requiring a predecessor",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help="Explicit learning rate override (default: stage-specific default)",
+    )
+    parser.add_argument(
+        "--keeper-dir",
+        type=Path,
+        default=None,
+        help="Host directory for Windows keeper PID/json/log (default: auto per attempt+stage)",
     )
     parser.add_argument(
         "--archive-only",
@@ -849,7 +1351,7 @@ def main() -> None:
     parser.add_argument(
         "--status-only",
         action="store_true",
-        help="Ensure detached Windows keeper and emit current status snapshot without waiting",
+        help="Inspect status and ensure keeper without launching or requiring active trainer",
     )
     parser.add_argument(
         "--timeout",
@@ -859,34 +1361,70 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    stage = validate_stage(args.stage)
+    epochs = validate_epochs(args.epochs, stage)
+    attempt_paths = resolve_attempt_paths(args.attempt_id, stage=stage)
+    stage_dir = attempt_paths["stage_dir"]
+
+    host_paths = resolve_host_paths(
+        attempt_id=args.attempt_id,
+        stage=stage,
+        receipt_arg=args.receipt,
+        keeper_dir_arg=args.keeper_dir,
+    )
+    receipt_path = host_paths["receipt_path"]
+    status_path = host_paths["status_path"]
+    keeper_dir = host_paths["keeper_dir"]
+
     if args.archive_only:
-        forensic = archive_failed_attempt_01(args.receipt.parent)
+        forensic = archive_failed_attempt_01(receipt_path.parent)
         print(json.dumps(forensic, indent=2), flush=True)
         return
 
-    attempt_paths = resolve_attempt_paths(args.attempt_id)
-    stage_dir = attempt_paths["stage_dir"]
-
     # 1. Preflight GPU check
-    initial_gpu = check_gpu_status()
-    print(f"Preflight GPU status: {initial_gpu['name']}, {initial_gpu['memory_used_mib']} MiB used.", flush=True)
+    try:
+        initial_gpu = check_gpu_status()
+        print(f"Preflight GPU status: {initial_gpu['name']}, {initial_gpu['memory_used_mib']} MiB used.", flush=True)
+    except Exception as exc:
+        initial_gpu = {"name": "GPU query failed", "error": str(exc), "memory_used_mib": 0.0, "memory_total_mib": 0.0, "utilization_gpu_pct": 0.0}
+        print(f"Preflight GPU notice: {exc}", flush=True)
 
     if not args.observe_only and not args.status_only:
         # Prelaunch validation
-        prelaunch_validation(args.source_dir, stage_dir=stage_dir)
-        print(f"Deploying supervisor and starting durable detached training run ({attempt_paths['attempt_id']})...", flush=True)
-        pids = deploy_and_start_supervisor(attempt_paths, host_archive_root=args.receipt.parent)
+        prelaunch_validation(
+            args.source_dir,
+            attempt_paths=attempt_paths,
+            stage=stage,
+            epochs=epochs,
+            init_checkpoint=args.init_checkpoint,
+        )
+        print(
+            f"Deploying supervisor and starting durable detached training run "
+            f"({attempt_paths['attempt_id']}, stage={stage}, epochs={epochs})...",
+            flush=True,
+        )
+        pids = deploy_and_start_supervisor(
+            attempt_paths,
+            stage=stage,
+            epochs=epochs,
+            init_checkpoint=args.init_checkpoint,
+            learning_rate=args.learning_rate,
+            host_archive_root=receipt_path.parent,
+        )
     else:
-        sup_pid = run_wsl(f"cat {shlex.quote(stage_dir)}/supervisor.pid").stdout.strip()
-        trainer_pid = run_wsl(f"cat {shlex.quote(stage_dir)}/trainer.pid").stdout.strip()
+        sup_pid = run_wsl(f"cat {shlex.quote(stage_dir)}/supervisor.pid 2>/dev/null", check=False).stdout.strip()
+        trainer_pid = run_wsl(f"cat {shlex.quote(stage_dir)}/trainer.pid 2>/dev/null", check=False).stdout.strip()
         pids = {"supervisor_pid": sup_pid, "trainer_pid": trainer_pid}
-        print(f"Existing job ({attempt_paths['attempt_id']}): Supervisor PID {sup_pid}, Trainer PID {trainer_pid}", flush=True)
+        print(
+            f"Existing job ({attempt_paths['attempt_id']}, stage={stage}): Supervisor PID '{sup_pid}', Trainer PID '{trainer_pid}'",
+            flush=True,
+        )
 
     proc_info = read_proc_identity(pids["trainer_pid"])
     keeper_info = ensure_windows_keeper(
         trainer_pid=pids["trainer_pid"],
         start_ticks=proc_info.get("start_ticks"),
-        keeper_dir=args.receipt.parent,
+        keeper_dir=keeper_dir,
         stage_dir=stage_dir,
         trainer_alive=bool(proc_info.get("is_alive")),
     )
@@ -898,15 +1436,19 @@ def main() -> None:
     )
 
     if args.status_only or args.launch_only:
-        snap = snapshot_current_state(pids, attempt_paths, keeper_info, initial_gpu)
-        snap["guest_uptime"] = run_wsl("uptime -s && uptime", check=False).stdout.strip()
-        snap["exit_code_txt"] = run_wsl(f"cat {shlex.quote(stage_dir)}/exit_code.txt 2>/dev/null", check=False).stdout.strip()
-        snap["stage_dir_ls"] = run_wsl(f"ls -la {shlex.quote(stage_dir)}", check=False).stdout.strip()
+        snap = snapshot_current_state(
+            pids,
+            attempt_paths,
+            keeper_info,
+            initial_gpu,
+            stage=stage,
+        )
+        snap["guest_uptime"] = run_wsl("uptime -s && uptime 2>/dev/null || true", check=False).stdout.strip()
+        snap["stage_dir_ls"] = run_wsl(f"ls -la {shlex.quote(stage_dir)} 2>/dev/null || true", check=False).stdout.strip()
         snap["journal_tail"] = run_wsl(
-            f"journalctl --user -u {shlex.quote(attempt_paths['systemd_unit'])} -n 30 --no-pager 2>/dev/null",
+            f"journalctl --user -u {shlex.quote(attempt_paths['systemd_unit'])} -n 30 --no-pager 2>/dev/null || true",
             check=False,
         ).stdout.strip()
-        status_path = args.receipt.parent / "launch_attempt_status.json"
         status_path.parent.mkdir(parents=True, exist_ok=True)
         status_path.write_text(json.dumps(snap, indent=2), encoding="utf-8")
         print(json.dumps(snap, indent=2), flush=True)
@@ -914,14 +1456,27 @@ def main() -> None:
 
     # 2. Monitor startup and advancing batches
     monitor_results = monitor_training_progress(
-        pids["trainer_pid"], stage_dir=stage_dir, timeout_seconds=args.timeout
+        pids["trainer_pid"],
+        stage_dir=stage_dir,
+        stage=stage,
+        epochs=epochs,
+        timeout_seconds=args.timeout,
     )
 
     # 3. Generate receipt
     receipt = create_launch_receipt(
-        pids, attempt_paths, monitor_results, initial_gpu, keeper_info, args.receipt
+        pids=pids,
+        attempt_paths=attempt_paths,
+        monitor_results=monitor_results,
+        initial_gpu_status=initial_gpu,
+        keeper_info=keeper_info,
+        host_receipt_path=receipt_path,
+        stage=stage,
+        epochs=epochs,
+        init_checkpoint=args.init_checkpoint,
+        learning_rate=args.learning_rate,
     )
-    print(f"Launch receipt successfully generated at: {args.receipt}", flush=True)
+    print(f"Launch receipt successfully generated at: {receipt_path}", flush=True)
 
 
 if __name__ == "__main__":

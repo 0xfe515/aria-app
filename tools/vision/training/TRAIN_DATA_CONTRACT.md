@@ -12,7 +12,9 @@ dataset = PortraitDataset(
     split,                       # "train", "val", or "test"
     sources=None,                # None/"mixed", one source, or an iterable
     pseudo_manifest_path=None,   # training-only
-    seed=42,
+    seed=42,                     # legacy default for either independent seed
+    sampling_seed=None,          # record order; defaults to seed
+    augmentation_seed=None,      # legacy shared stream; explicit values use per-record transforms
     require_complete=True,
 )
 
@@ -73,14 +75,24 @@ loader verifies ignore/zero supervision there and never guesses padding from
 black RGB. Hazard positives must be valid; uncovered pixels retain zero
 validity and are not treated as negatives.
 
-Without balancing, records are shuffled deterministically from the dataset
-seed and epoch. Balanced sampling is training-only and requires at least one
+Without balancing, records are shuffled deterministically from `sampling_seed`
+and epoch. Balanced sampling is training-only and requires at least one
 selected record from each source. It shuffles each source deterministically,
 cycles the smaller source, and emits one record from each source per pair.
 Thus each finite epoch has `2 * max(cityscapes_count, surface_count)` samples,
 uses every member of the larger source once, and does not drop its remainder.
-Iteration, augmentation, and batch formation are deterministic for the same
-seed and epoch.
+Each seed must be a non-negative integer (booleans are rejected). When
+`augmentation_seed` is omitted, augmentation preserves the historical shared
+random stream: one `random.Random(seed + epoch)` is consumed record-by-record
+in the iterator's actual sampling order. This keeps legacy transformations
+unchanged, including their dependence on sampling order. When
+`augmentation_seed` is explicitly supplied, each record gets a stable RNG
+derived from that seed, epoch, and stable record ID. In this mode, changing
+`sampling_seed` changes ordering but leaves each record's transforms unchanged
+for that epoch; changing `augmentation_seed` leaves ordering unchanged and
+deterministically changes transforms. `sampling_seed` still defaults to `seed`.
+Validation datasets retain their own stable ordering and test remains excluded
+from experiment dataset construction.
 
 When a pseudo manifest is supplied, its rows use the producer's `id`,
 `semantic_path`, and `semantic_weight_path` keys. Every row must match a base

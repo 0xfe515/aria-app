@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import random
 import subprocess
 from unittest.mock import Mock, patch
 
@@ -16,7 +17,7 @@ from PIL import Image
 from tools.vision.training.data import CLASS_NAMES, HAZARD_NAMES, convert_inventory, inventory_dataset, load_inventory_manifest
 import subprocess
 from unittest.mock import Mock, patch
-from tools.vision.training.train_data import PortraitDataset, PortraitDatasetError, _resolve_original_image_path, _wsl_drive_root
+from tools.vision.training.train_data import PortraitDataset, PortraitDatasetError, _augment_sample, _image_dependencies, _resolve_original_image_path, _wsl_drive_root
 
 
 def _can_create_symlinks() -> bool:
@@ -824,6 +825,72 @@ class PortraitDatasetTests(unittest.TestCase):
             self.assertTrue(np.all(augmented["semantic_weight"][pseudo] == 0.25))
             self.assertTrue(set(np.unique(augmented["hazard"])) <= {0.0, 1.0})
             self.assertTrue(set(np.unique(augmented["hazard_valid"])) <= {0.0, 1.0})
+
+    def test_independent_seeds_keep_per_record_augmentation_paired_and_repeatable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [_record(root, f"paired-{index}") for index in range(5)]
+
+            def collect(sampling_seed: int, augmentation_seed: int = 17):
+                dataset = _dataset(
+                    root, rows, seed=17, sampling_seed=sampling_seed,
+                    augmentation_seed=augmentation_seed,
+                )
+                return {
+                    sample["id"]: sample
+                    for sample in dataset.iter_samples(epoch=0, augment=True)
+                }, list(dataset._ordered_records(0, False))
+
+            base, base_order = collect(3)
+            shuffled, shuffled_order = collect(8)
+            repeat, _ = collect(3)
+            self.assertNotEqual([r.record_id for r in base_order], [r.record_id for r in shuffled_order])
+            for record_id, sample in base.items():
+                for key in ("image", "semantic", "semantic_source", "semantic_weight", "hazard", "hazard_valid"):
+                    np.testing.assert_array_equal(sample[key], shuffled[record_id][key])
+                    np.testing.assert_array_equal(sample[key], repeat[record_id][key])
+                pseudo = sample["semantic_source"] == 2
+                self.assertTrue(np.all(sample["semantic"][pseudo] == 4))
+                self.assertTrue(np.all(sample["semantic_weight"][pseudo] == 0.25))
+            changed, changed_order = collect(3, augmentation_seed=991)
+            self.assertEqual([r.record_id for r in base_order], [r.record_id for r in changed_order])
+            self.assertTrue(any(not np.array_equal(base[rid]["image"], changed[rid]["image"]) for rid in base))
+            ds = _dataset(root, rows, seed=17, sampling_seed=3, augmentation_seed=17)
+            epoch1_order = [s["id"] for s in ds.iter_samples(epoch=1, augment=False)]
+            self.assertNotEqual([r.record_id for r in base_order], epoch1_order)
+
+    def test_omitted_augmentation_seed_reconstructs_legacy_shared_rng_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [_record(root, f"legacy-{index}") for index in range(4)]
+            dataset = _dataset(root, rows, seed=29, sampling_seed=73)
+            epoch = 2
+            ordered_records = dataset._ordered_records(epoch, False)
+            actual = {
+                sample["id"]: sample
+                for sample in dataset.iter_samples(epoch=epoch, augment=True)
+            }
+
+            np_module, image_module, image_enhance, image_filter = _image_dependencies()
+            legacy_rng = random.Random(29 + epoch)
+            for record in ordered_records:
+                sample, content_valid = dataset._load_sample(record)
+                expected = _augment_sample(
+                    sample, content_valid, legacy_rng, np_module, image_module,
+                    image_enhance, image_filter,
+                )
+                for key in ("image", "semantic", "semantic_source", "semantic_weight", "hazard", "hazard_valid"):
+                    np.testing.assert_array_equal(actual[record.record_id][key], expected[key])
+
+    def test_optional_seed_arguments_reject_bool_negative_and_non_integer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            row = _record(root, "seed-check")
+            for name in ("sampling_seed", "augmentation_seed"):
+                for bad in (True, -1, 1.5):
+                    with self.subTest(name=name, value=bad):
+                        with self.assertRaisesRegex(PortraitDatasetError, name):
+                            _dataset(root, [row], **{name: bad})
 
     def test_actual_converter_serialization_loads_without_reinterpretation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

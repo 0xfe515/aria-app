@@ -1,8 +1,8 @@
-# Aria Native Portrait: Full Training Execution & City Warmup Launch
+# Aria Native Portrait: Full Training Execution & City Warmup (Attempt 02 Completed)
 
 **Document ID**: `ARIA-FULL-TRAINING-RUN-20261031`
 **Run ID**: `run_1de5424dff38` | **Task ID**: `ARIA-CITY-WARMUP-LAUNCH-20261031`
-**Active Attempt**: `attempt_02` (`aria-city-warmup-20261031-attempt-02.service`)
+**Historical Attempt**: `attempt_02` (`aria-city-warmup-20261031-attempt-02.service`; completed successfully, see §7)
 **Target Architecture**: MobileNetV2 / U-Net Model A (`portrait_model_a`)
 **Target Hardware**: NVIDIA GeForce GTX 1660 SUPER (6 GiB VRAM), WSL2 Ubuntu 26.04
 **Interpreter**: `/home/user/.venvs/aria_wsl/bin/python` (Python 3.11.18, TensorFlow 2.19.1)
@@ -121,3 +121,14 @@ wsl -d Ubuntu-26.04 -- /home/user/.venvs/aria_wsl/bin/python \
 1. **Launch Verification Only**: This task establishes verified stable launch, Epoch 0 initial evaluation checkpoint commit, and advancing training batches (`Batch 1/1275` -> `Batch 21/1275+`) with finite loss on GPU. It does **not** claim 5-epoch training completion, final convergence, or model quality.
 2. **Resource Ownership**: The durable job (`PID 3984`) retains exclusive GPU ownership until completion of the 5 warmup epochs.
 3. **No Automatic OOM Rollback**: In the event of an actual GPU OOM, the process preserves the last epoch-boundary checkpoint and exits; fallback to `--batch-size 1 --accumulate-steps 8` is permitted only into a fresh output directory after proving the prior process exited.
+
+---
+
+## 7. Completion Audit (2026-11-01)
+
+The previously launched `attempt_02` is complete; the launch-only status above describes the original observation window, not its current state.
+
+- Guest service `aria-city-warmup-20261031-attempt-02.service` is inactive with `Result=success`, `ExecMainCode=0`, and `ExecMainStatus=0`. Trainer PID `3984` is absent and `exit_code.txt` contains `0`.
+- `training_summary.json` records all 5 epochs completed, best City validation semantic loss `0.5840402000090655`, and epoch-5 validation mIoU `0.6672147242491501` across City classes with ground truth.
+- This is a historical comparison only. It used class weights `[0.5, 0.5, 0.5, 3.0, 0.5, 0.5, 0.5]`, which predate the corrected class-weight implementation. Cityscapes has no crosswalk ground truth, so this run provides no crosswalk-learning evidence.
+- Preserve its checkpoint and logs unchanged. Do not use it as the corrected production predecessor; rerun `city_warmup` into a fresh attempt/output directory with current class weights before mixed-domain training.

@@ -255,6 +255,15 @@ class TestManifestAuditAndExclusion(unittest.TestCase):
             root = Path(tmp)
             manifest_path = _write_fixture_dataset(root, city_train_count=2, surface_train_count=2)
             datasets = build_experiment_datasets(manifest_path, seed=42)
+            self.assertEqual(datasets["city_train"].sampling_seed, 42)
+            self.assertEqual(datasets["city_train"].augmentation_seed, 42)
+            self.assertEqual(datasets["city_val"].sampling_seed, 42)
+            independent = build_experiment_datasets(
+                manifest_path, seed=42, sampling_seed=99, augmentation_seed=123
+            )
+            self.assertEqual(independent["city_train"].sampling_seed, 99)
+            self.assertEqual(independent["city_train"].augmentation_seed, 123)
+            self.assertEqual(independent["city_val"].sampling_seed, 42)
 
             audit = audit_manifest_and_compute_shared_weights(
                 manifest_path,
@@ -651,6 +660,8 @@ class TestRandomSamplingAndExposureAudit(unittest.TestCase):
             self.assertEqual(res_42["configuration"]["model_seed"], 42)
             self.assertEqual(res_42["configuration"]["sampling_seed"], 42)
             self.assertFalse(res_42["configuration"]["sampling_seed_explicit"])
+            self.assertEqual(res_42["configuration"]["augmentation_seed"], 42)
+            self.assertFalse(res_42["configuration"]["augmentation_seed_explicit"])
 
             # 2. Run with seed=42, sampling_seed=20261031
             res_new_a = run_strategy_experiment(
@@ -670,6 +681,8 @@ class TestRandomSamplingAndExposureAudit(unittest.TestCase):
             self.assertEqual(res_new_a["configuration"]["model_seed"], 42)
             self.assertEqual(res_new_a["configuration"]["sampling_seed"], DEFAULT_SAMPLING_SEED_RERUN)
             self.assertTrue(res_new_a["configuration"]["sampling_seed_explicit"])
+            self.assertEqual(res_new_a["configuration"]["augmentation_seed"], 42)
+            self.assertFalse(res_new_a["configuration"]["augmentation_seed_explicit"])
 
             # Model initialization tensor hash must remain identical despite changed sampling_seed
             init_sha_42 = res_42["shared_initialization"]["shared_initial_tensor_hashes"][
