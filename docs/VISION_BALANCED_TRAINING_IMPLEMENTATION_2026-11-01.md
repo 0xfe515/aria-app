@@ -91,7 +91,7 @@ Windows mount. Its SHA-256 is
 `1c48156c449177ddab4cb80b35428e065b36576e1d5ca108bcf34569169424c1`; training
 continues to use the unmodified base manifest.
 
-The Pixel 3 baseline instrumentation benchmark was attempted but Gradle compilation stopped on existing uncommitted Android edits (unresolved `updateSurfaceProvider`, malformed `VisionPipelineController`, and related errors in `MainScreen.kt` and `MainVisionInset.kt`). Those user changes were left untouched. Until the app checkout builds, device latency and memory results remain unverified; offline TFLite validation can still proceed independently.
+The initial Pixel 3 benchmark attempt was blocked by Gradle errors in then-existing uncommitted Android edits. Those unrelated user changes were preserved. The checkout later built successfully, and a controlled CPU4 baseline/candidate device benchmark was completed on 2026-11-02; see the device benchmark section below.
 
 The continuation launcher now supports explicit stages and bounded epoch counts, validates predecessor checkpoint metadata, and protects existing run directories. Its 25 focused unit tests and Python compilation check passed under the repository Python 3.11 environment. The City bridge process remained alive at the latest check (20:25 KST, WSL PID 565, same start ticks 8422); it was using CPU/GPU and reading data, but had not yet emitted an epoch progress line or exit code. The bridge is left running, and the mixed decoder pilot must wait for its checkpoint and completion status.
 
@@ -128,4 +128,22 @@ The acceptance-eligible offline prediction file contains all 1,882 validation re
 
 This pilot corrects the warmup's zero-crosswalk result and passes both Surface gates, but fails all three City object-retention limits. Therefore it is **not an app replacement candidate**; do not advance to `mixed_block13`, quantize it, or replace the current TFLite asset based on this run. The candidate architecture has no risk head, so risk-head calibration and risk metrics remain unsupported. The file is useful evidence for the next training iteration, not deployment approval.
 
-FP16/INT8 compression and Pixel 3 latency/memory measurement remain undecided. The app checkout still fails Android compilation on pre-existing uncommitted vision edits, preventing a valid device benchmark. The app source and model asset remain unchanged.
+FP16/INT8 compression remains unevaluated. The later Pixel 3 CPU4 benchmark found the candidate substantially slower and larger than the existing app model; see the device benchmark section. The production app source and model asset remain unchanged.
+
+## Pixel 3 CPU4 Runtime Benchmark (2026-11-02)
+
+Both models were measured with the same `VisionPipelineController` camera path on Pixel 3 (Android 12 / API 31), LiteRT CPU FP32 with XNNPACK and four threads, 5-second warmup, and a 60-second steady window. The candidate was imported from its separately staged TFLite file; its SHA-256 matched the training export. Voice service was stopped for both runs. Thermal status began at `0` for both; baseline ended at `1` (battery 31.1°C to 35.4°C), candidate remained at `0` (30.5°C to 33.0°C).
+
+| Metric | Existing app model | Mixed decoder candidate | Candidate change |
+|---|---:|---:|---:|
+| Model file size | 10,839,936 B | 21,515,372 B | 1.99× |
+| Analyzed segmentation throughput | 7.04 FPS | 0.95 FPS | 7.4× slower |
+| Model invoke latency, median / p95 | 89.93 / 102.37 ms | 1,003.02 / 1,019.33 ms | 11.2× / 10.0× slower |
+| Full analyzer latency, median / p95 | 126.55 / 141.70 ms | 1,024.61 / 1,041.08 ms | 8.1× / 7.4× slower |
+| Camera-to-result age, median / p95 | 281.25 / 318.44 ms | 1,163.86 / 1,205.21 ms | 4.1× / 3.8× slower |
+| App process PSS | 320.59 MiB | 416.32 MiB | +95.73 MiB (+29.9%) |
+| Sensor frame rate during run | 15.53 FPS | 14.95 FPS | −3.7% |
+
+The baseline was `walkable_seg_aria5_portrait_unfused.tflite` (SHA-256 `312105f5a82fc2677337ca7c15867249b3ae255a983fb5ffa4a54dae2b6864c1`). The candidate was `mixed_decoder_model_a_fp32.tflite` (SHA-256 `81499aca17a0c55111da93a8e214b50985215be162af13c8064f467abcf1bb92`). Both instrumentation runs passed the benchmark assertions. The baseline result was taken from the `BASELINE_CPU4_JSON` instrumentation log marker; the device's Download report file was stale from an earlier run, so it was not used as baseline evidence.
+
+**Decision:** the candidate does not meet mobile runtime needs on this Pixel 3 CPU path. The candidate processes about one segmentation frame per second and uses roughly 96 MiB more process memory; combined with its validation regressions, it should not replace the current app model. Quantization was not tested and cannot be assumed to close a roughly 7.4× throughput gap.

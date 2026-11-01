@@ -31,6 +31,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -285,6 +286,253 @@ class VisionRealModelBenchmarkTest {
             assertTrue(preprocessSnap.warmupCompleted)
             assertTrue(preprocessSnap.sensorSteadyFrames >= 50)
         } finally {
+            controller.close()
+        }
+    }
+
+    @Test
+    fun realModelCpu4CandidateBenchmark_measuresWarmupAnd20SecondSteadyWindow() {
+        val candidateArg = getCandidateModelArg()
+        assumeTrue(
+            "Candidate benchmark skipped: no candidate model path argument supplied (pass -e candidateModelPath <path>)",
+            candidateArg != null,
+        )
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val candidateFile = resolveCandidateFile(context, requireNotNull(candidateArg))
+        assertTrue(
+            "Candidate model file does not exist or is not a file: ${candidateFile.absolutePath}",
+            candidateFile.isFile,
+        )
+        assertTrue(
+            "Candidate model file must not be empty: ${candidateFile.absolutePath}",
+            candidateFile.length() > 0L,
+        )
+
+        // 1. Isolate vision baseline by stopping concurrent VoiceService if running
+        val speechStateBefore = if (checkVoiceServiceRunning(context)) {
+            runCatching {
+                context.startService(Intent(context, VoiceService::class.java).setAction(VoiceService.ACTION_STOP))
+            }
+            var stopped = false
+            val stopWaitStart = SystemClock.elapsedRealtime()
+            while (SystemClock.elapsedRealtime() - stopWaitStart < 2_500L) {
+                if (!checkVoiceServiceRunning(context)) {
+                    stopped = true
+                    break
+                }
+                Thread.sleep(100L)
+            }
+            if (stopped) "STOPPED_VERIFIED" else "STOP_REQUESTED_STILL_RUNNING"
+        } else {
+            "ALREADY_STOPPED"
+        }
+
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val batteryIntent = context.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val initialBatteryTempC = (batteryIntent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10.0
+        val initialThermalStatus = powerManager?.currentThermalStatus ?: -1
+
+        val lifecycleOwnerRef = AtomicReference<LifecycleOwner?>(null)
+        val previewViewRef = AtomicReference<PreviewView?>(null)
+
+        composeRule.setContent {
+            val owner = LocalLifecycleOwner.current
+            lifecycleOwnerRef.set(owner)
+            Box(Modifier.fillMaxSize()) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        PreviewView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                            keepScreenOn = true
+                            findActivity(ctx)?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                            scaleType = PreviewView.ScaleType.FIT_CENTER
+                            previewViewRef.set(this)
+                        }
+                    },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        val owner = requireNotNull(lifecycleOwnerRef.get()) { "LifecycleOwner not captured" }
+        val previewView = requireNotNull(previewViewRef.get()) { "PreviewView not captured" }
+
+        // Inject store with restoreOnInit = false to prevent asynchronous race on startup
+        val store = VisionModelStore(context, restoreOnInit = false)
+        val controller = VisionPipelineController(context, modelStore = store)
+        try {
+            // Import candidate model through VisionModelStore's validated stream import
+            val importOutcome = candidateFile.inputStream().use { stream ->
+                store.importFromStreamSync(
+                    input = stream,
+                    displayName = candidateFile.name,
+                )
+            }
+            assertTrue("Candidate model import failed, was $importOutcome", importOutcome is VisionModelState.Ready)
+            val readyState = importOutcome as VisionModelState.Ready
+            val candidateMetadata = readyState.metadata
+            assertTrue("Segmenter must be ready before camera start", store.segmenter.isReady)
+
+            var surfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
+            var displayRotation = Surface.ROTATION_0
+            composeRule.runOnUiThread {
+                surfaceProvider = previewView.surfaceProvider
+                displayRotation = previewView.display?.rotation ?: Surface.ROTATION_0
+                controller.startCamera(
+                    lifecycleOwner = owner,
+                    surfaceProvider = surfaceProvider,
+                    mode = VisionPipelineMode.PREPROCESS_OR_INFERENCE,
+                    targetRotation = displayRotation,
+                )
+            }
+
+            // Wait up to 8s for analyzer to deliver first frame
+            val startWaitMs = SystemClock.elapsedRealtime()
+            while (SystemClock.elapsedRealtime() - startWaitMs < 8_000L) {
+                if (controller.snapshotNow().warmupFrames > 0) break
+                Thread.sleep(100L)
+            }
+            assertTrue(
+                "CameraX analyzer did not deliver frames (status=${controller.uiState.value.cameraStatus}, detail=${controller.uiState.value.cameraErrorDetail})",
+                controller.snapshotNow().warmupFrames > 0,
+            )
+
+            // Measure steady window (5s warmup + >= 60s steady window and >= 50 frames, deadline 95s total)
+            val benchmarkDeadlineMs = SystemClock.elapsedRealtime() + 95_000L
+            while (SystemClock.elapsedRealtime() < benchmarkDeadlineMs) {
+                val snap = controller.snapshotNow()
+                if (snap.warmupCompleted && snap.steadyElapsedMs >= 60_000.0 && snap.steadyFrames >= 50) {
+                    break
+                }
+                Thread.sleep(200L)
+            }
+
+            val preprocessSnap = controller.snapshotNow()
+            assertTrue(
+                "Expected LifecycleOwner to remain RESUMED, was ${owner.lifecycle.currentState}",
+                owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+            )
+            composeRule.runOnUiThread {
+                controller.setPipelineMode(VisionPipelineMode.PREVIEW_ONLY)
+            }
+            Thread.sleep(4_000L)
+            val previewOnlySnap = controller.snapshotNow()
+            composeRule.runOnUiThread {
+                controller.stopCamera()
+            }
+
+            val finalBatteryIntent = context.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val finalBatteryTempC = (finalBatteryIntent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10.0
+            val finalThermalStatus = powerManager?.currentThermalStatus ?: -1
+
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val pssKb = am?.getProcessMemoryInfo(intArrayOf(android.os.Process.myPid()))?.firstOrNull()?.totalPss ?: -1
+            val pssMb = if (pssKb > 0) pssKb / 1024.0 else -1.0
+
+            val jsonReport = JSONObject().apply {
+                put("benchmarkType", "REAL_MODEL_CPU4_CANDIDATE")
+                put("deviceModel", Build.MODEL)
+                put("sdkInt", Build.VERSION.SDK_INT)
+                put("modelName", candidateMetadata.displayName)
+                put("modelSizeBytes", candidateMetadata.sizeBytes)
+                put("modelSha256", candidateMetadata.sha256)
+                put("modelSourcePath", candidateFile.absolutePath)
+                put("backendConfig", "LiteRT CPU FP32 (XNNPACK, 4 threads)")
+                put("concurrentSpeechService", speechStateBefore)
+                put("initialThermalStatus", initialThermalStatus)
+                put("finalThermalStatus", finalThermalStatus)
+                put("initialBatteryTempC", initialBatteryTempC)
+                put("finalBatteryTempC", finalBatteryTempC)
+                put("memoryPssKb", pssKb)
+                put("memoryPssMb", String.format(Locale.US, "%.2f", pssMb))
+                put("effectiveHfovDegrees", controller.motionTracker.engine.effectiveHfovDegrees?.let { String.format(Locale.US, "%.2f", it) } ?: "null")
+                put(
+                    "preprocessAndInferenceMode",
+                    JSONObject().apply {
+                        put("sourceWidth", preprocessSnap.sourceWidth)
+                        put("sourceHeight", preprocessSnap.sourceHeight)
+                        put("rotationDegrees", preprocessSnap.rotationDegrees)
+                        put("previewUprightWidth", preprocessSnap.previewUprightWidth)
+                        put("previewUprightHeight", preprocessSnap.previewUprightHeight)
+                        put("cropLeft", preprocessSnap.cropRect?.left ?: 0)
+                        put("cropTop", preprocessSnap.cropRect?.top ?: 0)
+                        put("cropWidth", preprocessSnap.cropRect?.width ?: 0)
+                        put("cropHeight", preprocessSnap.cropRect?.height ?: 0)
+                        put("timestampSource", preprocessSnap.timestampSource.name)
+                        put("warmupElapsedMs", String.format(Locale.US, "%.1f", preprocessSnap.warmupElapsedMs))
+                        put("steadyElapsedMs", String.format(Locale.US, "%.1f", preprocessSnap.steadyElapsedMs))
+                        put("warmupFrames", preprocessSnap.warmupFrames)
+                        put("steadyFrames", preprocessSnap.steadyFrames)
+                        put("sensorWarmupFrames", preprocessSnap.sensorWarmupFrames)
+                        put("sensorSteadyFrames", preprocessSnap.sensorSteadyFrames)
+                        put("observedCaptureMinusAnalyzerDiffSteady", preprocessSnap.observedCaptureMinusAnalyzerDiffSteady)
+                        put("steadyAnalyzedFps", String.format(Locale.US, "%.2f", preprocessSnap.steadyProcessedFps))
+                        put("steadySensorFps", String.format(Locale.US, "%.2f", preprocessSnap.steadySensorFps))
+                        put("cameraDeliveryCadenceP50Ms", String.format(Locale.US, "%.2f", preprocessSnap.cameraDeliveryCadenceMs?.p50Ms ?: 0.0))
+                        put("cameraDeliveryCadenceP95Ms", String.format(Locale.US, "%.2f", preprocessSnap.cameraDeliveryCadenceMs?.p95Ms ?: 0.0))
+                        put("steadyPreprocessP50Ms", String.format(Locale.US, "%.2f", preprocessSnap.preprocessMs?.p50Ms ?: 0.0))
+                        put("steadyPreprocessP95Ms", String.format(Locale.US, "%.2f", preprocessSnap.preprocessMs?.p95Ms ?: 0.0))
+                        put("steadyModelInvokeP50Ms", String.format(Locale.US, "%.2f", preprocessSnap.modelInvokeMs?.p50Ms ?: 0.0))
+                        put("steadyModelInvokeP95Ms", String.format(Locale.US, "%.2f", preprocessSnap.modelInvokeMs?.p95Ms ?: 0.0))
+                        put("steadyPostprocessP50Ms", String.format(Locale.US, "%.2f", preprocessSnap.postprocessMs?.p50Ms ?: 0.0))
+                        put("steadyPostprocessP95Ms", String.format(Locale.US, "%.2f", preprocessSnap.postprocessMs?.p95Ms ?: 0.0))
+                        put("steadyTotalAnalyzerP50Ms", String.format(Locale.US, "%.2f", preprocessSnap.totalAnalyzerMs?.p50Ms ?: 0.0))
+                        put("steadyTotalAnalyzerP95Ms", String.format(Locale.US, "%.2f", preprocessSnap.totalAnalyzerMs?.p95Ms ?: 0.0))
+                        put("steadyPublicationP50Ms", String.format(Locale.US, "%.2f", preprocessSnap.resultPublicationMs?.p50Ms ?: 0.0))
+                        put("steadyPublicationP95Ms", String.format(Locale.US, "%.2f", preprocessSnap.resultPublicationMs?.p95Ms ?: 0.0))
+                        put("steadyCameraToResultAgeP50Ms", String.format(Locale.US, "%.2f", preprocessSnap.cameraToResultAgeMs?.p50Ms ?: 0.0))
+                        put("steadyCameraToResultAgeP95Ms", String.format(Locale.US, "%.2f", preprocessSnap.cameraToResultAgeMs?.p95Ms ?: 0.0))
+                    }
+                )
+                put(
+                    "previewOnlyMode",
+                    JSONObject().apply {
+                        put("warmupElapsedMs", String.format(Locale.US, "%.1f", previewOnlySnap.warmupElapsedMs))
+                        put("steadyElapsedMs", String.format(Locale.US, "%.1f", previewOnlySnap.steadyElapsedMs))
+                        put("sensorWarmupFrames", previewOnlySnap.sensorWarmupFrames)
+                        put("sensorSteadyFrames", previewOnlySnap.sensorSteadyFrames)
+                        put("steadySensorFps", String.format(Locale.US, "%.2f", previewOnlySnap.steadySensorFps))
+                        put("sensorCaptureCadenceP50Ms", String.format(Locale.US, "%.2f", previewOnlySnap.sensorCaptureCadenceMs?.p50Ms ?: 0.0))
+                        put("sensorCaptureCadenceP95Ms", String.format(Locale.US, "%.2f", previewOnlySnap.sensorCaptureCadenceMs?.p95Ms ?: 0.0))
+                    }
+                )
+            }
+
+            val args = InstrumentationRegistry.getArguments()
+            val reportFileName = args.getString("candidateReportFileName")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "candidate-cpu4-model.json"
+            val reportFile = File(context.filesDir, reportFileName)
+            reportFile.writeText(jsonReport.toString(2), Charsets.UTF_8)
+            runCatching {
+                val sdDir = File("/sdcard/Download/final_reports").apply { mkdirs() }
+                File(sdDir, reportFileName).writeText(jsonReport.toString(2), Charsets.UTF_8)
+            }
+            Log.i("AriaVisionBenchmark", "CANDIDATE_CPU4_JSON=${jsonReport}")
+
+            assertTrue(preprocessSnap.warmupCompleted)
+            assertTrue("Expected steadyElapsedMs >= 60000.0, was ${preprocessSnap.steadyElapsedMs}", preprocessSnap.steadyElapsedMs >= 60_000.0)
+            assertTrue(preprocessSnap.warmupFrames > 0)
+            assertTrue("Expected steadyFrames >= 50, was ${preprocessSnap.steadyFrames}", preprocessSnap.steadyFrames >= 50)
+            assertNotNull(preprocessSnap.preprocessMs)
+            assertNotNull(preprocessSnap.modelInvokeMs)
+            assertNotNull(preprocessSnap.postprocessMs)
+            assertNotNull(preprocessSnap.totalAnalyzerMs)
+            assertTrue("Expected modelInvokeMs.p50Ms > 0", (preprocessSnap.modelInvokeMs?.p50Ms ?: 0.0) > 0.0)
+            assertTrue("Expected postprocessMs.p50Ms > 0", (preprocessSnap.postprocessMs?.p50Ms ?: 0.0) > 0.0)
+            assertTrue("Expected preprocessMs.p50Ms > 0", (preprocessSnap.preprocessMs?.p50Ms ?: 0.0) > 0.0)
+
+            assertTrue(preprocessSnap.warmupCompleted)
+            assertTrue(preprocessSnap.sensorSteadyFrames >= 50)
+        } finally {
+            runCatching {
+                store.clearModelSync()
+                store.provisionDefaultAssetModelSync()
+            }
             controller.close()
         }
     }
@@ -759,5 +1007,33 @@ class VisionRealModelBenchmarkTest {
         is Activity -> context
         is ContextWrapper -> findActivity(context.baseContext)
         else -> null
+    }
+
+    private fun getCandidateModelArg(): String? {
+        val args = InstrumentationRegistry.getArguments()
+        val raw = args.getString("candidateModelPath")
+            ?: args.getString("candidatePath")
+            ?: args.getString("candidate_model_path")
+            ?: args.getString("candidate_path")
+            ?: args.getString("candidateModelFile")
+            ?: args.getString("candidate")
+        return raw?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun resolveCandidateFile(context: Context, rawPath: String): File {
+        val directFile = File(rawPath)
+        if (directFile.exists() && directFile.isFile) return directFile
+        val externalFilesDir = context.getExternalFilesDir(null)
+        if (externalFilesDir != null) {
+            val candidateInExternal = File(externalFilesDir, rawPath)
+            if (candidateInExternal.exists() && candidateInExternal.isFile) return candidateInExternal
+            val candidateByNameInExternal = File(externalFilesDir, directFile.name)
+            if (candidateByNameInExternal.exists() && candidateByNameInExternal.isFile) return candidateByNameInExternal
+        }
+        val candidateInFiles = File(context.filesDir, rawPath)
+        if (candidateInFiles.exists() && candidateInFiles.isFile) return candidateInFiles
+        val candidateByNameInFiles = File(context.filesDir, directFile.name)
+        if (candidateByNameInFiles.exists() && candidateByNameInFiles.isFile) return candidateByNameInFiles
+        return directFile
     }
 }
