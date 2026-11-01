@@ -125,6 +125,7 @@ fun MainScreen(
     var debugDestination by rememberSaveable { mutableStateOf(DebugDestination.None) }
     var showLicenses by rememberSaveable { mutableStateOf(false) }
     var isDistanceModeForeground by rememberSaveable { mutableStateOf(false) }
+    var showBodyMountProfileDialog by rememberSaveable { mutableStateOf(false) }
     val pendingCameraGate = remember { PendingCameraStartGate() }
 
     val isVisionRestoreCompleted by visionModel.isInitialRestoreCompleted.collectAsStateWithLifecycle()
@@ -509,11 +510,16 @@ fun MainScreen(
                     val navSafeBottomPadding = calculateFloatingNavSafeBottomPadding(floatingTabBarHeightDp)
                     val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
                     val density = LocalDensity.current
-                    var measuredInsetHeightDp by remember { mutableStateOf(84.dp) }
+                    var measuredInsetHeightDp by remember { mutableStateOf(148.dp) }
                     val homeTopInsetClearance = if (isLandscape) {
                         8.dp
                     } else {
                         measuredInsetHeightDp + 12.dp
+                    }
+                    val homeEndInsetClearance = if (isLandscape) {
+                        220.dp + 16.dp
+                    } else {
+                        0.dp
                     }
                     when {
                         selectedTab == 0 -> {
@@ -529,6 +535,7 @@ fun MainScreen(
                                     .fillMaxSize()
                                     .padding(
                                         top = homeTopInsetClearance,
+                                        end = homeEndInsetClearance,
                                         bottom = navSafeBottomPadding + transcriptContentClearance,
                                     ),
                             )
@@ -553,6 +560,7 @@ fun MainScreen(
                                     }
                                 },
                                 onOpenAppSettings = openSettings,
+                                onOpenProfileSetup = { showBodyMountProfileDialog = true },
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
                                     .padding(top = 8.dp, end = 12.dp)
@@ -663,12 +671,19 @@ fun MainScreen(
                                 },
                                 onOpenLicenses = { showLicenses = true },
                                 onOpenDistanceMode = openDistanceMode,
+                                onOpenProfileSetup = { showBodyMountProfileDialog = true },
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(bottom = navSafeBottomPadding + transcriptContentClearance),
                             )
                         }
                     }
+                }
+
+                if (showBodyMountProfileDialog) {
+                    BodyMountProfileDialog(
+                        onDismiss = { showBodyMountProfileDialog = false },
+                    )
                 }
 
                 LiveTranscriptOverlay(

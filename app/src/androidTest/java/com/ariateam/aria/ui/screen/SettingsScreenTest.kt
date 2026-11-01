@@ -35,6 +35,7 @@ class SettingsScreenTest {
         }
         compose.onNodeWithText(context.getString(R.string.settings_voice_title)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.settings_model_title)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_demo_page_title)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.settings_diagnostics_title)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.app_info)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.engine_description)).assertDoesNotExist()
@@ -139,6 +140,9 @@ class SettingsScreenTest {
             }
         }
         compose.onNodeWithText(context.getString(R.string.settings_diagnostics_title)).performClick()
+
+        // Diagnostics page only has Vision, Voice, Demo; AR distance entry belongs exclusively to Demo page
+        compose.onNodeWithText(context.getString(R.string.distance_mode_title)).assertDoesNotExist()
 
         compose.onNodeWithText(context.getString(R.string.debug_open_vision))
             .assertIsDisplayed()
@@ -438,5 +442,51 @@ class SettingsScreenTest {
         compose.runOnIdle {
             org.junit.Assert.assertEquals(1, licensesBackClicked)
         }
+    }
+
+    @Test fun demoSubpageOpensArDistanceAndShowsProfileSetupAndDisclaimer() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        var openedArDistance = 0
+        var openedDemo = 0
+        compose.setContent {
+            AriaTheme {
+                SettingsScreen(
+                    state = VoiceState(),
+                    onStartWaiting = {},
+                    onStop = {},
+                    onOpenDistanceMode = { openedArDistance++ },
+                    onOpenPresentationDemo = { openedDemo++ },
+                )
+            }
+        }
+
+        // Navigate from Root to Demo page
+        compose.onNodeWithText(context.getString(R.string.settings_demo_page_title))
+            .assertIsDisplayed()
+            .performClick()
+
+        // 1. AR Distance row
+        compose.onNodeWithText(context.getString(R.string.settings_demo_ar_title))
+            .assertIsDisplayed()
+            .performClick()
+        compose.runOnIdle { org.junit.Assert.assertEquals(1, openedArDistance) }
+
+        // 2. Body mount profile row
+        compose.onNodeWithText(context.getString(R.string.body_mount_profile_title))
+            .assertIsDisplayed()
+
+        // 3. Presentation demo row
+        compose.onNodeWithText(context.getString(R.string.debug_open_demo))
+            .assertIsDisplayed()
+            .performClick()
+        compose.runOnIdle { org.junit.Assert.assertEquals(1, openedDemo) }
+
+        // 4. Flat ground safety disclaimer
+        compose.onNodeWithTag("demoSafetyDisclaimer")
+            .assertIsDisplayed()
+
+        // 5. Back navigation returns to Root
+        compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithText(context.getString(R.string.settings_demo_page_title)).assertIsDisplayed()
     }
 }

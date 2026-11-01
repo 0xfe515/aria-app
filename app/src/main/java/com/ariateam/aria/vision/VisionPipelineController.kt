@@ -41,6 +41,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import com.ariateam.aria.distance.BodyMountProfile
+import com.ariateam.aria.distance.BodyMountProfileStore
+import com.ariateam.aria.distance.GroundContactDistance
+import com.ariateam.aria.distance.GroundContactDistanceEstimator
+import com.ariateam.aria.distance.GroundContactMotionTracker
+import com.ariateam.aria.hazard.EffectiveFov
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -68,11 +74,13 @@ data class VisionUiState(
     val configuredBackend: VisionBackendType = VisionBackendType.GPU,
     val configuredCpuThreads: Int = VisionContract.DEFAULT_CPU_THREADS,
     val activeBackendDescription: String = "N/A (모델 미적용)",
+    val groundContactDistance: GroundContactDistance = GroundContactDistance(),
 )
 
 /**
  * Coordinates CameraX `Preview` + `ImageAnalysis`, [VisionFramePreprocessor], [VisionModelStore],
- * [VisionTimingTracker], and IMU-based [MotionTracker] / [HazardDetector] / [HazardAlertCoordinator].
+ * [VisionTimingTracker], and IMU-based [MotionTracker] / [HazardDetector] / [HazardAlertCoordinator],
+ * and monocular ground-contact distance estimation.
  */
 class VisionPipelineController(
     private val context: Context,
@@ -86,6 +94,9 @@ class VisionPipelineController(
     val motionTracker: MotionTracker = MotionTracker(context),
     val hazardDetector: HazardDetector = HazardDetector(),
     val alertCoordinator: HazardAlertCoordinator = HazardAlertCoordinator(context),
+    val bodyMountProfileStore: BodyMountProfileStore = BodyMountProfileStore(context.applicationContext),
+    val groundContactMotionTracker: GroundContactMotionTracker = GroundContactMotionTracker(context),
+    val groundContactDistanceEstimator: GroundContactDistanceEstimator = GroundContactDistanceEstimator(),
     private val mutableUiState: MutableStateFlow<VisionUiState> = MutableStateFlow(VisionUiState()),
 ) : AutoCloseable {
     private val analyzerExecutor = Executors.newSingleThreadExecutor { runnable ->
@@ -127,6 +138,15 @@ class VisionPipelineController(
     @Volatile
     private var activeCameraIntrinsics: com.ariateam.aria.hazard.CameraIntrinsics? = null
 
+    @Volatile
+    private var activeEffectiveFov: EffectiveFov? = null
+
+    @Volatile
+    private var activeFullCameraModel: com.ariateam.aria.hazard.FullUprightCameraModel? = null
+
+    @Volatile
+    private var lastObservedProfile: BodyMountProfile? = null
+
     private var lastObservedGeomWidth = -1
     private var lastObservedGeomHeight = -1
     private var lastObservedGeomRotation = -1
@@ -149,6 +169,9 @@ class VisionPipelineController(
         lastObservedGeomRotation = -1
         lastObservedCropWidth = -1
         lastObservedUprightWidth = -1
+        activeEffectiveFov = null
+        activeFullCameraModel = null
+        groundContactDistanceEstimator.reset()
         motionTracker.updateCameraGeometry(null)
         mutableUiState.update { it.copy(preprocessingStrategy = strategy) }
     }
@@ -158,6 +181,7 @@ class VisionPipelineController(
         currentMode = mode
         timingTracker.reset()
         lastPublishedNanos.set(0L)
+        groundContactDistanceEstimator.reset()
         val owner = activeLifecycleOwner
         if (running.get() && owner != null) {
             startCamera(owner, activeSurfaceProvider, mode, activeTargetRotation)
@@ -169,6 +193,7 @@ class VisionPipelineController(
                     timing = timingTracker.snapshot(mode, modelLoaded, activeBackendLabel(mode, modelLoaded)),
                     latestSummary = null,
                     latestOverlayBitmap = null,
+                    groundContactDistance = GroundContactDistance(),
                 )
             }
         }
@@ -246,11 +271,14 @@ class VisionPipelineController(
         activeSurfaceProvider = null
         motionTracker.stop()
         alertCoordinator.stop()
+        groundContactMotionTracker.stop()
+        groundContactDistanceEstimator.reset()
         unbindUseCasesOnMain()
         mutableUiState.update {
             it.copy(
                 cameraStatus = CameraSessionStatus.PermissionDenied,
                 cameraErrorDetail = "카메라 권한이 거부되었습니다. 권한을 허용한 뒤 다시 시작해 주세요.",
+                groundContactDistance = GroundContactDistance(),
             )
         }
     }
@@ -278,6 +306,8 @@ class VisionPipelineController(
 
         motionTracker.start(targetRotation)
         alertCoordinator.start()
+        groundContactMotionTracker.start(targetRotation)
+        groundContactDistanceEstimator.reset()
 
         val modelLoaded = modelStore.segmenter.isReady
         mutableUiState.update {
@@ -293,6 +323,7 @@ class VisionPipelineController(
                 configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
                 activeBackendDescription = modelStore.segmenter.activeBackendDescription,
                 isHazardAlertEnabled = alertCoordinator.isEnabled,
+                groundContactDistance = GroundContactDistance(),
             )
         }
 
@@ -310,11 +341,14 @@ class VisionPipelineController(
                     running.set(false)
                     motionTracker.stop()
                     alertCoordinator.stop()
+                    groundContactMotionTracker.stop()
+                    groundContactDistanceEstimator.reset()
                     unbindUseCasesOnMain()
                     mutableUiState.update {
                         it.copy(
                             cameraStatus = CameraSessionStatus.Error,
                             cameraErrorDetail = "카메라 초기화 실패 (${t.javaClass.simpleName})",
+                            groundContactDistance = GroundContactDistance(),
                         )
                     }
                 }
@@ -363,6 +397,9 @@ class VisionPipelineController(
                 null
             }
             activeCameraIntrinsics = intrinsics
+            activeEffectiveFov = null
+            activeFullCameraModel = null
+            groundContactDistanceEstimator.reset()
             // Invalidate camera geometry until first actual frame is preprocessed
             lastObservedGeomWidth = -1
             lastObservedGeomHeight = -1
@@ -471,6 +508,8 @@ class VisionPipelineController(
             running.set(false)
             motionTracker.stop()
             alertCoordinator.stop()
+            groundContactMotionTracker.stop()
+            groundContactDistanceEstimator.reset()
             runCatching { boundAnalysis?.clearAnalyzer() }
             runCatching { boundPreview?.setSurfaceProvider(null) }
             runCatching { provider.unbindAll() }
@@ -481,6 +520,7 @@ class VisionPipelineController(
                     it.copy(
                         cameraStatus = CameraSessionStatus.Error,
                         cameraErrorDetail = "카메라 스트림 바인딩 실패 (${t.javaClass.simpleName})",
+                        groundContactDistance = GroundContactDistance(),
                     )
                 }
             }
@@ -542,6 +582,24 @@ class VisionPipelineController(
                     cropWidth = cropRect.width,
                     uprightWidth = cropRect.uprightWidth,
                 )
+                val effectiveFov = com.ariateam.aria.hazard.CameraGeometry.computeEffectiveUprightFov(
+                    intrinsics = activeCameraIntrinsics,
+                    bufferWidth = width,
+                    bufferHeight = height,
+                    rotationDegrees = rotation,
+                    cropWidth = cropRect.width,
+                    cropHeight = cropRect.height,
+                    uprightWidth = cropRect.uprightWidth,
+                    uprightHeight = cropRect.uprightHeight,
+                )
+                val fullModel = com.ariateam.aria.hazard.CameraGeometry.computeFullUprightCameraModel(
+                    intrinsics = activeCameraIntrinsics,
+                    bufferWidth = width,
+                    bufferHeight = height,
+                    rotationDegrees = rotation,
+                )
+                activeEffectiveFov = effectiveFov
+                activeFullCameraModel = fullModel
                 motionTracker.updateCameraGeometry(hfov)
                 timingTracker.recordStreamConfiguration(
                     width = width,
@@ -609,6 +667,44 @@ class VisionPipelineController(
                 )
             }
 
+            // Invalidate distance hysteresis if user modified profile in settings
+            val currentProfile = bodyMountProfileStore.profile.value
+            if (currentProfile != lastObservedProfile) {
+                lastObservedProfile = currentProfile
+                groundContactDistanceEstimator.reset()
+            }
+
+            // Estimate monocular ground-contact distance
+            val groundOrientation = groundContactMotionTracker.orientationAt(imageTimestampNanos)
+            val groundContactDist = if (inferenceOutput != null) {
+                groundContactDistanceEstimator.estimate(
+                    classMask = modelStore.segmenter.reusableClassMask,
+                    width = VisionContract.MODEL_WIDTH,
+                    height = VisionContract.MODEL_HEIGHT,
+                    profile = currentProfile,
+                    effectiveFov = activeEffectiveFov,
+                    orientation = groundOrientation,
+                    timestampNanos = imageTimestampNanos,
+                    isClockRealtime = isClockRealtime,
+                    fullCameraModel = activeFullCameraModel,
+                    cropLeftNorm = cropRect.normLeft,
+                    cropTopNorm = cropRect.normTop,
+                    cropWidthNorm = cropRect.normWidth,
+                    cropHeightNorm = cropRect.normHeight,
+                )
+            } else {
+                groundContactDistanceEstimator.reset()
+                GroundContactDistance(
+                    distanceMeters = null,
+                    message = if (currentMode == VisionPipelineMode.PREVIEW_ONLY) {
+                        "미리보기 전용 (거리 분석 비활성)"
+                    } else {
+                        "세그멘테이션 모델 미적용"
+                    },
+                    timestampNanos = imageTimestampNanos,
+                )
+            }
+
             val modelLoaded = inferenceOutput != null
             timingTracker.recordAnalyzerFrame(
                 analyzerStartElapsedNanos = analyzerStartNanos,
@@ -641,6 +737,7 @@ class VisionPipelineController(
                         latestOverlayBitmap = inferenceOutput?.overlayBitmap ?: if (!modelLoaded) null else state.latestOverlayBitmap,
                         motionState = motion,
                         hazardAssessment = assessment,
+                        groundContactDistance = groundContactDist,
                         configuredBackend = modelStore.segmenter.configuredBackend,
                         configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
                         activeBackendDescription = modelStore.segmenter.activeBackendDescription,
@@ -671,11 +768,14 @@ class VisionPipelineController(
             running.set(false)
             motionTracker.stop()
             alertCoordinator.stop()
+            groundContactMotionTracker.stop()
+            groundContactDistanceEstimator.reset()
             unbindUseCasesOnMain()
             mutableUiState.update { state ->
                 state.copy(
                     cameraStatus = CameraSessionStatus.Error,
                     cameraErrorDetail = "프레임 분석 중 오류가 발생하여 카메라 분석을 중지했습니다 (${t.javaClass.simpleName}).",
+                    groundContactDistance = GroundContactDistance(),
                 )
             }
         } finally {
@@ -707,6 +807,11 @@ class VisionPipelineController(
                 configuredBackend = modelStore.segmenter.configuredBackend,
                 configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
                 activeBackendDescription = modelStore.segmenter.activeBackendDescription,
+                groundContactDistance = GroundContactDistance(
+                    distanceMeters = null,
+                    message = "미리보기 전용 (거리 분석 비활성)",
+                    timestampNanos = nowNanos,
+                ),
             )
         }
     }
@@ -716,6 +821,10 @@ class VisionPipelineController(
         if (activeTargetRotation != targetRotation) {
             activeTargetRotation = targetRotation
             motionTracker.setDisplayRotation(targetRotation)
+            groundContactMotionTracker.setDisplayRotation(targetRotation)
+            activeEffectiveFov = null
+            activeFullCameraModel = null
+            groundContactDistanceEstimator.reset()
             // Invalidate camera geometry until next frame with new rotation arrives
             lastObservedGeomWidth = -1
             lastObservedGeomHeight = -1
@@ -738,6 +847,8 @@ class VisionPipelineController(
         activeSurfaceProvider = null
         motionTracker.stop()
         alertCoordinator.stop()
+        groundContactMotionTracker.stop()
+        groundContactDistanceEstimator.reset()
         unbindUseCasesOnMain()
         val now = SystemClock.elapsedRealtimeNanos()
         val modelLoaded = modelStore.segmenter.isReady
@@ -754,6 +865,7 @@ class VisionPipelineController(
                     backendLabel = activeBackendLabel(currentMode, modelLoaded),
                     nowElapsedNanos = now,
                 ),
+                groundContactDistance = GroundContactDistance(),
             )
         }
     }
@@ -792,6 +904,9 @@ class VisionPipelineController(
         stopCamera()
         motionTracker.close()
         alertCoordinator.close()
+        groundContactMotionTracker.close()
+        bodyMountProfileStore.close()
+        groundContactDistanceEstimator.reset()
         analyzerExecutor.shutdown()
         modelStore.close()
     }

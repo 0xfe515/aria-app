@@ -77,7 +77,7 @@ fun VoiceDemoScreen(
     modifier: Modifier = Modifier,
     onStartWaiting: () -> Unit = onStart,
     onStop: () -> Unit = {},
-    onOpenDistanceMode: () -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onOpenDistanceMode: () -> Unit = {},
 ) {
     var retrySeconds by remember { mutableLongStateOf(0L) }
     LaunchedEffect(state.phase, state.retryAtMillis) {
@@ -126,7 +126,7 @@ fun VoiceDemoScreen(
                 ) {
                     HomeStatusInfo(state, retrySeconds)
                     TapHintPill()
-                    HomeActionButtons(state, onOpenSettings, onOpenDistanceMode)
+                    HomeActionButtons(state, onOpenSettings)
                 }
             }
         } else {
@@ -140,7 +140,7 @@ fun VoiceDemoScreen(
                 PowerControl(state, accent, buttonSize, onStartWaiting, onStop)
                 HomeStatusInfo(state, retrySeconds)
                 TapHintPill()
-                HomeActionButtons(state, onOpenSettings, onOpenDistanceMode)
+                HomeActionButtons(state, onOpenSettings)
             }
         }
     }
@@ -212,32 +212,22 @@ private fun TapHintPill() {
 private fun HomeActionButtons(
     state: VoiceState,
     onOpenSettings: () -> Unit,
-    onOpenDistanceMode: () -> Unit,
 ) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.widthIn(max = 320.dp).fillMaxWidth(),
-    ) {
-        if (state.errorCode == VoiceError.PERMISSION) {
+    if (state.errorCode == VoiceError.PERMISSION) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .fillMaxWidth(),
+        ) {
             OutlinedButton(
                 onClick = onOpenSettings,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp),
             ) {
                 Text(stringResource(R.string.open_app_settings))
             }
-        }
-        OutlinedButton(
-            onClick = onOpenDistanceMode,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-            shape = RoundedCornerShape(24.dp),
-            border = BorderStroke(1.dp, AriaSky.copy(alpha = 0.5f)),
-        ) {
-            Text(
-                stringResource(R.string.distance_open_button),
-                color = AriaSky,
-                style = MaterialTheme.typography.labelLarge,
-            )
         }
     }
 }

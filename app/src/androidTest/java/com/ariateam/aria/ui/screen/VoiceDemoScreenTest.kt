@@ -98,6 +98,9 @@ class VoiceDemoScreenTest {
         compose.onNodeWithText(context.getString(R.string.command_heading)).assertDoesNotExist()
         compose.onNodeWithText(context.getString(R.string.command_examples)).assertDoesNotExist()
 
+        // Distance mode button relocated to Settings Demo page, absent from Home
+        compose.onNodeWithText(context.getString(R.string.distance_open_button)).assertDoesNotExist()
+
         // Persistent error banners are removed in favor of transient toast feedback
         compose.runOnIdle {
             state.value = VoiceState(VoicePhase.Stopping, errorCode = VoiceError.TIMEOUT)

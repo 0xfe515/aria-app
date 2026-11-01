@@ -18,23 +18,32 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ariateam.aria.R
+import com.ariateam.aria.distance.BodyMountProfile
+import com.ariateam.aria.distance.BodyMountProfileStore
 import com.ariateam.aria.speech.VoiceError
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceState
+import com.ariateam.aria.ui.theme.AriaSlate
+import kotlin.math.roundToInt
 
 private enum class SettingsPage {
     Root,
     Voice,
     Model,
+    Demo,
     Diagnostics,
     AppInfo,
 }
@@ -57,12 +66,23 @@ fun SettingsScreen(
     initialDebugExpanded: Boolean = false,
     onOpenLicenses: () -> Unit = {},
     onOpenDistanceMode: () -> Unit = {},
+    onOpenProfileSetup: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val profileStore = remember(context) { BodyMountProfileStore(context) }
+    androidx.compose.runtime.DisposableEffect(profileStore) {
+        onDispose {
+            profileStore.close()
+        }
+    }
+    val profile by profileStore.profile.collectAsStateWithLifecycle()
+
     var page by rememberSaveable {
         mutableStateOf(if (initialDebugExpanded) SettingsPage.Diagnostics else SettingsPage.Root)
     }
     var mobileData by rememberSaveable { mutableStateOf(false) }
     var confirmModelDelete by rememberSaveable { mutableStateOf(false) }
+    var showInternalProfileDialog by rememberSaveable { mutableStateOf(false) }
 
     BackHandler(enabled = page != SettingsPage.Root) {
         page = SettingsPage.Root
@@ -80,6 +100,7 @@ fun SettingsScreen(
                 state = state,
                 onOpenVoice = { page = SettingsPage.Voice },
                 onOpenModel = { page = SettingsPage.Model },
+                onOpenDemo = { page = SettingsPage.Demo },
                 onOpenDiagnostics = { page = SettingsPage.Diagnostics },
                 onOpenAppInfo = { page = SettingsPage.AppInfo },
             )
@@ -104,11 +125,21 @@ fun SettingsScreen(
                 onBack = { page = SettingsPage.Root },
             )
 
+            SettingsPage.Demo -> DemoSettings(
+                profile = profile,
+                onOpenProfileSetup = {
+                    onOpenProfileSetup()
+                    showInternalProfileDialog = true
+                },
+                onOpenDistanceMode = onOpenDistanceMode,
+                onOpenPresentationDemo = onOpenPresentationDemo,
+                onBack = { page = SettingsPage.Root },
+            )
+
             SettingsPage.Diagnostics -> DiagnosticsSettings(
                 onOpenVisionDiagnostics = onOpenVisionDiagnostics,
                 onOpenVoiceDiagnostics = onOpenVoiceDiagnostics,
                 onOpenPresentationDemo = onOpenPresentationDemo,
-                onOpenDistanceMode = onOpenDistanceMode,
                 onBack = { page = SettingsPage.Root },
             )
 
@@ -117,6 +148,14 @@ fun SettingsScreen(
                 onBack = { page = SettingsPage.Root },
             )
         }
+    }
+
+    if (showInternalProfileDialog) {
+        BodyMountProfileDialog(
+            onDismiss = { showInternalProfileDialog = false },
+            initialProfile = profile,
+            profileStore = profileStore,
+        )
     }
 
     if (confirmModelDelete) {
@@ -148,6 +187,7 @@ private fun SettingsRoot(
     state: VoiceState,
     onOpenVoice: () -> Unit,
     onOpenModel: () -> Unit,
+    onOpenDemo: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onOpenAppInfo: () -> Unit,
 ) {
@@ -171,6 +211,11 @@ private fun SettingsRoot(
         onClick = onOpenModel,
     )
     SettingsNavigationRow(
+        title = stringResource(R.string.settings_demo_page_title),
+        summary = stringResource(R.string.settings_demo_page_summary),
+        onClick = onOpenDemo,
+    )
+    SettingsNavigationRow(
         title = stringResource(R.string.settings_diagnostics_title),
         summary = stringResource(R.string.settings_diagnostics_summary),
         onClick = onOpenDiagnostics,
@@ -179,6 +224,59 @@ private fun SettingsRoot(
         title = stringResource(R.string.app_info),
         summary = stringResource(R.string.app_version),
         onClick = onOpenAppInfo,
+    )
+}
+
+@Composable
+private fun DemoSettings(
+    profile: BodyMountProfile?,
+    onOpenProfileSetup: () -> Unit,
+    onOpenDistanceMode: () -> Unit,
+    onOpenPresentationDemo: () -> Unit,
+    onBack: () -> Unit,
+) {
+    SettingsPageHeader(stringResource(R.string.settings_demo_page_title), onBack)
+    SettingsSectionTitle(stringResource(R.string.settings_demo_page_group))
+
+    // 1. AR 거리 측정 (ARCore DistanceActivity)
+    SettingsNavigationRow(
+        title = stringResource(R.string.settings_demo_ar_title),
+        summary = stringResource(R.string.settings_demo_ar_summary),
+        onClick = onOpenDistanceMode,
+    )
+
+    // 2. 키·착용 위치 설정
+    val profileSummary = if (profile != null && profile.isValid) {
+        val heightCm = profile.estimatedCameraHeightMeters?.let { (it * 100f).roundToInt() }
+        val heightStr = if (heightCm != null) " (추정 렌즈 높이 약 ${heightCm}cm)" else ""
+        val statureStr = if (profile.statureCm % 1f == 0f) profile.statureCm.toInt().toString() else profile.statureCm.toString()
+        "${statureStr}cm · ${profile.position.koreanLabel}$heightStr"
+    } else {
+        stringResource(R.string.body_mount_profile_unconfigured)
+    }
+    SettingsNavigationRow(
+        title = stringResource(R.string.body_mount_profile_title),
+        summary = profileSummary,
+        onClick = onOpenProfileSetup,
+    )
+
+    // 3. 통합 시연 데모 (Presentation Demo)
+    SettingsNavigationRow(
+        title = stringResource(R.string.debug_open_demo),
+        summary = stringResource(R.string.settings_demo_summary),
+        onClick = onOpenPresentationDemo,
+    )
+
+    Spacer(Modifier.height(12.dp))
+
+    // Flat ground assumption & safety notice
+    Text(
+        text = stringResource(R.string.settings_demo_safety_disclaimer),
+        style = MaterialTheme.typography.bodySmall,
+        color = AriaSlate,
+        modifier = Modifier
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("demoSafetyDisclaimer"),
     )
 }
 
@@ -311,16 +409,10 @@ private fun DiagnosticsSettings(
     onOpenVisionDiagnostics: () -> Unit,
     onOpenVoiceDiagnostics: () -> Unit,
     onOpenPresentationDemo: () -> Unit,
-    onOpenDistanceMode: () -> Unit,
     onBack: () -> Unit,
 ) {
     SettingsPageHeader(stringResource(R.string.settings_diagnostics_title), onBack)
     SettingsSectionTitle(stringResource(R.string.settings_diagnostics_group))
-    SettingsNavigationRow(
-        title = stringResource(R.string.distance_mode_title),
-        summary = stringResource(R.string.distance_open_summary),
-        onClick = onOpenDistanceMode,
-    )
     SettingsNavigationRow(
         title = stringResource(R.string.debug_open_vision),
         summary = stringResource(R.string.settings_vision_diagnostics_summary),

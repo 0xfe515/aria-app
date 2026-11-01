@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Settings Demo Page -->
+    <string name="settings_demo_page_title">데모</string>
+    <string name="settings_demo_page_summary">AR 거리 측정 및 기능 체험</string>
+    <string name="settings_demo_page_group">체험 및 시연</string>
+    <string name="settings_demo_ar_title">AR 거리 측정</string>
+    <string name="settings_demo_ar_summary">ARCore Raw Depth 기반 보행 공간 거리 측정 데모</string>
+    <string name="settings_demo_safety_disclaimer">※ 바닥과의 접점을 단안 카메라로 기하 추정한 값이며, 평평한 지면을 가정한 수치입니다. 경사로, 계단, 단차 구간에서는 오차가 발생할 수 있으므로 보행 안전을 보장하지 않습니다.</string>
+
+    <!-- Body Mount Profile Setup -->
+    <string name="body_mount_profile_title">키·착용 위치 설정</string>
+    <string name="body_mount_profile_summary">단안 카메라 거리 추정을 위한 키 및 장착 위치</string>
+    <string name="body_mount_profile_unconfigured">미설정 · 탭하여 설정</string>
+    <string name="body_mount_stature_label">키 (cm)</string>
+    <string name="body_mount_stature_hint">120~220 사이 입력</string>
+    <string name="body_mount_stature_error_range">키는 120cm에서 220cm 사이로 입력해 주세요.</string>
+    <string name="body_mount_stature_error_required">키(cm)를 입력해 주세요.</string>
+    <string name="body_mount_stature_error_number">숫자(cm)를 입력해 주세요.</string>
+    <string name="body_mount_position_label">착용 위치</string>
+    <string name="body_mount_position_shoulder">어깨</string>
+    <string name="body_mount_position_chest">가슴</string>
+    <string name="body_mount_position_shoulder_desc">어깨 바깥쪽 뼈(견봉) 부근에 카메라 렌즈를 착용합니다.</string>
+    <string name="body_mount_position_chest_desc">가슴 중앙(유두/바스트 높이)에 카메라 렌즈를 착용합니다.</string>
+    <string name="body_mount_lens_ref_note">바닥과의 거리를 추정하기 위한 카메라 렌즈 기준 높이입니다.</string>
+    <string name="body_mount_derived_height_label">추정 렌즈 높이: 약 %1$dcm (%2$.2fm)</string>
+    <string name="body_mount_save">저장</string>
+    <string name="body_mount_cancel">취소</string>
+    <string name="body_mount_clear">초기화</string>
+    <string name="body_mount_save_error">설정 저장에 실패했습니다. 다시 시도해 주세요.</string>
+
+    <!-- Inset UI -->
+    <string name="vision_inset_distance_unconfigured">키·착용 위치 설정</string>
+    <string name="vision_inset_distance_measuring">거리 확인 중</string>
+    <string name="vision_inset_distance_unavailable">측정 불가</string>
+    <string name="vision_inset_estimate_tag">추정</string>
+</resources>

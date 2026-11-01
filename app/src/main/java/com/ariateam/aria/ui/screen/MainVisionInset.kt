@@ -1,6 +1,8 @@
 package com.ariateam.aria.ui.screen
 
+import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.view.Surface
 import androidx.camera.core.Preview
 import androidx.compose.foundation.BorderStroke
@@ -9,8 +11,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -32,6 +36,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -43,7 +49,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ariateam.aria.R
+import com.ariateam.aria.distance.BodyMountProfile
+import com.ariateam.aria.distance.BodyMountProfileStore
+import com.ariateam.aria.distance.GroundContactDistance
 import com.ariateam.aria.ui.theme.AriaGreen
 import com.ariateam.aria.ui.theme.AriaPanel
 import com.ariateam.aria.ui.theme.AriaRed
@@ -53,6 +63,8 @@ import com.ariateam.aria.vision.CameraSessionStatus
 import com.ariateam.aria.vision.VisionModelState
 import com.ariateam.aria.vision.VisionTimingSnapshot
 import com.ariateam.aria.vision.VisionUiState
+import kotlinx.coroutines.delay
+import java.util.Locale
 import kotlin.math.roundToInt
 
 enum class MainVisionStatus {
@@ -135,10 +147,123 @@ fun formatCadenceOrLatency(timing: VisionTimingSnapshot): String? {
 }
 
 /**
- * Minimal translucent live 2D inference preview inset in the main voice/home screen.
+ * Pure evaluator checking validity of a ground contact distance measurement.
  *
- * Renders CameraX preview + mapped segmentation overlay at ~60% transparency (alpha 0.4)
- * with top-left FPS · latency metrics overlay.
+ * Rejects non-finite/negative distance, future timestamps, stale frames (>1.5s),
+ * camera not running, profile unconfigured/invalid, or Home not visible.
+ */
+internal fun isDistanceMeasurementValid(
+    isHomeVisible: Boolean,
+    isCameraRunning: Boolean,
+    isProfileValid: Boolean,
+    distanceMeters: Float?,
+    timestampNanos: Long,
+    currentElapsedRealtimeNanos: Long,
+    maxFreshnessNanos: Long = 1_500_000_000L,
+    minValidTimestampNanos: Long = 0L,
+): Boolean {
+    if (!isHomeVisible || !isCameraRunning || !isProfileValid) return false
+    if (distanceMeters == null || distanceMeters.isNaN() || !distanceMeters.isFinite() || distanceMeters <= 0f) return false
+    if (timestampNanos <= 0L) return false
+    if (timestampNanos < minValidTimestampNanos) return false
+    val ageNanos = currentElapsedRealtimeNanos - timestampNanos
+    return ageNanos in 0L..maxFreshnessNanos
+}
+
+internal data class DistancePresentation(
+    val badgeText: String,
+    val distanceDescription: String,
+    val isActionableSetupHint: Boolean,
+    val isFreshNumeric: Boolean,
+)
+
+/**
+ * Pure evaluator mapping ground contact distance and profile state to badge text and accessibility info.
+ */
+internal fun evaluateDistancePresentation(
+    isHomeVisible: Boolean,
+    cameraStatus: CameraSessionStatus,
+    profile: BodyMountProfile?,
+    groundContactDistance: GroundContactDistance,
+    currentElapsedRealtimeNanos: Long,
+    minValidTimestampNanos: Long = 0L,
+    unconfiguredText: String = "키·착용 위치 설정",
+    measuringText: String = "거리 확인 중",
+    stoppedText: String = "비전 중지됨",
+): DistancePresentation {
+    val isProfileValid = profile != null && profile.isValid
+    val isCameraRunning = cameraStatus == CameraSessionStatus.Running
+
+    if (!isProfileValid) {
+        return DistancePresentation(
+            badgeText = unconfiguredText,
+            distanceDescription = "키·착용 위치 미설정",
+            isActionableSetupHint = true,
+            isFreshNumeric = false,
+        )
+    }
+
+    if (!isCameraRunning) {
+        return DistancePresentation(
+            badgeText = stoppedText,
+            distanceDescription = stoppedText,
+            isActionableSetupHint = false,
+            isFreshNumeric = false,
+        )
+    }
+
+    val isValid = isDistanceMeasurementValid(
+        isHomeVisible = isHomeVisible,
+        isCameraRunning = true,
+        isProfileValid = true,
+        distanceMeters = groundContactDistance.distanceMeters,
+        timestampNanos = groundContactDistance.timestampNanos,
+        currentElapsedRealtimeNanos = currentElapsedRealtimeNanos,
+        minValidTimestampNanos = minValidTimestampNanos,
+    )
+
+    if (isValid && groundContactDistance.distanceMeters != null) {
+        val dist = groundContactDistance.distanceMeters
+        val formatted = String.format(Locale.KOREAN, "추정 약 %.1fm", dist)
+        return DistancePresentation(
+            badgeText = formatted,
+            distanceDescription = "추정 약 ${String.format(Locale.KOREAN, "%.1f", dist)}미터",
+            isActionableSetupHint = false,
+            isFreshNumeric = true,
+        )
+    }
+
+    val ageNanos = currentElapsedRealtimeNanos - groundContactDistance.timestampNanos
+    val isFreshMessage = groundContactDistance.timestampNanos >= minValidTimestampNanos &&
+        groundContactDistance.timestampNanos > 0L &&
+        ageNanos in 0L..1_500_000_000L &&
+        groundContactDistance.message.isNotBlank() &&
+        groundContactDistance.message != "키와 착용 위치를 설정하세요"
+
+    if (isFreshMessage) {
+        return DistancePresentation(
+            badgeText = groundContactDistance.message,
+            distanceDescription = groundContactDistance.message,
+            isActionableSetupHint = false,
+            isFreshNumeric = false,
+        )
+    }
+
+    return DistancePresentation(
+        badgeText = measuringText,
+        distanceDescription = measuringText,
+        isActionableSetupHint = false,
+        isFreshNumeric = false,
+    )
+}
+
+/**
+ * Meaningfully enlarged translucent live camera & inference preview inset in the main voice/home screen.
+ *
+ * Displays CameraX preview + segmentation overlay with metrics and real monocular ground distance
+ * backed by [GroundContactDistance] and [BodyMountProfileStore].
+ *
+ * Sized ~210..224dp wide, ~140..150dp tall (responsive in landscape/portrait), readable with font scaling.
  */
 @Composable
 fun MainVisionInset(
@@ -152,9 +277,32 @@ fun MainVisionInset(
     onRequestCameraPermission: () -> Unit,
     onOpenAppSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
+    onOpenProfileSetup: () -> Unit = {},
+    groundContactDistance: GroundContactDistance? = null,
+    profile: BodyMountProfile? = null,
 ) {
+    val context = LocalContext.current
     val view = LocalView.current
     val displayRotation = view.display?.rotation ?: Surface.ROTATION_0
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    val profileStore = remember(context) { BodyMountProfileStore(context) }
+    DisposableEffect(profileStore) {
+        onDispose {
+            profileStore.close()
+        }
+    }
+    val storedProfile by profileStore.profile.collectAsStateWithLifecycle()
+    val effectiveProfile = profile ?: storedProfile
+
+    var previousProfile by remember { mutableStateOf(effectiveProfile) }
+    var minValidTimestampNanos by remember { mutableLongStateOf(0L) }
+
+    if (previousProfile != effectiveProfile) {
+        minValidTimestampNanos = SystemClock.elapsedRealtimeNanos()
+        previousProfile = effectiveProfile
+    }
 
     var previewSurfaceProvider by remember { mutableStateOf<Preview.SurfaceProvider?>(null) }
 
@@ -185,7 +333,7 @@ fun MainVisionInset(
             if (hasFrameAdvance) {
                 lastObservedBitmap = visionUiState.latestOverlayBitmap
                 lastObservedFrames = totalFrames
-                lastFrameElapsedRealtime = android.os.SystemClock.elapsedRealtime()
+                lastFrameElapsedRealtime = SystemClock.elapsedRealtime()
                 isResultFresh = true
             }
         }
@@ -194,11 +342,11 @@ fun MainVisionInset(
     // Periodic check to expire stale inference if camera freezes or stops producing frames
     LaunchedEffect(isCameraActive, visionUiState.cameraStatus) {
         while (visionUiState.cameraStatus == CameraSessionStatus.Running) {
-            val elapsed = android.os.SystemClock.elapsedRealtime() - lastFrameElapsedRealtime
+            val elapsed = SystemClock.elapsedRealtime() - lastFrameElapsedRealtime
             if (lastFrameElapsedRealtime > 0L && elapsed > 3_500L) {
                 isResultFresh = false
             }
-            kotlinx.coroutines.delay(1_000L)
+            delay(1_000L)
         }
     }
 
@@ -256,28 +404,82 @@ fun MainVisionInset(
         }
     }
 
+    // Ground contact distance contract:
+    // Timestamp is always elapsedRealtime NANOSECONDS.
+    // Periodic ticker ensures stale distance expires within <= 1.5s even if frames halt.
+    val effectiveGcd = groundContactDistance ?: visionUiState.groundContactDistance
+    var tickerTick by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(effectiveGcd.timestampNanos, isHomeVisible, visionUiState.cameraStatus) {
+        while (isHomeVisible && visionUiState.cameraStatus == CameraSessionStatus.Running) {
+            tickerTick = SystemClock.elapsedRealtimeNanos()
+            delay(200L)
+        }
+    }
+
+    val currentNowNanos = if (tickerTick > 0L) tickerTick else SystemClock.elapsedRealtimeNanos()
+    val unconfiguredLabel = stringResource(R.string.vision_inset_distance_unconfigured)
+    val measuringLabel = stringResource(R.string.vision_inset_distance_measuring)
+    val stoppedLabel = stringResource(status.statusStringRes())
+
+    val presentation = remember(
+        isHomeVisible,
+        visionUiState.cameraStatus,
+        effectiveProfile,
+        effectiveGcd,
+        currentNowNanos,
+        minValidTimestampNanos,
+        unconfiguredLabel,
+        measuringLabel,
+        stoppedLabel,
+    ) {
+        evaluateDistancePresentation(
+            isHomeVisible = isHomeVisible,
+            cameraStatus = visionUiState.cameraStatus,
+            profile = effectiveProfile,
+            groundContactDistance = effectiveGcd,
+            currentElapsedRealtimeNanos = currentNowNanos,
+            minValidTimestampNanos = minValidTimestampNanos,
+            unconfiguredText = unconfiguredLabel,
+            measuringText = measuringLabel,
+            stoppedText = stoppedLabel,
+        )
+    }
+
+    val badgeColor = when {
+        presentation.isActionableSetupHint -> AriaSky
+        presentation.isFreshNumeric -> AriaGreen
+        visionUiState.cameraStatus != CameraSessionStatus.Running -> AriaSlate
+        else -> AriaSlate
+    }
+
+    // Responsive dimensions: ~210..224dp wide, ~140..150dp tall
+    val insetWidth = if (isLandscape) 210.dp else 224.dp
+    val insetHeight = if (isLandscape) 140.dp else 150.dp
+
     Surface(
         modifier = modifier
-            .size(width = 148.dp, height = 84.dp)
+            .size(width = insetWidth, height = insetHeight)
             .testTag("mainVisionInset")
             .semantics {
-                contentDescription = cadenceLatency?.let { "실시간 비전: $it" } ?: "실시간 비전"
+                val metricsInfo = cadenceLatency?.let { " · $it" } ?: ""
+                contentDescription = "실시간 비전 · ${presentation.distanceDescription}$metricsInfo"
             },
-        shape = RoundedCornerShape(12.dp),
-        color = AriaPanel.copy(alpha = 0.85f),
+        shape = RoundedCornerShape(14.dp),
+        color = AriaPanel.copy(alpha = 0.9f),
         border = BorderStroke(1.dp, AriaSlate.copy(alpha = 0.35f)),
-        shadowElevation = 4.dp,
+        shadowElevation = 6.dp,
     ) {
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center,
         ) {
             if (isCameraActive) {
-                // Visual layer rendered at ~60% transparency (alpha 0.4)
+                // Visual layer rendered at clearer opacity (~70% alpha)
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .alpha(0.4f),
+                        .alpha(0.7f),
                 ) {
                     VisionCameraPreviewBox(
                         isCameraActive = true,
@@ -291,34 +493,95 @@ fun MainVisionInset(
                             onSurfaceProviderUpdated(provider, displayRotation)
                         },
                         fillViewport = true,
-                        overlayAlpha = 0.55f,
+                        overlayAlpha = 0.65f,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
 
-                // Crisp top-left metrics overlay inside preview
-                if (cadenceLatency != null) {
+                // Top metrics bar inside preview
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .fillMaxWidth()
+                        .padding(start = 6.dp, top = 6.dp, end = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Cadence / FPS overlay
+                    if (cadenceLatency != null) {
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    color = Color.Black.copy(alpha = 0.6f),
+                                    shape = RoundedCornerShape(4.dp),
+                                )
+                                .padding(horizontal = 5.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = cadenceLatency,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                ),
+                                color = Color.White,
+                                maxLines = 1,
+                                modifier = Modifier.testTag("mainVisionCadenceLatency"),
+                            )
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.size(1.dp))
+                    }
+
+                    // "추정" indicator tag pill
                     Box(
                         modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(start = 6.dp, top = 5.dp)
                             .background(
-                                color = Color.Black.copy(alpha = 0.45f),
+                                color = Color.Black.copy(alpha = 0.6f),
                                 shape = RoundedCornerShape(4.dp),
                             )
-                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                            .testTag("mainVisionEstimateTag"),
                     ) {
                         Text(
-                            text = cadenceLatency,
+                            text = stringResource(R.string.vision_inset_estimate_tag),
                             style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 10.sp,
+                                fontSize = 9.sp,
                                 fontWeight = FontWeight.SemiBold,
                             ),
-                            color = Color.White,
-                            maxLines = 1,
-                            modifier = Modifier.testTag("mainVisionCadenceLatency"),
+                            color = AriaSlate,
                         )
                     }
+                }
+
+                // Bottom Distance & Status Badge
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.Black.copy(alpha = 0.75f))
+                        .then(
+                            if (presentation.isActionableSetupHint) {
+                                Modifier.clickable(role = Role.Button) { onOpenProfileSetup() }
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .testTag("mainVisionDistanceBadge"),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = presentation.badgeText,
+                        color = badgeColor,
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             } else {
                 // Inactive placeholder / permission or error recovery when unavailable
@@ -326,7 +589,7 @@ fun MainVisionInset(
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(6.dp),
+                            .padding(8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
                     ) {
@@ -334,22 +597,22 @@ fun MainVisionInset(
                         Text(
                             text = statusLabel,
                             color = AriaSlate,
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         if (status == MainVisionStatus.PermissionDenied) {
                             Text(
                                 text = stringResource(R.string.vision_inset_grant_permission),
                                 color = AriaSky,
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
                                     .background(AriaPanel)
                                     .clickable { onRequestCameraPermission() }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
                                     .semantics { role = Role.Button }
                                     .testTag("mainVisionPermissionRecoveryButton"),
                             )
@@ -357,7 +620,7 @@ fun MainVisionInset(
                             Text(
                                 text = "다시 시도",
                                 color = AriaSky,
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
@@ -365,9 +628,41 @@ fun MainVisionInset(
                                     .clickable {
                                         onStartCamera(previewSurfaceProvider, displayRotation)
                                     }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
                                     .semantics { role = Role.Button }
                                     .testTag("mainVisionRetryButton"),
+                            )
+                        }
+                    }
+                } else {
+                    // Initializing / stopped placeholder with unconfigured hint if applicable
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Text(
+                            text = stringResource(status.statusStringRes()),
+                            color = AriaSlate,
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                            modifier = Modifier.testTag("mainVisionStoppedStatus"),
+                        )
+                        if (presentation.isActionableSetupHint) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = stringResource(R.string.vision_inset_distance_unconfigured),
+                                color = AriaSky,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(AriaPanel)
+                                    .clickable { onOpenProfileSetup() }
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .semantics { role = Role.Button }
+                                    .testTag("mainVisionDistanceSetupHint"),
                             )
                         }
                     }

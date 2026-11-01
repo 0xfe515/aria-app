@@ -1,6 +1,6 @@
 # 키와 착용 위치로 추정하는 카메라 높이
 
-상태: **근거 조사·계산식 확정, 앱 코드 적용 전**. 조사일: 2026-10-31.
+상태: **프로덕션 코드 구현 완료 (ARIA-MONOCULAR-CORE-001)**. 적용일: 2026-11-01.
 
 ## 입력과 기준점
 
@@ -71,4 +71,6 @@ Android에서 얻는 카메라 내부 보정값·센서 크기·초점거리 및
 - 높이를 10% 크게 추정하면 같은 광선과 평면 조건에서 계산 거리도 약 10% 크게 나온다. 통계표의 집단 표준편차를 개인별 거리 오차나 신뢰구간으로 바꾸지 않는다.
 - 경사·계단·낙차는 평평한 가상 바닥 가정을 위반한다. 추정 거리와 실제 보행 안전성을 동일시하지 않는다.
 - 앱은 최초 입력, 저장·재실행 복원, 착용 위치 변경, 잘못된 키 입력, 측정 중 설정 변경 후 이전 거리 무효화를 검증해야 한다.
-- 실제 코드 통합 후 빌드·단위 테스트·Lint와 Pixel 3 기기 테스트가 필요하다. 이 문서 작성 시 앱 코드 변경이나 신규 APK 설치는 수행하지 않았다.
+- 프로덕션 코드 구현: `com.ariateam.aria.distance.BodyMountProfile`, `BodyMountProfileStore`, `GroundContactDistanceEstimator`, `GroundContactMotionTracker`, `CameraGeometry`.
+- 단위 테스트 검증: `BodyMountProfileTest`, `GroundContactDistanceEstimatorTest`, `GroundContactMotionTrackerTest`.
+- 세부 연동 및 기하 계산 명세: [MONOCULAR_DISTANCE_INTEGRATION.md](MONOCULAR_DISTANCE_INTEGRATION.md) 참조.
