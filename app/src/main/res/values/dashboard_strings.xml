@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Read-only vision dashboard strings -->
+    <string name="dashboard_talkback_description">실시간 비전 대시보드 (읽기 전용)</string>
+    <string name="dashboard_talkback_heading_disclaimer">기기 상대 방위, 이동 경로 아님</string>
+
+    <string name="dashboard_heading_label">상대 방향</string>
+    <string name="dashboard_heading_forward">상대 방향: 정면 (0°)</string>
+    <string name="dashboard_heading_left">상대 방향: 좌측 %d°</string>
+    <string name="dashboard_heading_right">상대 방향: 우측 %d°</string>
+
+    <string name="dashboard_heading_calibrating">상대 방향: 보정 대기 중</string>
+    <string name="dashboard_heading_stale">상대 방향: 신호 지연</string>
+    <string name="dashboard_heading_sensors_unavailable">상대 방향: 센서 미지원</string>
+    <string name="dashboard_heading_stopped">상대 방향: 비전 중지됨</string>
+    <string name="dashboard_heading_tilt_invalid">상대 방향: 카메라 각도 과도</string>
+    <string name="dashboard_heading_rapid_turn">상대 방향: 급격한 회전 중</string>
+    <string name="dashboard_heading_excessive_drift">상대 방향: 편차 과도 (재보정 필요)</string>
+    <string name="dashboard_heading_fov_unknown">상대 방향: 시야각 미확인</string>
+    <string name="dashboard_heading_low_confidence">상대 방향: 신뢰도 부족</string>
+
+    <!-- Relocated Home recovery actions -->
+    <string name="dashboard_recovery_title">모니터링 상태 확인</string>
+    <string name="dashboard_recovery_grant_permission">카메라 권한 허용</string>
+    <string name="dashboard_recovery_restart_camera">모니터링 다시 시작</string>
+    <string name="dashboard_recovery_retry_camera">비전 다시 시도</string>
+    <string name="dashboard_recovery_profile_setup">키·착용 위치 설정</string>
+</resources>

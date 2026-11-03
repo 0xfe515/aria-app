@@ -6,10 +6,16 @@ import org.junit.Test
 
 class ModelCommandParserTest {
     @Test fun acceptsOnlyASingleKnownCommand() {
-        AppCommand.entries.forEach {
+        (AppCommand.entries - setOf(AppCommand.HideScreen, AppCommand.ShowScreen)).forEach {
             assertEquals(Interpretation.Execute(it), ModelCommandParser.parse(""" { "command" : "$it" } """))
         }
         assertTrue(ModelCommandParser.parse("""{"command":"Clarify"}""") is Interpretation.Clarify)
+    }
+
+    @Test fun screenVisibilityActionsCannotBeInferredByTheModel() {
+        listOf(AppCommand.HideScreen, AppCommand.ShowScreen).forEach {
+            assertEquals(Interpretation.Unknown, ModelCommandParser.parse("""{"command":"$it"}"""))
+        }
     }
 
     @Test fun rejectsAmbiguousMalformedAndUnapprovedOutput() {

@@ -3,9 +3,15 @@ package com.ariateam.aria.vision
 import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.hardware.camera2.CameraAccessException
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
@@ -18,10 +24,10 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -37,6 +43,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 
@@ -71,8 +79,39 @@ class VisionRealModelBenchmarkTest {
         } ?: false
     }
 
+    private fun getCandidateModelArg(): String? =
+        InstrumentationRegistry.getArguments().getString("candidateModelPath")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    private fun resolveCandidateFile(context: Context, path: String): File {
+        val supplied = File(path)
+        return (if (supplied.isAbsolute) supplied else File(context.filesDir, path)).canonicalFile
+    }
+
+    private fun getCandidateReportFileName(defaultName: String): String =
+        InstrumentationRegistry.getArguments().getString("candidateReportFileName")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: defaultName
+
+    private fun assertGpuActive(store: VisionModelStore) {
+        assertEquals(VisionBackendType.GPU, store.segmenter.configuredBackend)
+        assertEquals(
+            "GPU benchmark must not report a CPU fallback as GPU",
+            VisionBackendType.GPU,
+            store.segmenter.activeBackendType,
+        )
+    }
+
+    private tailrec fun findActivity(context: Context?): Activity? = when (context) {
+        is Activity -> context
+        is ContextWrapper -> findActivity(context.baseContext)
+        else -> null
+    }
+
     @Test
-    fun realModelCpu4BaselineBenchmark_measuresWarmupAnd20SecondSteadyWindow() {
+    fun realModelGpuBaselineBenchmark_measuresWarmupAnd20SecondSteadyWindow() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
 
         // 1. Isolate vision baseline by stopping concurrent VoiceService if running
@@ -137,6 +176,7 @@ class VisionRealModelBenchmarkTest {
             val provisionOutcome = store.provisionDefaultAssetModelSync()
             assertTrue("Default model must load, was $provisionOutcome", provisionOutcome is VisionModelState.Ready)
             assertTrue("Segmenter must be ready", store.segmenter.isReady)
+            assertGpuActive(store)
 
             var surfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
             var displayRotation = Surface.ROTATION_0
@@ -195,14 +235,19 @@ class VisionRealModelBenchmarkTest {
             val pssMb = if (pssKb > 0) pssKb / 1024.0 else -1.0
 
             val jsonReport = JSONObject().apply {
-                put("benchmarkType", "REAL_MODEL_CPU4_BASELINE")
+                put("benchmarkType", "REAL_MODEL_GPU_BASELINE")
                 put("deviceModel", Build.MODEL)
                 put("sdkInt", Build.VERSION.SDK_INT)
                 put("modelName", VisionContract.DEFAULT_ASSET_MODEL_NAME)
                 put("modelSizeBytes", VisionContract.DEFAULT_ASSET_MODEL_BYTES)
                 put("modelSha256", VisionContract.DEFAULT_ASSET_MODEL_SHA256)
                 put("modelCommit", VisionContract.DEFAULT_ASSET_MODEL_UPSTREAM_COMMIT)
-                put("backendConfig", "LiteRT CPU FP32 (XNNPACK, 4 threads)")
+                put("backendConfig", store.segmenter.activeBackendDescription)
+                put("configuredBackend", store.segmenter.configuredBackend.name)
+                put("activeBackendType", store.segmenter.activeBackendType?.name)
+                put("gpuFallbackReason", store.segmenter.gpuFallbackCause?.let { "${it.javaClass.simpleName}: ${it.message}" })
+                put("configuredCpuThreads", store.segmenter.configuredCpuThreads)
+                put("activeBackendDescription", store.segmenter.activeBackendDescription)
                 put("concurrentSpeechService", speechStateBefore)
                 put("initialThermalStatus", initialThermalStatus)
                 put("finalThermalStatus", finalThermalStatus)
@@ -263,13 +308,13 @@ class VisionRealModelBenchmarkTest {
                 )
             }
 
-            val reportFile = File(context.filesDir, "baseline-cpu4-model.json")
-            reportFile.writeText(jsonReport.toString(2), Charsets.UTF_8)
+            val reportFile = File(context.filesDir, "baseline-gpu-model.json")
+            reportFile.writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             runCatching {
                 val sdDir = File("/sdcard/Download/final_reports").apply { mkdirs() }
-                File(sdDir, "baseline-cpu4-model.json").writeText(jsonReport.toString(2), Charsets.UTF_8)
+                File(sdDir, "baseline-gpu-model.json").writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             }
-            Log.i("AriaVisionBenchmark", "BASELINE_CPU4_JSON=${jsonReport}")
+            Log.i("AriaVisionBenchmark", "BASELINE_GPU_JSON=${jsonReport}")
 
             assertTrue(preprocessSnap.warmupCompleted)
             assertTrue("Expected steadyElapsedMs >= 60000.0, was ${preprocessSnap.steadyElapsedMs}", preprocessSnap.steadyElapsedMs >= 60_000.0)
@@ -291,7 +336,7 @@ class VisionRealModelBenchmarkTest {
     }
 
     @Test
-    fun realModelCpu4CandidateBenchmark_measuresWarmupAnd20SecondSteadyWindow() {
+    fun realModelGpuCandidateBenchmark_measuresWarmupAnd20SecondSteadyWindow() {
         val candidateArg = getCandidateModelArg()
         assumeTrue(
             "Candidate benchmark skipped: no candidate model path argument supplied (pass -e candidateModelPath <path>)",
@@ -377,6 +422,7 @@ class VisionRealModelBenchmarkTest {
             val readyState = importOutcome as VisionModelState.Ready
             val candidateMetadata = readyState.metadata
             assertTrue("Segmenter must be ready before camera start", store.segmenter.isReady)
+            assertGpuActive(store)
 
             var surfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
             var displayRotation = Surface.ROTATION_0
@@ -435,14 +481,19 @@ class VisionRealModelBenchmarkTest {
             val pssMb = if (pssKb > 0) pssKb / 1024.0 else -1.0
 
             val jsonReport = JSONObject().apply {
-                put("benchmarkType", "REAL_MODEL_CPU4_CANDIDATE")
+                put("benchmarkType", "REAL_MODEL_GPU_CANDIDATE")
                 put("deviceModel", Build.MODEL)
                 put("sdkInt", Build.VERSION.SDK_INT)
                 put("modelName", candidateMetadata.displayName)
                 put("modelSizeBytes", candidateMetadata.sizeBytes)
                 put("modelSha256", candidateMetadata.sha256)
                 put("modelSourcePath", candidateFile.absolutePath)
-                put("backendConfig", "LiteRT CPU FP32 (XNNPACK, 4 threads)")
+                put("backendConfig", store.segmenter.activeBackendDescription)
+                put("configuredBackend", store.segmenter.configuredBackend.name)
+                put("activeBackendType", store.segmenter.activeBackendType?.name)
+                put("gpuFallbackReason", store.segmenter.gpuFallbackCause?.let { "${it.javaClass.simpleName}: ${it.message}" })
+                put("configuredCpuThreads", store.segmenter.configuredCpuThreads)
+                put("activeBackendDescription", store.segmenter.activeBackendDescription)
                 put("concurrentSpeechService", speechStateBefore)
                 put("initialThermalStatus", initialThermalStatus)
                 put("finalThermalStatus", finalThermalStatus)
@@ -504,15 +555,14 @@ class VisionRealModelBenchmarkTest {
             }
 
             val args = InstrumentationRegistry.getArguments()
-            val reportFileName = args.getString("candidateReportFileName")?.trim()?.takeIf { it.isNotEmpty() }
-                ?: "candidate-cpu4-model.json"
+            val reportFileName = getCandidateReportFileName("candidate-gpu-model.json")
             val reportFile = File(context.filesDir, reportFileName)
-            reportFile.writeText(jsonReport.toString(2), Charsets.UTF_8)
+            reportFile.writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             runCatching {
                 val sdDir = File("/sdcard/Download/final_reports").apply { mkdirs() }
-                File(sdDir, reportFileName).writeText(jsonReport.toString(2), Charsets.UTF_8)
+                File(sdDir, reportFileName).writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             }
-            Log.i("AriaVisionBenchmark", "CANDIDATE_CPU4_JSON=${jsonReport}")
+            Log.i("AriaVisionBenchmark", "CANDIDATE_GPU_JSON=${jsonReport}")
 
             assertTrue(preprocessSnap.warmupCompleted)
             assertTrue("Expected steadyElapsedMs >= 60000.0, was ${preprocessSnap.steadyElapsedMs}", preprocessSnap.steadyElapsedMs >= 60_000.0)
@@ -539,7 +589,42 @@ class VisionRealModelBenchmarkTest {
 
     @Test
     fun realModelOptimizedGpuBenchmark_measuresWarmupAnd20SecondSteadyWindow() {
+        val candidateArg = getCandidateModelArg()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val candidateFile = candidateArg?.let { resolveCandidateFile(context, it) }
+        val store = VisionModelStore(context, restoreOnInit = false)
+        val controller = VisionPipelineController(context, modelStore = store)
+
+        // Handle candidate model if provided, otherwise use optimized asset model
+        val controllerSetup: () -> Unit = if (candidateFile != null) {
+            assertTrue(
+                "Candidate model file does not exist or is not a file: ${candidateFile.absolutePath}",
+                candidateFile.isFile,
+            )
+            assertTrue(
+                "Candidate model file must not be empty: ${candidateFile.absolutePath}",
+                candidateFile.length() > 0L,
+            )
+            val setup: () -> Unit = {
+                // Import candidate model through VisionModelStore's validated stream import
+                val importOutcome = candidateFile.inputStream().use { stream ->
+                    store.importFromStreamSync(
+                        input = stream,
+                        displayName = candidateFile.name,
+                    )
+                }
+                assertTrue("Candidate model import failed, was $importOutcome", importOutcome is VisionModelState.Ready)
+                assertTrue("Segmenter must be ready", store.segmenter.isReady)
+            }
+            setup
+        } else {
+            {
+                // Provision the optimized model from assets
+                val provisionOutcome = store.provisionOptimizedAssetModelSync()
+                assertTrue("Optimized model must load, was $provisionOutcome", provisionOutcome is VisionModelState.Ready)
+                assertTrue("Segmenter must be ready", store.segmenter.isReady)
+            }
+        }
 
         // 1. Isolate vision baseline by stopping concurrent VoiceService if running
         val speechStateBefore = if (checkVoiceServiceRunning(context)) {
@@ -595,14 +680,11 @@ class VisionRealModelBenchmarkTest {
         val owner = requireNotNull(lifecycleOwnerRef.get()) { "LifecycleOwner not captured" }
         val previewView = requireNotNull(previewViewRef.get()) { "PreviewView not captured" }
 
-        val store = VisionModelStore(context, restoreOnInit = false)
-        val controller = VisionPipelineController(context, modelStore = store)
         try {
-            // Provision the optimized model and configure GPU backend
-            val provisionOutcome = store.provisionOptimizedAssetModelSync()
-            assertTrue("Optimized model must load, was $provisionOutcome", provisionOutcome is VisionModelState.Ready)
-            store.segmenter.configureBackend(VisionBackendType.GPU)
-            assertTrue("Segmenter must be ready", store.segmenter.isReady)
+            controllerSetup()
+
+            // Assert GPU backend after model loading
+            assertGpuActive(store)
 
             var surfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
             var displayRotation = Surface.ROTATION_0
@@ -628,23 +710,26 @@ class VisionRealModelBenchmarkTest {
                 controller.snapshotNow().warmupFrames > 0,
             )
 
-            // Measure steady window (5s warmup + 21s steady window >= 26s total)
+            // Measure steady window (5s warmup + >= 21s steady window and >= 50 frames, deadline 40s total)
             val benchmarkDeadlineMs = SystemClock.elapsedRealtime() + 40_000L
             while (SystemClock.elapsedRealtime() < benchmarkDeadlineMs) {
                 val snap = controller.snapshotNow()
-                if (snap.warmupCompleted && snap.steadyElapsedMs >= 21_000.0) {
+                if (snap.warmupCompleted && snap.steadyElapsedMs >= 21_000.0 && snap.steadyFrames >= 50) {
                     break
                 }
                 Thread.sleep(200L)
             }
 
-            val effectiveHfov = controller.motionTracker.engine.effectiveHfovDegrees
-            assertNotNull("effectiveHfovDegrees must not be null while camera is active", effectiveHfov)
-            val hfovVal = requireNotNull(effectiveHfov)
-            assertTrue("Derived portrait HFOV on Pixel 3 (rotation 90/270) must be narrower than 60 deg, was $hfovVal deg", hfovVal < 60f)
-            assertTrue("Derived portrait HFOV on Pixel 3 must be > 40 deg, was $hfovVal deg", hfovVal > 40f)
-
             val gpuSnap = controller.snapshotNow()
+            assertTrue(
+                "Expected LifecycleOwner to remain RESUMED, was ${owner.lifecycle.currentState}",
+                owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+            )
+            composeRule.runOnUiThread {
+                controller.setPipelineMode(VisionPipelineMode.PREVIEW_ONLY)
+            }
+            Thread.sleep(4_000L)
+            val previewOnlySnap = controller.snapshotNow()
             composeRule.runOnUiThread {
                 controller.stopCamera()
             }
@@ -658,13 +743,26 @@ class VisionRealModelBenchmarkTest {
             val pssMb = if (pssKb > 0) pssKb / 1024.0 else -1.0
 
             val jsonReport = JSONObject().apply {
-                put("benchmarkType", "REAL_MODEL_OPTIMIZED_GPU_VOICE_OFF")
+                put("benchmarkType", if (candidateArg != null) "REAL_MODEL_GPU_CANDIDATE" else "REAL_MODEL_OPTIMIZED_GPU_VOICE_OFF")
                 put("deviceModel", Build.MODEL)
                 put("sdkInt", Build.VERSION.SDK_INT)
-                put("modelName", VisionContract.OPTIMIZED_ASSET_MODEL_NAME)
-                put("modelSizeBytes", VisionContract.OPTIMIZED_ASSET_MODEL_BYTES)
-                put("modelSha256", VisionContract.OPTIMIZED_ASSET_MODEL_SHA256)
+                put("modelName", if (candidateFile != null) candidateFile.name else VisionContract.OPTIMIZED_ASSET_MODEL_NAME)
+                put("modelSizeBytes", if (candidateFile != null) candidateFile.length() else VisionContract.OPTIMIZED_ASSET_MODEL_BYTES)
+                put("modelSha256", if (candidateFile != null) {
+                    // Calculate SHA-256 of candidate file
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    candidateFile.inputStream().use { it ->
+                        digest.update(it.readBytes())
+                    }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                } else VisionContract.OPTIMIZED_ASSET_MODEL_SHA256)
+                put("modelSourcePath", candidateFile?.absolutePath)
                 put("backendConfig", store.segmenter.activeBackendDescription)
+                put("configuredBackend", store.segmenter.configuredBackend.name)
+                put("activeBackendType", store.segmenter.activeBackendType?.name)
+                put("gpuFallbackReason", store.segmenter.gpuFallbackCause?.let { "${it.javaClass.simpleName}: ${it.message}" })
+                put("configuredCpuThreads", store.segmenter.configuredCpuThreads)
+                 put("activeBackendDescription", store.segmenter.activeBackendDescription)
                 put("concurrentSpeechService", speechStateBefore)
                 put("initialThermalStatus", initialThermalStatus)
                 put("finalThermalStatus", finalThermalStatus)
@@ -711,22 +809,37 @@ class VisionRealModelBenchmarkTest {
                         put("steadyCameraToResultAgeP95Ms", String.format(Locale.US, "%.2f", gpuSnap.cameraToResultAgeMs?.p95Ms ?: 0.0))
                     }
                 )
+                put(
+                    "previewOnlyMode",
+                    JSONObject().apply {
+                        put("warmupElapsedMs", String.format(Locale.US, "%.1f", previewOnlySnap.warmupElapsedMs))
+                        put("steadyElapsedMs", String.format(Locale.US, "%.1f", previewOnlySnap.steadyElapsedMs))
+                        put("sensorWarmupFrames", previewOnlySnap.sensorWarmupFrames)
+                        put("sensorSteadyFrames", previewOnlySnap.sensorSteadyFrames)
+                        put("steadySensorFps", String.format(Locale.US, "%.2f", previewOnlySnap.steadySensorFps))
+                        put("sensorCaptureCadenceP50Ms", String.format(Locale.US, "%.2f", previewOnlySnap.sensorCaptureCadenceMs?.p50Ms ?: 0.0))
+                        put("sensorCaptureCadenceP95Ms", String.format(Locale.US, "%.2f", previewOnlySnap.sensorCaptureCadenceMs?.p95Ms ?: 0.0))
+                    }
+                )
             }
 
-            val reportFile = File(context.filesDir, "optimized-gpu-model.json")
-            reportFile.writeText(jsonReport.toString(2), Charsets.UTF_8)
-            val voiceOffReportFile = File(context.filesDir, "optimized-gpu-model-voice-off.json")
-            voiceOffReportFile.writeText(jsonReport.toString(2), Charsets.UTF_8)
+            val reportFileName = if (candidateFile != null) {
+                getCandidateReportFileName("candidate-gpu-model.json")
+            } else {
+                "optimized-gpu-model.json"
+            }
+            val reportFile = File(context.filesDir, reportFileName)
+            reportFile.writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             runCatching {
                 val sdDir = File("/sdcard/Download/final_reports").apply { mkdirs() }
-                File(sdDir, "optimized-gpu-model.json").writeText(jsonReport.toString(2), Charsets.UTF_8)
-                File(sdDir, "optimized-gpu-model-voice-off.json").writeText(jsonReport.toString(2), Charsets.UTF_8)
+                File(sdDir, reportFileName).writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             }
-            Log.i("AriaVisionBenchmark", "OPTIMIZED_GPU_JSON=${jsonReport}")
+            Log.i("AriaVisionBenchmark", "${if (candidateArg != null) "CANDIDATE_GPU_JSON" else "OPTIMIZED_GPU_JSON"}=${jsonReport}")
 
             assertTrue(gpuSnap.warmupCompleted)
-            assertTrue(gpuSnap.steadyElapsedMs >= 20_000.0)
-            assertTrue(gpuSnap.steadyFrames >= 50)
+            assertTrue("Expected steadyElapsedMs >= 20000.0, was ${gpuSnap.steadyElapsedMs}", gpuSnap.steadyElapsedMs >= 20_000.0)
+            assertTrue(gpuSnap.warmupFrames > 0)
+            assertTrue("Expected steadyFrames >= 50, was ${gpuSnap.steadyFrames}", gpuSnap.steadyFrames >= 50)
             assertNotNull(gpuSnap.preprocessMs)
             assertNotNull(gpuSnap.modelInvokeMs)
             assertNotNull(gpuSnap.postprocessMs)
@@ -734,15 +847,57 @@ class VisionRealModelBenchmarkTest {
             assertTrue("Expected modelInvokeMs.p50Ms > 0", (gpuSnap.modelInvokeMs?.p50Ms ?: 0.0) > 0.0)
             assertTrue("Expected GPU invoke < 150ms on Pixel 3", (gpuSnap.modelInvokeMs?.p50Ms ?: 0.0) < 150.0)
         } finally {
+            // Restore default model if we imported a candidate
+            if (candidateArg != null) {
+                runCatching {
+                    store.clearModelSync()
+                    store.provisionDefaultAssetModelSync()
+                }
+            }
             controller.close()
         }
     }
 
     @Test
     fun realModelOptimizedGpuBenchmark_measuresWarmupAnd20SecondSteadyWindow_voiceActive() {
+        val candidateArg = getCandidateModelArg()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val candidateFile = candidateArg?.let { resolveCandidateFile(context, it) }
         val inst = InstrumentationRegistry.getInstrumentation()
         val pkg = inst.targetContext.packageName
+        val store = VisionModelStore(context, restoreOnInit = false)
+        val controller = VisionPipelineController(context, modelStore = store)
+
+        // Handle candidate model if provided, otherwise use optimized asset model
+        val controllerSetup: () -> Unit = if (candidateFile != null) {
+            assertTrue(
+                "Candidate model file does not exist or is not a file: ${candidateFile.absolutePath}",
+                candidateFile.isFile,
+            )
+            assertTrue(
+                "Candidate model file must not be empty: ${candidateFile.absolutePath}",
+                candidateFile.length() > 0L,
+            )
+            val setup: () -> Unit = {
+                // Import candidate model through VisionModelStore's validated stream import
+                val importOutcome = candidateFile.inputStream().use { stream ->
+                    store.importFromStreamSync(
+                        input = stream,
+                        displayName = candidateFile.name,
+                    )
+                }
+                assertTrue("Candidate model import failed, was $importOutcome", importOutcome is VisionModelState.Ready)
+                assertTrue("Segmenter must be ready", store.segmenter.isReady)
+            }
+            setup
+        } else {
+            {
+                // Provision the optimized model from assets
+                val provisionOutcome = store.provisionOptimizedAssetModelSync()
+                assertTrue("Optimized model must load, was $provisionOutcome", provisionOutcome is VisionModelState.Ready)
+                assertTrue("Segmenter must be ready", store.segmenter.isReady)
+            }
+        }
 
         val lifecycleOwnerRef = AtomicReference<LifecycleOwner?>(null)
         val previewViewRef = AtomicReference<PreviewView?>(null)
@@ -789,6 +944,7 @@ class VisionRealModelBenchmarkTest {
             }
         }
 
+        try {
         androidx.core.content.ContextCompat.startForegroundService(
             context,
             Intent(context, VoiceService::class.java).setAction(VoiceService.ACTION_WAIT),
@@ -833,13 +989,10 @@ class VisionRealModelBenchmarkTest {
         val owner = requireNotNull(lifecycleOwnerRef.get()) { "LifecycleOwner not captured" }
         val previewView = requireNotNull(previewViewRef.get()) { "PreviewView not captured" }
 
-        val store = VisionModelStore(context, restoreOnInit = false)
-        val controller = VisionPipelineController(context, modelStore = store)
-        try {
-            val provisionOutcome = store.provisionOptimizedAssetModelSync()
-            assertTrue("Optimized model must load, was $provisionOutcome", provisionOutcome is VisionModelState.Ready)
-            store.segmenter.configureBackend(VisionBackendType.GPU)
-            assertTrue("Segmenter must be ready", store.segmenter.isReady)
+            controllerSetup()
+
+            // Assert GPU backend after model loading
+            assertGpuActive(store)
 
             var surfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
             var displayRotation = Surface.ROTATION_0
@@ -867,19 +1020,24 @@ class VisionRealModelBenchmarkTest {
             val benchmarkDeadlineMs = SystemClock.elapsedRealtime() + 40_000L
             while (SystemClock.elapsedRealtime() < benchmarkDeadlineMs) {
                 val snap = controller.snapshotNow()
-                if (snap.warmupCompleted && snap.steadyElapsedMs >= 21_000.0) {
+                if (snap.warmupCompleted && snap.steadyElapsedMs >= 21_000.0 && snap.steadyFrames >= 50) {
                     break
                 }
                 Thread.sleep(200L)
             }
 
-            val effectiveHfov = controller.motionTracker.engine.effectiveHfovDegrees
-            assertNotNull("effectiveHfovDegrees must not be null while camera is active", effectiveHfov)
-            val hfovVal = requireNotNull(effectiveHfov)
+            val effectiveHfovAfter = controller.motionTracker.engine.effectiveHfovDegrees
+            assertNotNull("effectiveHfovDegrees must not be null while camera is active", effectiveHfovAfter)
+            val hfovVal = requireNotNull(effectiveHfovAfter)
             assertTrue("Derived portrait HFOV on Pixel 3 (rotation 90/270) must be narrower than 60 deg, was $hfovVal deg", hfovVal < 60f)
             assertTrue("Derived portrait HFOV on Pixel 3 must be > 40 deg, was $hfovVal deg", hfovVal > 40f)
 
             val gpuSnap = controller.snapshotNow()
+            composeRule.runOnUiThread {
+                controller.setPipelineMode(VisionPipelineMode.PREVIEW_ONLY)
+            }
+            Thread.sleep(4_000L)
+            val previewOnlySnap = controller.snapshotNow()
             composeRule.runOnUiThread {
                 controller.stopCamera()
             }
@@ -903,13 +1061,26 @@ class VisionRealModelBenchmarkTest {
             val pssMb = if (pssKb > 0) pssKb / 1024.0 else -1.0
 
             val jsonReport = JSONObject().apply {
-                put("benchmarkType", "REAL_MODEL_OPTIMIZED_GPU_VOICE_ACTIVE")
+                put("benchmarkType", if (candidateArg != null) "REAL_MODEL_GPU_CANDIDATE_VOICE_ACTIVE" else "REAL_MODEL_OPTIMIZED_GPU_VOICE_ACTIVE")
                 put("deviceModel", Build.MODEL)
                 put("sdkInt", Build.VERSION.SDK_INT)
-                put("modelName", VisionContract.OPTIMIZED_ASSET_MODEL_NAME)
-                put("modelSizeBytes", VisionContract.OPTIMIZED_ASSET_MODEL_BYTES)
-                put("modelSha256", VisionContract.OPTIMIZED_ASSET_MODEL_SHA256)
+                put("modelName", if (candidateFile != null) candidateFile.name else VisionContract.OPTIMIZED_ASSET_MODEL_NAME)
+                put("modelSizeBytes", if (candidateFile != null) candidateFile.length() else VisionContract.OPTIMIZED_ASSET_MODEL_BYTES)
+                put("modelSha256", if (candidateFile != null) {
+                    // Calculate SHA-256 of candidate file
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    candidateFile.inputStream().use { it ->
+                        digest.update(it.readBytes())
+                    }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                } else VisionContract.OPTIMIZED_ASSET_MODEL_SHA256)
+                put("modelSourcePath", candidateFile?.absolutePath)
                 put("backendConfig", store.segmenter.activeBackendDescription)
+                put("configuredBackend", store.segmenter.configuredBackend.name)
+                put("activeBackendType", store.segmenter.activeBackendType?.name)
+                put("gpuFallbackReason", store.segmenter.gpuFallbackCause?.let { "${it.javaClass.simpleName}: ${it.message}" })
+                put("configuredCpuThreads", store.segmenter.configuredCpuThreads)
+                 put("activeBackendDescription", store.segmenter.activeBackendDescription)
                 put("concurrentSpeechService", "ACTIVE_VERIFIED")
                 put("speechServicePhaseBefore", phaseBefore)
                 put("speechServiceErrorCodeBefore", errorBefore)
@@ -962,19 +1133,37 @@ class VisionRealModelBenchmarkTest {
                         put("steadyCameraToResultAgeP95Ms", String.format(Locale.US, "%.2f", gpuSnap.cameraToResultAgeMs?.p95Ms ?: 0.0))
                     }
                 )
+                put(
+                    "previewOnlyMode",
+                    JSONObject().apply {
+                        put("warmupElapsedMs", String.format(Locale.US, "%.1f", previewOnlySnap.warmupElapsedMs))
+                        put("steadyElapsedMs", String.format(Locale.US, "%.1f", previewOnlySnap.steadyElapsedMs))
+                        put("sensorWarmupFrames", previewOnlySnap.sensorWarmupFrames)
+                        put("sensorSteadyFrames", previewOnlySnap.sensorSteadyFrames)
+                        put("steadySensorFps", String.format(Locale.US, "%.2f", previewOnlySnap.steadySensorFps))
+                        put("sensorCaptureCadenceP50Ms", String.format(Locale.US, "%.2f", previewOnlySnap.sensorCaptureCadenceMs?.p50Ms ?: 0.0))
+                        put("sensorCaptureCadenceP95Ms", String.format(Locale.US, "%.2f", previewOnlySnap.sensorCaptureCadenceMs?.p95Ms ?: 0.0))
+                    }
+                )
             }
 
-            val reportFile = File(context.filesDir, "optimized-gpu-model-voice-active.json")
-            reportFile.writeText(jsonReport.toString(2), Charsets.UTF_8)
+            val reportFileName = if (candidateFile != null) {
+                getCandidateReportFileName("candidate-gpu-model.json")
+            } else {
+                "optimized-gpu-model.json"
+            }
+            val reportFile = File(context.filesDir, reportFileName)
+            reportFile.writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             runCatching {
                 val sdDir = File("/sdcard/Download/final_reports").apply { mkdirs() }
-                File(sdDir, "optimized-gpu-model-voice-active.json").writeText(jsonReport.toString(2), Charsets.UTF_8)
+                File(sdDir, reportFileName).writeText(jsonReport.toString(2), StandardCharsets.UTF_8)
             }
-            Log.i("AriaVisionBenchmark", "OPTIMIZED_GPU_VOICE_ACTIVE_JSON=${jsonReport}")
+            Log.i("AriaVisionBenchmark", "${if (candidateArg != null) "CANDIDATE_GPU_JSON" else "OPTIMIZED_GPU_JSON"}=${jsonReport}")
 
             assertTrue(gpuSnap.warmupCompleted)
-            assertTrue(gpuSnap.steadyElapsedMs >= 20_000.0)
-            assertTrue(gpuSnap.steadyFrames >= 50)
+            assertTrue("Expected steadyElapsedMs >= 20000.0, was ${gpuSnap.steadyElapsedMs}", gpuSnap.steadyElapsedMs >= 20_000.0)
+            assertTrue(gpuSnap.warmupFrames > 0)
+            assertTrue("Expected steadyFrames >= 50, was ${gpuSnap.steadyFrames}", gpuSnap.steadyFrames >= 50)
             assertNotNull(gpuSnap.preprocessMs)
             assertNotNull(gpuSnap.modelInvokeMs)
             assertNotNull(gpuSnap.postprocessMs)
@@ -982,58 +1171,18 @@ class VisionRealModelBenchmarkTest {
             assertTrue("Expected modelInvokeMs.p50Ms > 0", (gpuSnap.modelInvokeMs?.p50Ms ?: 0.0) > 0.0)
             assertTrue("Expected GPU invoke < 150ms on Pixel 3", (gpuSnap.modelInvokeMs?.p50Ms ?: 0.0) < 150.0)
         } finally {
+            // Restore default model if we imported a candidate
+            if (candidateArg != null) {
+                runCatching {
+                    store.clearModelSync()
+                    store.provisionDefaultAssetModelSync()
+                }
+            }
+            runCatching { context.unbindService(serviceConn) }
+            runCatching {
+                context.startService(Intent(context, VoiceService::class.java).setAction(VoiceService.ACTION_STOP))
+            }
             controller.close()
         }
-    }
-
-    @org.junit.After
-    fun restoreSystemState() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        if (!checkVoiceServiceRunning(context)) {
-            runCatching {
-                androidx.core.content.ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, VoiceService::class.java).setAction(VoiceService.ACTION_WAIT),
-                )
-            }
-        }
-        val inst = InstrumentationRegistry.getInstrumentation()
-        runCatching {
-            inst.uiAutomation.executeShellCommand("settings put global stay_on_while_plugged_in 0")
-        }
-    }
-
-    private tailrec fun findActivity(context: Context?): Activity? = when (context) {
-        is Activity -> context
-        is ContextWrapper -> findActivity(context.baseContext)
-        else -> null
-    }
-
-    private fun getCandidateModelArg(): String? {
-        val args = InstrumentationRegistry.getArguments()
-        val raw = args.getString("candidateModelPath")
-            ?: args.getString("candidatePath")
-            ?: args.getString("candidate_model_path")
-            ?: args.getString("candidate_path")
-            ?: args.getString("candidateModelFile")
-            ?: args.getString("candidate")
-        return raw?.trim()?.takeIf { it.isNotEmpty() }
-    }
-
-    private fun resolveCandidateFile(context: Context, rawPath: String): File {
-        val directFile = File(rawPath)
-        if (directFile.exists() && directFile.isFile) return directFile
-        val externalFilesDir = context.getExternalFilesDir(null)
-        if (externalFilesDir != null) {
-            val candidateInExternal = File(externalFilesDir, rawPath)
-            if (candidateInExternal.exists() && candidateInExternal.isFile) return candidateInExternal
-            val candidateByNameInExternal = File(externalFilesDir, directFile.name)
-            if (candidateByNameInExternal.exists() && candidateByNameInExternal.isFile) return candidateByNameInExternal
-        }
-        val candidateInFiles = File(context.filesDir, rawPath)
-        if (candidateInFiles.exists() && candidateInFiles.isFile) return candidateInFiles
-        val candidateByNameInFiles = File(context.filesDir, directFile.name)
-        if (candidateByNameInFiles.exists() && candidateByNameInFiles.isFile) return candidateByNameInFiles
-        return directFile
     }
 }

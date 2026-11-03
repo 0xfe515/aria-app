@@ -27,6 +27,7 @@ class MotionTracker(
 
     private val lifecycleLock = Any()
     private val startGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+    private val sensorCallbackCounter = java.util.concurrent.atomic.AtomicLong(0L)
     private var activeGeneration: Long = 0L
     private var activeListener: SensorEventListener? = null
     private var handlerThread: HandlerThread? = null
@@ -40,12 +41,16 @@ class MotionTracker(
     var sensorsAvailable: Boolean = false
         private set
 
+    val sensorCallbackCount: Long
+        get() = sensorCallbackCounter.get()
+
     internal class SessionListener(
         val sessionGen: Long,
         val sessionStartNanos: Long,
         private val tracker: MotionTracker,
     ) : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
+            tracker.sensorCallbackCounter.incrementAndGet()
             tracker.dispatchSensorEvent(
                 listener = this,
                 sessionGen = sessionGen,
@@ -128,6 +133,7 @@ class MotionTracker(
             if (isRunning) return
             val sessionGen = startGeneration.incrementAndGet()
             activeGeneration = sessionGen
+            sensorCallbackCounter.set(0L)
             val sessionStartNanos = clock()
             engine.reset()
             engine.setDisplayRotation(displayRotation)

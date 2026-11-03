@@ -1,24 +1,32 @@
 <resources>
     <string name="distance_mode_title">보행 장애물 거리 감지</string>
     <string name="distance_mode_short_title">거리 감지</string>
-    <string name="distance_open_button">보행 거리 감지 (AR)</string>
-    <string name="distance_open_summary">ARCore Raw Depth 기반 보행 전방 장애물 거리 측정 및 진동 알림</string>
+    <string name="distance_open_button">보행 장애물 거리 감지</string>
+    <string name="distance_open_summary">카메라 비전 및 센서 기반 전방 보행 장애물 추정 거리 측정 및 진동 알림</string>
     <string name="distance_close">닫기</string>
     <string name="distance_recalibrate">재보정</string>
+    <string name="distance_profile_setup_button">키 설정</string>
+    <string name="distance_estimated_label">보행 복도 전방 추정 거리</string>
 
     <!-- Onboarding / Guidance -->
     <string name="distance_onboarding_title">안전한 보행 거리 감지 안내</string>
-    <string name="distance_onboarding_step1_title">1. 자연스러운 자세</string>
-    <string name="distance_onboarding_step1_desc">스마트폰을 가슴이나 허리 높이에서 수직에 가깝게 자연스럽게 들고, 카메라가 걷는 방향을 향하도록 유지해 주세요.</string>
-    <string name="distance_onboarding_step2_title">2. 정지 상태 초기 스캔</string>
-    <string name="distance_onboarding_step2_desc">안전한 제자리에 멈춰 선 상태에서 카메라를 전방과 바닥 쪽으로 천천히 비춰주세요. 바닥과 주변 공간이 인식될 때까지 잠시 기다려 주세요.</string>
-    <string name="distance_onboarding_step3_title">3. 바닥 및 공간 인식 후 보행</string>
-    <string name="distance_onboarding_step3_desc">지면 인식이 완료되면 장애물과의 추정 거리가 실시간으로 계산되며, 이동 중 위험 감지 시 진동으로 경고합니다.</string>
+    <string name="distance_onboarding_step1_title">1. 자연스러운 착용 및 파지</string>
+    <string name="distance_onboarding_step1_desc">스마트폰을 어깨 또는 가슴 높이에 고정하거나 자연스럽게 들고, 카메라가 보행 전방을 향하도록 유지해 주세요.</string>
+    <string name="distance_onboarding_step2_title">2. 키 및 착용 위치 설정</string>
+    <string name="distance_onboarding_step2_desc">정확한 거리 추정을 위해 사용자 키와 착용 위치(어깨/가슴)를 사전에 설정해 주세요.</string>
+    <string name="distance_onboarding_step3_title">3. 보행 중 실시간 거리 알림</string>
+    <string name="distance_onboarding_step3_desc">보행 복도(폭 ±0.45m) 내 장애물의 지면 접촉점을 추정하여 실시간 거리와 위험 단계별 진동을 제공합니다.</string>
     <string name="distance_onboarding_confirm">확인 및 시작</string>
     <string name="distance_onboarding_checkbox">다시 보지 않기</string>
 
     <!-- Readiness & Quality Gates -->
-    <string name="distance_readiness_init">AR 시스템 및 센서 준비 중…</string>
+    <string name="distance_readiness_header">인식 상태 및 센서 추적</string>
+    <string name="distance_readiness_init">비전 파이프라인 및 센서 준비 중…</string>
+    <string name="distance_readiness_profile_configured">키·착용 위치 프로필 설정 완료</string>
+    <string name="distance_readiness_profile_missing">키·착용 위치 미설정 (탭하여 설정)</string>
+    <string name="distance_readiness_sensor_tracking">기기 기울기 및 중력 센서 정상</string>
+    <string name="distance_readiness_sensor_waiting">센서 데이터 대기 중</string>
+    <string name="distance_readiness_monocular_active">지면 접촉 기반 거리 추정 동작 중</string>
     <string name="distance_readiness_floor_searching">바닥 인식 중: 안전한 제자리에서 바닥과 전방을 천천히 비춰주세요</string>
     <string name="distance_readiness_floor_detected">바닥 인식 완료 (카메라 기준: %1$.2fm)</string>
     <string name="distance_readiness_tracking_lost">공간 추적 불안정: 기기를 천천히 움직여 주세요</string>

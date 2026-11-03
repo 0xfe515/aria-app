@@ -18,6 +18,7 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -29,6 +30,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.Observer
 import com.ariateam.aria.hazard.CorridorDirection
 import com.ariateam.aria.hazard.HazardAlertCoordinator
 import com.ariateam.aria.hazard.HazardAssessment
@@ -73,8 +75,29 @@ data class VisionUiState(
     val isHazardAlertEnabled: Boolean = true,
     val configuredBackend: VisionBackendType = VisionBackendType.GPU,
     val configuredCpuThreads: Int = VisionContract.DEFAULT_CPU_THREADS,
+    val activeBackendType: VisionBackendType? = null,
     val activeBackendDescription: String = "N/A (모델 미적용)",
     val groundContactDistance: GroundContactDistance = GroundContactDistance(),
+)
+
+data class VisionPipelineDiagnosticSnapshot(
+    val lifecycleOwner: String?,
+    val lifecycleState: String,
+    val cameraState: String?,
+    val cameraStateType: String?,
+    val cameraError: String?,
+    val modelRestoreComplete: Boolean,
+    val modelState: String,
+    val analyzerEntries: Long,
+    val pipelineInputs: Long,
+    val inferenceCallEntries: Long,
+    val inferenceReturns: Long,
+    val completedFrames: Long,
+    val imageProxyCloses: Long,
+    val cameraCaptureCallbacks: Long,
+    val motionSensorCallbacks: Long,
+    val previewBound: Boolean,
+    val analysisBound: Boolean,
 )
 
 /**
@@ -106,6 +129,22 @@ class VisionPipelineController(
     private val closed = AtomicBoolean(false)
     private val sessionGeneration = AtomicLong(0L)
     private val lastPublishedNanos = AtomicLong(0L)
+    private val analyzerEntries = AtomicLong(0L)
+    private val pipelineInputs = AtomicLong(0L)
+    private val inferenceCallEntries = AtomicLong(0L)
+    private val inferenceReturns = AtomicLong(0L)
+    private val completedFrames = AtomicLong(0L)
+    private val imageProxyCloses = AtomicLong(0L)
+    private val cameraCaptureCallbacks = AtomicLong(0L)
+    private val pendingFrameSnapshot = java.util.concurrent.atomic.AtomicReference<((android.graphics.Bitmap?) -> Unit)?>()
+
+    fun captureSingleFrame(callback: (android.graphics.Bitmap?) -> Unit) {
+        if (!running.get()) {
+            callback(null)
+            return
+        }
+        pendingFrameSnapshot.set(callback)
+    }
 
     @Volatile
     private var cameraProvider: ProcessCameraProvider? = null
@@ -121,6 +160,12 @@ class VisionPipelineController(
 
     @Volatile
     private var activeLifecycleOwner: LifecycleOwner? = null
+
+    @Volatile
+    private var observedCameraState: androidx.lifecycle.LiveData<CameraState>? = null
+
+    @Volatile
+    private var cameraStateObserver: Observer<CameraState>? = null
 
     @Volatile
     private var activeTargetRotation: Int = Surface.ROTATION_0
@@ -157,6 +202,30 @@ class VisionPipelineController(
 
     val modelState: StateFlow<VisionModelState>
         get() = modelStore.state
+
+    fun diagnosticSnapshot(): VisionPipelineDiagnosticSnapshot {
+        val owner = activeLifecycleOwner
+        val cameraState = observedCameraState?.value
+        return VisionPipelineDiagnosticSnapshot(
+            lifecycleOwner = owner?.javaClass?.simpleName,
+            lifecycleState = owner?.lifecycle?.currentState?.name ?: "NONE",
+            cameraState = cameraState?.toString(),
+            cameraStateType = cameraState?.type?.toString(),
+            cameraError = cameraState?.error?.toString(),
+            modelRestoreComplete = modelStore.isInitialRestoreCompleted.value,
+            modelState = modelStore.state.value::class.java.simpleName,
+            analyzerEntries = analyzerEntries.get(),
+            pipelineInputs = pipelineInputs.get(),
+            inferenceCallEntries = inferenceCallEntries.get(),
+            inferenceReturns = inferenceReturns.get(),
+            completedFrames = completedFrames.get(),
+            imageProxyCloses = imageProxyCloses.get(),
+            cameraCaptureCallbacks = cameraCaptureCallbacks.get(),
+            motionSensorCallbacks = motionTracker.sensorCallbackCount,
+            previewBound = boundPreview != null,
+            analysisBound = boundAnalysis != null,
+        )
+    }
 
     val isInitialRestoreCompleted: StateFlow<Boolean>
         get() = modelStore.isInitialRestoreCompleted
@@ -234,7 +303,7 @@ class VisionPipelineController(
     ) {
         if (backend == VisionBackendType.CPU && !modelStore.segmenter.inferencePolicy.allowCpuReferenceForTesting) {
             throw IllegalArgumentException(
-                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+                "Manual CPU backend configuration is disabled in production; CPU is reserved for GPU-startup fallback."
             )
         }
         analyzerExecutor.execute {
@@ -246,6 +315,7 @@ class VisionPipelineController(
                     it.copy(
                         configuredBackend = modelStore.segmenter.configuredBackend,
                         configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
+                        activeBackendType = modelStore.segmenter.activeBackendType,
                         activeBackendDescription = desc,
                         cameraErrorDetail = "백엔드 재구성 실패 (기존 유효 세션 유지: ${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)})",
                     )
@@ -257,6 +327,7 @@ class VisionPipelineController(
                 it.copy(
                     configuredBackend = modelStore.segmenter.configuredBackend,
                     configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
+                    activeBackendType = modelStore.segmenter.activeBackendType,
                     activeBackendDescription = desc,
                     cameraErrorDetail = null,
                 )
@@ -278,7 +349,21 @@ class VisionPipelineController(
             it.copy(
                 cameraStatus = CameraSessionStatus.PermissionDenied,
                 cameraErrorDetail = "카메라 권한이 거부되었습니다. 권한을 허용한 뒤 다시 시작해 주세요.",
+                latestSummary = null,
+                latestOverlayBitmap = null,
+                hazardAssessment = HazardAssessment(),
+                motionState = MotionState(),
                 groundContactDistance = GroundContactDistance(),
+            )
+        }
+    }
+
+    fun reportCameraServiceFailure(detail: String) {
+        stopCamera()
+        mutableUiState.update {
+            it.copy(
+                cameraStatus = CameraSessionStatus.Error,
+                cameraErrorDetail = detail,
             )
         }
     }
@@ -296,6 +381,13 @@ class VisionPipelineController(
         }
 
         val ticket = sessionGeneration.incrementAndGet()
+        analyzerEntries.set(0L)
+        pipelineInputs.set(0L)
+        inferenceCallEntries.set(0L)
+        inferenceReturns.set(0L)
+        completedFrames.set(0L)
+        imageProxyCloses.set(0L)
+        cameraCaptureCallbacks.set(0L)
         currentMode = mode
         activeLifecycleOwner = lifecycleOwner
         activeSurfaceProvider = surfaceProvider
@@ -321,6 +413,7 @@ class VisionPipelineController(
                 latestOverlayBitmap = null,
                 configuredBackend = modelStore.segmenter.configuredBackend,
                 configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
+                activeBackendType = modelStore.segmenter.activeBackendType,
                 activeBackendDescription = modelStore.segmenter.activeBackendDescription,
                 isHazardAlertEnabled = alertCoordinator.isEnabled,
                 groundContactDistance = GroundContactDistance(),
@@ -338,19 +431,7 @@ class VisionPipelineController(
                     bindUseCases(provider, lifecycleOwner, surfaceProvider, mode, targetRotation, ticket)
                 } catch (t: Throwable) {
                     if (!isSessionLive(ticket)) return@addListener
-                    running.set(false)
-                    motionTracker.stop()
-                    alertCoordinator.stop()
-                    groundContactMotionTracker.stop()
-                    groundContactDistanceEstimator.reset()
-                    unbindUseCasesOnMain()
-                    mutableUiState.update {
-                        it.copy(
-                            cameraStatus = CameraSessionStatus.Error,
-                            cameraErrorDetail = "카메라 초기화 실패 (${t.javaClass.simpleName})",
-                            groundContactDistance = GroundContactDistance(),
-                        )
-                    }
+                    failCameraSession(ticket, "카메라 초기화 실패 (${t.javaClass.simpleName})")
                 }
             },
             ContextCompat.getMainExecutor(context),
@@ -370,7 +451,7 @@ class VisionPipelineController(
         ticket: Long,
     ) {
         try {
-            provider.unbindAll()
+            unbindBoundUseCases(provider)
 
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
             val cameraInfo = provider.getCameraInfo(selector)
@@ -426,6 +507,7 @@ class VisionPipelineController(
                 ) {
                     if (!isSessionLive(ticket)) return
                     val nowNanos = SystemClock.elapsedRealtimeNanos()
+                    cameraCaptureCallbacks.incrementAndGet()
                     timingTracker.recordSensorCapture(nowNanos)
                     if (currentMode == VisionPipelineMode.PREVIEW_ONLY) {
                         publishPreviewOnlyMetricsThrottled(ticket, nowNanos)
@@ -443,17 +525,19 @@ class VisionPipelineController(
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
 
-            // Attach sessionCaptureCallback to exactly ONE active use case to prevent double counting
-            // and ensure callbacks fire even when ImageAnalysis is inactive in PREVIEW_ONLY mode.
-            if (mode == VisionPipelineMode.PREVIEW_ONLY) {
+            // Attach the callback to exactly one bound use case.
+            if (mode == VisionPipelineMode.PREVIEW_ONLY && surfaceProvider != null) {
                 Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCallback)
             } else {
                 Camera2Interop.Extender(analysisBuilder).setSessionCaptureCallback(captureCallback)
             }
 
-            val preview = previewBuilder.build()
+            val preview = surfaceProvider?.let {
+                previewBuilder.build().also { useCase ->
+                    useCase.setSurfaceProvider(it)
+                }
+            }
             boundPreview = preview
-            preview.setSurfaceProvider(surfaceProvider)
 
             val analysis = analysisBuilder.build()
             boundAnalysis = analysis
@@ -462,15 +546,30 @@ class VisionPipelineController(
                 analysis.clearAnalyzer()
             } else {
                 analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
+                    analyzerEntries.incrementAndGet()
                     analyzeFrame(imageProxy, ticket)
                 }
             }
 
-            val useCases = mutableListOf<UseCase>(preview, analysis)
-            provider.bindToLifecycle(lifecycleOwner, selector, *useCases.toTypedArray())
+            val useCases = mutableListOf<UseCase>()
+            preview?.let(useCases::add)
+            useCases.add(analysis)
+            val camera = provider.bindToLifecycle(lifecycleOwner, selector, *useCases.toTypedArray())
+            val stateObserver = Observer<CameraState> { cameraState ->
+                val cameraError = cameraState.error ?: return@Observer
+                if (isSessionLive(ticket)) {
+                    failCameraSession(
+                        ticket,
+                        "카메라 연결이 중단되었습니다 (${cameraError.toString().take(100)}).",
+                    )
+                }
+            }
+            observedCameraState = camera.cameraInfo.cameraState
+            cameraStateObserver = stateObserver
+            observedCameraState?.observe(lifecycleOwner, stateObserver)
 
-            val previewRes = preview.resolutionInfo?.resolution
-            val previewRot = preview.resolutionInfo?.rotationDegrees ?: targetRotation
+            val previewRes = preview?.resolutionInfo?.resolution
+            val previewRot = preview?.resolutionInfo?.rotationDegrees ?: targetRotation
             val analysisRes = analysis.resolutionInfo?.resolution
             val analysisRot = analysis.resolutionInfo?.rotationDegrees ?: targetRotation
             if (previewRes != null) {
@@ -500,30 +599,36 @@ class VisionPipelineController(
                         ),
                         configuredBackend = modelStore.segmenter.configuredBackend,
                         configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
+                        activeBackendType = modelStore.segmenter.activeBackendType,
                         activeBackendDescription = modelStore.segmenter.activeBackendDescription,
                     )
                 }
             }
         } catch (t: Throwable) {
-            running.set(false)
-            motionTracker.stop()
-            alertCoordinator.stop()
-            groundContactMotionTracker.stop()
-            groundContactDistanceEstimator.reset()
-            runCatching { boundAnalysis?.clearAnalyzer() }
-            runCatching { boundPreview?.setSurfaceProvider(null) }
-            runCatching { provider.unbindAll() }
-            boundAnalysis = null
-            boundPreview = null
-            if (sessionGeneration.get() == ticket) {
-                mutableUiState.update {
-                    it.copy(
-                        cameraStatus = CameraSessionStatus.Error,
-                        cameraErrorDetail = "카메라 스트림 바인딩 실패 (${t.javaClass.simpleName})",
-                        groundContactDistance = GroundContactDistance(),
-                    )
-                }
-            }
+            failCameraSession(ticket, "카메라 스트림 바인딩 실패 (${t.javaClass.simpleName})")
+        }
+    }
+
+    private fun failCameraSession(ticket: Long, detail: String) {
+        if (sessionGeneration.get() != ticket || !running.getAndSet(false)) return
+        sessionGeneration.incrementAndGet()
+        activeLifecycleOwner = null
+        activeSurfaceProvider = null
+        motionTracker.stop()
+        alertCoordinator.stop()
+        groundContactMotionTracker.stop()
+        groundContactDistanceEstimator.reset()
+        unbindUseCasesOnMain()
+        mutableUiState.update {
+            it.copy(
+                cameraStatus = CameraSessionStatus.Error,
+                cameraErrorDetail = detail,
+                latestSummary = null,
+                latestOverlayBitmap = null,
+                hazardAssessment = HazardAssessment(),
+                motionState = MotionState(),
+                groundContactDistance = GroundContactDistance(),
+            )
         }
     }
 
@@ -543,6 +648,17 @@ class VisionPipelineController(
             val uPlane = planes[1]
             val vPlane = planes[2]
 
+            val snapshotCallback = pendingFrameSnapshot.getAndSet(null)
+            if (snapshotCallback != null) {
+                try {
+                    val bmp = imageProxy.toBitmap()
+                    snapshotCallback(bmp)
+                } catch (t: Throwable) {
+                    android.util.Log.w("VisionPipelineController", "Failed to capture single frame bitmap", t)
+                    snapshotCallback(null)
+                }
+            }
+
             val preprocessStartNanos = SystemClock.elapsedRealtimeNanos()
             val cropRect = preprocessor.preprocessYuv420(
                 bufferWidth = width,
@@ -559,6 +675,7 @@ class VisionPipelineController(
                 vPixelStride = vPlane.pixelStride,
                 strategy = preprocessingStrategy,
             )
+            pipelineInputs.incrementAndGet()
             val preprocessDurationNanos = (SystemClock.elapsedRealtimeNanos() - preprocessStartNanos).coerceAtLeast(0L)
 
             // Update camera geometry with actual buffer dimensions, actual ImageProxy rotationDegrees, and crop geometry
@@ -613,11 +730,17 @@ class VisionPipelineController(
             }
 
             val shouldPublishUi = shouldPublishNow(SystemClock.elapsedRealtimeNanos())
-            val inferenceOutput = modelStore.segmenter.runIfLoaded(
-                inputByteBuffer = preprocessor.inputByteBuffer,
-                produceOverlayBitmap = shouldPublishUi,
-                transform = cropRect,
-            )
+            val modelRestorePending = !modelStore.isInitialRestoreCompleted.value
+            val inferenceOutput = if (modelRestorePending) {
+                null
+            } else {
+                inferenceCallEntries.incrementAndGet()
+                modelStore.segmenter.runIfLoaded(
+                    inputByteBuffer = preprocessor.inputByteBuffer,
+                    produceOverlayBitmap = shouldPublishUi,
+                    transform = cropRect,
+                ).also { inferenceReturns.incrementAndGet() }
+            }
             val analyzerEndNanos = SystemClock.elapsedRealtimeNanos()
             if (!isSessionLive(ticket)) return
 
@@ -660,6 +783,8 @@ class VisionPipelineController(
                     motionConfidence = motion.confidence,
                     messageKorean = if (currentMode == VisionPipelineMode.PREVIEW_ONLY) {
                         "미리보기 전용 (위험 분석 비활성)"
+                    } else if (modelRestorePending) {
+                        "비전 모델 복원 중 (위험 분석 대기)"
                     } else {
                         "세그멘테이션 모델 미적용"
                     },
@@ -698,6 +823,8 @@ class VisionPipelineController(
                     distanceMeters = null,
                     message = if (currentMode == VisionPipelineMode.PREVIEW_ONLY) {
                         "미리보기 전용 (거리 분석 비활성)"
+                    } else if (modelRestorePending) {
+                        "비전 모델 복원 중 (거리 분석 대기)"
                     } else {
                         "세그멘테이션 모델 미적용"
                     },
@@ -719,6 +846,7 @@ class VisionPipelineController(
                 frameCropRect = cropRect,
                 sensorTimestampSource = sensorTimestampSource,
             )
+            completedFrames.incrementAndGet()
 
             if (shouldPublishUi && isSessionLive(ticket)) {
                 lastPublishedNanos.set(analyzerEndNanos)
@@ -740,6 +868,7 @@ class VisionPipelineController(
                         groundContactDistance = groundContactDist,
                         configuredBackend = modelStore.segmenter.configuredBackend,
                         configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
+                        activeBackendType = modelStore.segmenter.activeBackendType,
                         activeBackendDescription = modelStore.segmenter.activeBackendDescription,
                     )
                 }
@@ -779,6 +908,7 @@ class VisionPipelineController(
                 )
             }
         } finally {
+            imageProxyCloses.incrementAndGet()
             imageProxy.close()
         }
     }
@@ -806,6 +936,7 @@ class VisionPipelineController(
                 motionState = motion,
                 configuredBackend = modelStore.segmenter.configuredBackend,
                 configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
+                activeBackendType = modelStore.segmenter.activeBackendType,
                 activeBackendDescription = modelStore.segmenter.activeBackendDescription,
                 groundContactDistance = GroundContactDistance(
                     distanceMeters = null,
@@ -817,6 +948,8 @@ class VisionPipelineController(
     }
 
     fun updateSurfaceProvider(surfaceProvider: Preview.SurfaceProvider?, targetRotation: Int = activeTargetRotation) {
+        val previewAvailabilityChanged = (activeSurfaceProvider == null) != (surfaceProvider == null)
+        val lifecycleOwner = activeLifecycleOwner
         activeSurfaceProvider = surfaceProvider
         if (activeTargetRotation != targetRotation) {
             activeTargetRotation = targetRotation
@@ -835,12 +968,17 @@ class VisionPipelineController(
             boundPreview?.targetRotation = targetRotation
             boundAnalysis?.targetRotation = targetRotation
         }
+        if (previewAvailabilityChanged && running.get() && lifecycleOwner != null) {
+            startCamera(lifecycleOwner, surfaceProvider, currentMode, targetRotation)
+            return
+        }
         ContextCompat.getMainExecutor(context).execute {
             boundPreview?.setSurfaceProvider(surfaceProvider)
         }
     }
 
     fun stopCamera() {
+        pendingFrameSnapshot.getAndSet(null)?.invoke(null)
         sessionGeneration.incrementAndGet()
         running.set(false)
         activeLifecycleOwner = null
@@ -865,19 +1003,55 @@ class VisionPipelineController(
                     backendLabel = activeBackendLabel(currentMode, modelLoaded),
                     nowElapsedNanos = now,
                 ),
+                latestSummary = null,
+                latestOverlayBitmap = null,
+                hazardAssessment = HazardAssessment(),
+                motionState = MotionState(),
                 groundContactDistance = GroundContactDistance(),
             )
         }
     }
 
     private fun unbindUseCasesOnMain() {
-        ContextCompat.getMainExecutor(context).execute {
-            runCatching { boundAnalysis?.clearAnalyzer() }
-            runCatching { boundPreview?.setSurfaceProvider(null) }
-            runCatching { cameraProvider?.unbindAll() }
-            boundAnalysis = null
-            boundPreview = null
+        val provider = cameraProvider
+        val preview = boundPreview
+        val analysis = boundAnalysis
+        val state = observedCameraState
+        val observer = cameraStateObserver
+        boundAnalysis = null
+        boundPreview = null
+        observedCameraState = null
+        cameraStateObserver = null
+        val cleanup = Runnable {
+            if (state != null && observer != null) state.removeObserver(observer)
+            runCatching { analysis?.clearAnalyzer() }
+            runCatching { preview?.setSurfaceProvider(null) }
+            val useCases = listOfNotNull(preview, analysis)
+            if (provider != null && useCases.isNotEmpty()) {
+                runCatching { provider.unbind(*useCases.toTypedArray()) }
+            }
         }
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            cleanup.run()
+        } else {
+            ContextCompat.getMainExecutor(context).execute(cleanup)
+        }
+    }
+
+    private fun unbindBoundUseCases(provider: ProcessCameraProvider) {
+        val state = observedCameraState
+        val observer = cameraStateObserver
+        if (state != null && observer != null) state.removeObserver(observer)
+        observedCameraState = null
+        cameraStateObserver = null
+        val preview = boundPreview
+        val analysis = boundAnalysis
+        boundPreview = null
+        boundAnalysis = null
+        analysis?.clearAnalyzer()
+        preview?.setSurfaceProvider(null)
+        val useCases = listOfNotNull(preview, analysis)
+        if (useCases.isNotEmpty()) provider.unbind(*useCases.toTypedArray())
     }
 
     fun snapshotNow(): VisionTimingSnapshot {
@@ -901,6 +1075,8 @@ class VisionPipelineController(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        val terminalStatus = mutableUiState.value.cameraStatus
+        val terminalDetail = mutableUiState.value.cameraErrorDetail
         stopCamera()
         motionTracker.close()
         alertCoordinator.close()
@@ -909,6 +1085,11 @@ class VisionPipelineController(
         groundContactDistanceEstimator.reset()
         analyzerExecutor.shutdown()
         modelStore.close()
+        if (terminalStatus == CameraSessionStatus.Error || terminalStatus == CameraSessionStatus.PermissionDenied) {
+            mutableUiState.update {
+                it.copy(cameraStatus = terminalStatus, cameraErrorDetail = terminalDetail)
+            }
+        }
     }
 
     companion object {
@@ -918,38 +1099,14 @@ class VisionPipelineController(
 
 class VisionViewModel(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
-    private val initLock = Any()
-
-    private val mutableUiState = MutableStateFlow(VisionUiState())
-    private val mutableModelState = MutableStateFlow<VisionModelState>(VisionModelState.Missing)
-    private val mutableInitialRestoreCompleted = MutableStateFlow(false)
-
-    val uiState: StateFlow<VisionUiState> = mutableUiState.asStateFlow()
-    val modelState: StateFlow<VisionModelState> = mutableModelState.asStateFlow()
-    val isInitialRestoreCompleted: StateFlow<Boolean> = mutableInitialRestoreCompleted.asStateFlow()
-
-    @Volatile
-    private var controllerInstance: VisionPipelineController? = null
+    val uiState: StateFlow<VisionUiState> = VisionSession.uiState
+    val modelState: StateFlow<VisionModelState> = VisionSession.modelState
+    val isInitialRestoreCompleted: StateFlow<Boolean> = VisionSession.isInitialRestoreCompleted
 
     val isInitialized: Boolean
-        get() = controllerInstance != null
+        get() = VisionSession.isInitialized
 
-    fun ensureController(): VisionPipelineController {
-        controllerInstance?.let { return it }
-        return synchronized(initLock) {
-            controllerInstance ?: VisionPipelineController(
-                context = appContext,
-                modelStore = VisionModelStore(
-                    context = appContext,
-                    mutableState = mutableModelState,
-                    mutableInitialRestoreCompleted = mutableInitialRestoreCompleted,
-                ),
-                mutableUiState = mutableUiState,
-            ).also {
-                controllerInstance = it
-            }
-        }
-    }
+    fun ensureController(): VisionPipelineController = VisionSession.ensureController(appContext)
 
     fun importModel(uri: Uri) = ensureController().modelStore.importFromUri(uri)
     fun clearModel() = ensureController().modelStore.clearModel()
@@ -964,16 +1121,14 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
     fun configureBackend(backend: VisionBackendType, threads: Int = VisionContract.DEFAULT_CPU_THREADS) =
         ensureController().configureBackend(backend, threads)
 
-    fun stopCamera() {
-        controllerInstance?.stopCamera()
-    }
+    fun stopCamera() = VisionForegroundService.requestStop(appContext)
 
-    fun close() {
-        controllerInstance?.close()
-    }
+    val requiresExplicitRestart: Boolean
+        get() = VisionSession.requiresExplicitRestart(appContext)
+
+    fun close() = VisionSession.closeController()
 
     override fun onCleared() {
-        close()
         super.onCleared()
     }
 }

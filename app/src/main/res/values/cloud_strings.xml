@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_cloud_title">Gemini 질문 설정</string>
+    <string name="settings_cloud_summary_registered">API 키 등록됨 (%1$s)</string>
+    <string name="settings_cloud_summary_empty">API 키 미설정</string>
+    <string name="settings_cloud_model_title">기본 모델</string>
+    <string name="settings_cloud_model_summary">Gemini 2.5 Flash</string>
+    <string name="settings_cloud_key_registered">API 키가 등록되어 있습니다 (%1$s)</string>
+    <string name="settings_cloud_key_empty">Gemini API 키가 등록되지 않았습니다.</string>
+    <string name="settings_cloud_key_input_title">Gemini API 키 입력</string>
+    <string name="settings_cloud_key_input_hint">AI Studio에서 발급받은 API 키 입력</string>
+    <string name="settings_cloud_key_delete_title">API 키 삭제</string>
+    <string name="settings_cloud_key_delete_message">저장된 Gemini API 키를 삭제하시겠습니까? 삭제 후에는 클라우드 질문 기능을 사용할 수 없습니다.</string>
+    <string name="settings_cloud_key_delete_confirm">삭제</string>
+    <string name="settings_cloud_key_save">저장</string>
+    <string name="settings_cloud_key_register_btn">API 키 등록</string>
+    <string name="settings_cloud_key_change_btn">API 키 변경</string>
+    <string name="settings_cloud_key_clear_btn">API 키 삭제</string>
+    <string name="settings_cloud_privacy_notice">보안 및 개인정보 안내: API 키는 기기 내 Android Keystore로 암호화되어 앱 내부 저장소에 안전하게 보관되며, 백업이나 로그에 노출되지 않습니다. 사진 질문은 사용자가 요청했을 때만 단일 프레임을 전송하며 지속적인 촬영이나 전송은 수행하지 않습니다.</string>
+</resources>

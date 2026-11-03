@@ -120,7 +120,7 @@ class VisionModelStore(
     fun setPreferredBackend(backend: VisionBackendType, threads: Int = VisionContract.DEFAULT_CPU_THREADS) {
         if (backend == VisionBackendType.CPU && !segmenter.inferencePolicy.allowCpuReferenceForTesting) {
             throw IllegalArgumentException(
-                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+                "Manual CPU backend configuration is disabled in production; CPU is reserved for GPU-startup fallback."
             )
         }
         prefs.edit()
@@ -218,9 +218,10 @@ class VisionModelStore(
                         segmenter.activatePreparedSession(outcome.session, preferredBackend, preferredThreads)
                     } catch (t: Throwable) {
                         outcome.session.close()
+                        val (reason, detail) = activationFailure(t)
                         val err = VisionModelState.Error(
-                            reason = "GPU 가속 세그멘테이션 초기화에 실패했습니다 (${t.javaClass.simpleName}).",
-                            detail = "${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)}",
+                            reason = reason,
+                            detail = detail,
                         )
                         mutableState.value = err
                         return err
@@ -231,6 +232,7 @@ class VisionModelStore(
                         sizeBytes = file.length(),
                         sha256 = actualSha256,
                         importedAtMillis = importedAt,
+                        backendDescription = segmenter.activeBackendDescription,
                     )
                     savePersistedPrefs(file.name, metadata)
                     activeMetadata = metadata
@@ -399,20 +401,25 @@ class VisionModelStore(
             } else {
                 clearPersistedPrefs()
             }
+            val (reason, detail) = activationFailure(t)
             return handleImportFailure(
-                reason = "모델 GPU 가속 활성화에 실패했습니다 (${t.javaClass.simpleName}).",
-                detail = "activation_failed: ${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)}",
+                reason = reason,
+                detail = detail,
                 runtimeReadyCheck = runtimeReadyCheck,
             )
         }
 
         // Step 3: Both commit and swap succeeded; now close the old interpreter and remove the old slot file.
-        activeMetadata = metadata
+        val activatedMetadata = metadata.copy(
+            backendDescription = segmenter.activeBackendDescription.takeIf { segmenter.activeBackendType != null }
+                ?: metadata.backendDescription,
+        )
+        activeMetadata = activatedMetadata
         runCatching { oldSessionCloseable?.close() }
         if (previousSlot.absolutePath != candidateSlot.absolutePath) {
             runCatching { previousSlot.delete() }
         }
-        val ready = VisionModelState.Ready(metadata)
+        val ready = VisionModelState.Ready(activatedMetadata)
         mutableState.value = ready
         return ready
     }
@@ -608,20 +615,37 @@ class VisionModelStore(
             } else {
                 clearPersistedPrefs(preserveClearedFlag = false)
             }
+            val (reason, detail) = activationFailure(t)
             return handleImportFailure(
-                reason = "기본 모델 GPU 가속 활성화에 실패했습니다 (${t.javaClass.simpleName}).",
-                detail = "activation_failed: ${t.javaClass.simpleName}: ${t.message.orEmpty().take(120)}",
+                reason = reason,
+                detail = detail,
             )
         }
 
-        activeMetadata = metadata
+        val activatedMetadata = metadata.copy(backendDescription = segmenter.activeBackendDescription)
+        activeMetadata = activatedMetadata
         runCatching { oldSessionCloseable?.close() }
         if (previousSlot.absolutePath != candidateSlot.absolutePath) {
             runCatching { previousSlot.delete() }
         }
-        val ready = VisionModelState.Ready(metadata)
+        val ready = VisionModelState.Ready(activatedMetadata)
         mutableState.value = ready
         return ready
+    }
+
+    private fun activationFailure(error: Throwable): Pair<String, String> = when (error) {
+        is LiteRtVisionSegmenter.CpuFallbackException -> {
+            "GPU 초기화 실패 후 저성능 CPU 대체 초기화에도 실패했습니다." to
+                "GPU failure: ${error.gpuFailure.javaClass.simpleName}: ${error.gpuFailure.message.orEmpty().take(160)}; " +
+                "CPU failure: ${error.cpuFailure.javaClass.simpleName}: ${error.cpuFailure.message.orEmpty().take(160)}"
+        }
+        is LiteRtVisionSegmenter.ModelValidationException -> {
+            "모델 텐서 규격 검증에 실패했습니다." to "model_validation_failed: ${error.message.orEmpty().take(160)}"
+        }
+        else -> {
+            "GPU 가속 세그멘테이션 초기화에 실패했습니다 (${error.javaClass.simpleName})." to
+                "activation_failed: ${error.javaClass.simpleName}: ${error.message.orEmpty().take(160)}"
+        }
     }
 
     fun restoreDefaultModel() {

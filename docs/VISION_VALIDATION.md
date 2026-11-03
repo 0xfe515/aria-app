@@ -142,3 +142,12 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 온도·실행 순서·카메라 공급 주기가 같지 않습니다. 음성 대기 전후 수치로 음성 서비스의 인과적 성능 비용을 추정하지 않습니다. GPU의 관측 범위는 7.75~8.96 FPS이며 장시간 고정 FPS를 보장하지 않습니다. `totalAnalyzer`는 전처리·추론·분할 후처리 범위이며, 위험 평가와 공개까지의 비용은 실제 FPS와 결과 age에서 함께 관측합니다. PSS는 측정 중 앱 메인 프로세스 값이며 별도 음성 프로세스와 합산한 메모리가 아닙니다.
 
 최종 텍스트 수정(`65ms` → `FP32`) 뒤 워커가 assemble/unit/lint를 다시 통과했습니다. 해당 문자열 수정으로 전체 계측 테스트를 반복하지 않았습니다.
+
+## 8. GPU 초기화 불가 시 백엔드 상태와 검증 한계 (2026-11-03)
+
+- 프로덕션은 GPU를 우선 구성하고, GPU 지원 확인 또는 delegate/device 초기화가 실패하면 LiteRT CPU/XNNPACK 세션 초기화를 시도합니다. CPU 세션까지 초기화되지 않으면 모델을 활성화하지 않으며 GPU와 CPU 초기화 원인을 모두 포함한 오류 상태를 보고합니다.
+- CPU 대체 세션이 활성화되면 `configuredBackend=GPU`는 저장된 선호 설정으로 유지되고, `activeBackendType=CPU` 및 `activeBackendDescription`은 저성능 CPU 폴백임을 표시합니다. 표시 문자열에는 보존된 GPU 초기화 원인이 포함되며, 모델 상태 메타데이터와 Vision UI/timing 상태는 실제 활성 백엔드를 나타냅니다. 수동 CPU 백엔드 선택은 여전히 프로덕션에서 허용하지 않습니다.
+- 모델 준비 단계의 파일/텐서 계약 검증 오류는 GPU 폴백 조건이 아닙니다. GPU 활성화 경로에서 명시적으로 분류된 모델 검증 오류도 CPU 대체 시도를 하지 않습니다. CPU로 모델 규격이 먼저 검증된 뒤 GPU 초기화 문제가 발생한 경우에만 대체를 시도합니다.
+- JVM 회귀 테스트는 GPU 성공, 지원되지 않는 GPU에서의 CPU 대체 및 원인/상태 보고, CPU 초기화 실패, 모델 검증 오류의 폴백 금지를 검증합니다. 이 주입 테스트는 Android GPU/CPU 하드웨어 동작을 증명하지 않습니다.
+- 2026-11-03 Pixel 3 (Android 12/API 31)에서 최적화 세로형 에셋으로 두 GPU 계측 시나리오를 실행했습니다. 음성 비활성은 21.03초 steady window/159 frames, 7.56 analyzed FPS, invoke p50/p95 91.07/105.98 ms, camera-to-result age p50 258.28 ms였고, 음성 활성은 21.01초/172 frames, 8.19 FPS, invoke p50/p95 89.01/97.22 ms, age p50 248.29 ms였습니다. 두 번 모두 configured/active backend가 GPU였으며, voice-active 테스트는 윈도우 전후 `Waiting`, errorCode `0`, `wakeFallback=false`를 확인했습니다. 테스트 상세 JSON은 각각 `app/build/outputs/androidTest-results/connected/debug/Pixel 3 - 12/logcat-com.ariateam.aria.vision.VisionRealModelBenchmarkTest-realModelOptimizedGpuBenchmark_measuresWarmupAnd20SecondSteadyWindow.txt`와 `_voiceActive.txt`에 있습니다. 서로 다른 단일 실행값은 고정 처리율이나 음성의 인과적 성능 비용을 보장하지 않습니다.
+- 이 Task에서는 300개 JVM 단위 테스트(34개 XML suite, 실패/오류 0), debug assemble 및 Android Lint도 통과했습니다. 후보 모델 경로 인자는 전달하지 않아 기본 최적화 에셋 경로를 계측했으며, 후보 파일을 지정한 별도 기기 실행은 하지 않았습니다. 사용 가능한 Pixel 3에서는 GPU가 초기화되어 CPU 폴백 기기 검증을 수행할 수 없었습니다. Galaxy S26/Exynos 호환성, 지원되지 않는 GPU 장치에서의 실제 CPU 폴백, 외부 보행 현장 테스트는 미검증이며 CPU 대체 성능 수치나 미검증 장치 성공을 주장하지 않습니다.

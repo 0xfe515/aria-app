@@ -14,6 +14,8 @@ class RuleCommandInterpreterTest {
         mapOf(
             "홈으로 가줘!" to AppCommand.Home, "설정 열어" to AppCommand.Settings,
             "안내 소리 켜 줘" to AppCommand.SoundOn, "효과음 꺼" to AppCommand.SoundOff,
+            "화면 숨겨" to AppCommand.HideScreen, "화면 꺼" to AppCommand.HideScreen,
+            "화면 보여줘" to AppCommand.ShowScreen, "화면 켜" to AppCommand.ShowScreen,
             "조용히 해" to AppCommand.SoundOff, "현재 상태 알려줘" to AppCommand.Status,
             "뭐 할 수 있어?" to AppCommand.Help, "아니요" to AppCommand.Cancel,
             "그만 들어" to AppCommand.Stop,
@@ -21,7 +23,10 @@ class RuleCommandInterpreterTest {
     }
 
     @Test fun negationNeverBecomesAPositiveCommand() {
-        listOf("소리 켜지 마", "설정 열지 마", "홈으로 가지 마", "듣기 중지 하지 마").forEach {
+        listOf(
+            "소리 켜지 마", "설정 열지 마", "홈으로 가지 마", "듣기 중지 하지 마",
+            "화면 켜지 마", "화면 끄지 마", "화면 숨기지 마", "화면 보여주지 마",
+        ).forEach {
             assertTrue(it, parse(it) is Interpretation.Clarify)
         }
     }
@@ -51,5 +56,25 @@ class RuleCommandInterpreterTest {
         val current = generation.advance()
         assertFalse(generation.accepts(old))
         assertTrue(generation.accepts(current))
+    }
+
+    @Test fun recognizesExternalNavigationCommands() {
+        val nav = parse("네이버 지도로 강남역 안내해줘")
+        assertTrue(nav is Interpretation.NavigateExternal)
+        val result = nav as Interpretation.NavigateExternal
+        assertEquals(com.ariateam.aria.navigation.NavigationProvider.Naver, result.provider)
+        assertEquals("강남역", result.destination)
+    }
+
+    @Test fun recognizesCloudTextQuestionCommands() {
+        val result = parse("제미나이 질문 오늘 서울 날씨 어때")
+        assertTrue(result is Interpretation.CloudTextQuestion)
+        val q = result as Interpretation.CloudTextQuestion
+        assertTrue(q.question.contains("오늘 서울 날씨 어때"))
+    }
+
+    @Test fun recognizesCloudPhotoQuestionCommands() {
+        val result = parse("사진 찍어서 알려줘")
+        assertTrue(result is Interpretation.CloudPhotoQuestion)
     }
 }

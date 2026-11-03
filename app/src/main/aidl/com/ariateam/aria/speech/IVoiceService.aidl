@@ -15,4 +15,10 @@ interface IVoiceService {
     oneway void downloadModel(boolean mobileData);
     oneway void cancelModelDownload();
     oneway void deleteModel();
+    oneway void consumeCloudQuestion(long requestId);
+    oneway void speakCloudResponse(long questionId, String text);
+    oneway void reportCloudError(long questionId, String errorText);
+    oneway void cancelCloudQuestion(long questionId);
+    oneway void speakHazardWarning(String message);
+    oneway void preemptSpeech();
 }

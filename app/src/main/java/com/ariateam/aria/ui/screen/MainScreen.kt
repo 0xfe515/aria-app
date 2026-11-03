@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -11,6 +12,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Preview
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
@@ -28,6 +31,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -36,10 +40,12 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -49,7 +55,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ariateam.aria.DebugDestination
+import com.ariateam.aria.command.LanguageStatus
+import com.ariateam.aria.navigation.ExternalNavigationLauncher
+import com.ariateam.aria.navigation.NavigationLaunchResult
+import com.ariateam.aria.navigation.NavigationProvider
 import com.ariateam.aria.PendingCameraStartGate
+import com.ariateam.aria.distance.BodyMountProfileStore
 import com.ariateam.aria.distance.DistanceActivity
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceViewModel
@@ -68,8 +79,10 @@ import com.ariateam.aria.ui.navigation.FloatingTabBar
 import com.ariateam.aria.ui.navigation.FloatingTabBarBottomMargin
 import com.ariateam.aria.ui.navigation.FloatingTabBarHeight
 import com.ariateam.aria.ui.navigation.calculateFloatingNavSafeBottomPadding
-import com.ariateam.aria.vision.VisionPipelineMode
+import com.ariateam.aria.vision.CameraSessionStatus
+import com.ariateam.aria.vision.VisionForegroundService
 import com.ariateam.aria.vision.VisionModelState
+import com.ariateam.aria.vision.VisionPipelineMode
 import com.ariateam.aria.vision.VisionViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -140,13 +153,17 @@ fun MainScreen(
         pendingCameraGate.invalidate()
         visionModel.stopCamera()
     }
+    val invalidatePendingAndDetachPreview = {
+        pendingCameraGate.invalidate()
+        visionModel.ensureController().updateSurfaceProvider(null)
+    }
 
     // Release camera resources and invalidate pending permission requests on configuration change.
     var lastOrientation by remember { mutableIntStateOf(configuration.orientation) }
     LaunchedEffect(configuration.orientation) {
         if (configuration.orientation != lastOrientation) {
             lastOrientation = configuration.orientation
-            invalidatePendingAndStopCamera()
+            invalidatePendingAndDetachPreview()
         }
     }
 
@@ -168,15 +185,133 @@ fun MainScreen(
             // by navigation callbacks (FloatingTabBar, BackHandler, voice navigation).
             // Do not call invalidatePendingAndStopCamera() here to avoid racing Home inset camera start.
             visionModel.ensureController()
-            model.setUiScreen("home")
         }
     }
 
     var screenVisible by remember { mutableStateOf(false) }
+    var isBlackScreenVisible by rememberSaveable { mutableStateOf(false) }
+    var lastBlackScreenActivityAt by rememberSaveable {
+        mutableLongStateOf(SystemClock.elapsedRealtime())
+    }
+    var isTouchActive by remember { mutableStateOf(false) }
+    var hasScreenVisibilityBaseline by rememberSaveable { mutableStateOf(false) }
+    var lastScreenVisibilityEventId by rememberSaveable {
+        mutableLongStateOf(state.command.screenVisibilityId)
+    }
     val toastFeedbackPolicy = rememberSaveable(saver = ToastFeedbackPolicy.Saver) {
         ToastFeedbackPolicy()
     }
     val isServiceSynced by model.isServiceSynced.collectAsStateWithLifecycle()
+
+    val blackScreenEligibility = BlackScreenEligibility(
+        isHome = selectedTab == 0,
+        hasBeenAdmitted = startupModel.hasBeenAdmitted,
+        isForeground = screenVisible,
+        isStartupSettingsVisible = startupModel.isStartupSettingsVisible,
+        isExcludedScreen = selectedTab != 0 || debugDestination != DebugDestination.None || showLicenses,
+        isDialogVisible = showBodyMountProfileDialog,
+        hasActionRequiredFailure = permissionLossDetected ||
+            state.phase == VoicePhase.Error ||
+            state.command.languageStatus == LanguageStatus.Failed ||
+            StartupPermissionInventory.CAMERA in missingRuntimePermissions ||
+            visionModelState !is VisionModelState.Ready ||
+            visionUiState.cameraStatus in setOf(
+                CameraSessionStatus.PermissionDenied,
+                CameraSessionStatus.CameraUnavailable,
+                CameraSessionStatus.Error,
+            ),
+        voicePhase = state.phase,
+        cameraStatus = visionUiState.cameraStatus,
+        visionReady = visionModelState is VisionModelState.Ready,
+    )
+    val canHideBlackScreenManually = BlackScreenPolicy.canHideManually(blackScreenEligibility)
+    val canAutoHideBlackScreen = BlackScreenPolicy.canAutoHide(blackScreenEligibility)
+    val recordActivity by rememberUpdatedState {
+        lastBlackScreenActivityAt = SystemClock.elapsedRealtime()
+    }
+    val startTouchActivity by rememberUpdatedState {
+        recordActivity()
+        isTouchActive = true
+    }
+    val finishTouchActivity by rememberUpdatedState {
+        recordActivity()
+        isTouchActive = false
+    }
+
+    LaunchedEffect(selectedTab, canHideBlackScreenManually) {
+        model.setUiScreen(
+            when {
+                selectedTab == 1 -> "settings"
+                canHideBlackScreenManually -> "home"
+                else -> "blocked"
+            },
+        )
+    }
+
+    LaunchedEffect(canHideBlackScreenManually) {
+        if (!canHideBlackScreenManually) isBlackScreenVisible = false
+    }
+
+    LaunchedEffect(canAutoHideBlackScreen) {
+        if (canAutoHideBlackScreen) {
+            lastBlackScreenActivityAt = SystemClock.elapsedRealtime()
+        }
+    }
+
+    LaunchedEffect(isServiceSynced, state.command.screenVisibilityId, state.command.screenHidden) {
+        if (!isServiceSynced) return@LaunchedEffect
+        if (!hasScreenVisibilityBaseline) {
+            lastScreenVisibilityEventId = state.command.screenVisibilityId
+            hasScreenVisibilityBaseline = true
+            return@LaunchedEffect
+        }
+        val eventId = state.command.screenVisibilityId
+        if (!BlackScreenPolicy.isFreshVisibilityEvent(eventId, lastScreenVisibilityEventId)) return@LaunchedEffect
+        lastScreenVisibilityEventId = eventId
+        if (state.command.screenHidden) {
+            if (canHideBlackScreenManually) {
+                lastBlackScreenActivityAt = SystemClock.elapsedRealtime()
+                isBlackScreenVisible = true
+            }
+        } else {
+            lastBlackScreenActivityAt = SystemClock.elapsedRealtime()
+            isBlackScreenVisible = false
+        }
+    }
+
+    LaunchedEffect(screenVisible) {
+        if (screenVisible) {
+            isBlackScreenVisible = false
+            lastBlackScreenActivityAt = SystemClock.elapsedRealtime()
+        } else {
+            isBlackScreenVisible = false
+        }
+    }
+
+    LaunchedEffect(blackScreenEligibility, lastBlackScreenActivityAt, isBlackScreenVisible, isTouchActive) {
+        if (!screenVisible || !canAutoHideBlackScreen || isBlackScreenVisible || isTouchActive) {
+            return@LaunchedEffect
+        }
+        val remaining = BlackScreenPolicy.remainingMillis(
+            lastActivityAt = lastBlackScreenActivityAt,
+            now = SystemClock.elapsedRealtime(),
+        )
+        if (remaining > 0) delay(remaining)
+        if (!isTouchActive && BlackScreenPolicy.shouldAutoHide(
+                value = blackScreenEligibility,
+                lastActivityAt = lastBlackScreenActivityAt,
+                now = SystemClock.elapsedRealtime(),
+            )
+        ) {
+            isBlackScreenVisible = true
+        }
+    }
+
+    LaunchedEffect(state.phase, state.command.eventId) {
+        if (state.phase == VoicePhase.Dictating || state.command.eventId > 0L) {
+            lastBlackScreenActivityAt = SystemClock.elapsedRealtime()
+        }
+    }
 
     val currentLatestState by rememberUpdatedState(state)
     val currentLatestVisible by rememberUpdatedState(screenVisible)
@@ -207,7 +342,7 @@ fun MainScreen(
                 toastFeedbackPolicy.onAppVisibilityChanged(isResumed, model.state.value)
             }
             if (event == Lifecycle.Event.ON_STOP || event == Lifecycle.Event.ON_DESTROY) {
-                invalidatePendingAndStopCamera()
+                invalidatePendingAndDetachPreview()
             } else if (event == Lifecycle.Event.ON_RESUME) {
                 isDistanceModeForeground = false
                 val missingPermissions = refreshRuntimePermissions()
@@ -227,7 +362,7 @@ fun MainScreen(
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             model.setUiVisible(false)
-            invalidatePendingAndStopCamera()
+            invalidatePendingAndDetachPreview()
         }
     }
 
@@ -252,6 +387,112 @@ fun MainScreen(
             showLicenses = false
             selectedTab = if (state.command.destination == "settings") 1 else 0
             model.consumeNavigation(state.command.navigationId)
+        }
+    }
+
+    val externalLauncher = remember(context) { ExternalNavigationLauncher(context) }
+    var lastExternalNavId by rememberSaveable { mutableLongStateOf(state.command.externalNavId) }
+    var hasExternalNavBaseline by rememberSaveable { mutableStateOf(false) }
+
+    val keyStorage = remember(context) { com.ariateam.aria.cloud.AndroidKeyStoreAriaKeyStorage(context) }
+    val cloudCoordinator = remember(keyStorage) { com.ariateam.aria.cloud.CloudQuestionCoordinator(keyStorage) }
+
+    DisposableEffect(cloudCoordinator) {
+        onDispose {
+            cloudCoordinator.dispose()
+        }
+    }
+
+    var lastCloudQuestionId by rememberSaveable { mutableLongStateOf(state.command.cloudQuestionId) }
+    var hasCloudQuestionBaseline by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.command.cloudQuestionId, screenVisible, startupModel.hasBeenAdmitted, isServiceSynced) {
+        if (!isServiceSynced) return@LaunchedEffect
+        if (!hasCloudQuestionBaseline) {
+            lastCloudQuestionId = state.command.cloudQuestionId
+            hasCloudQuestionBaseline = true
+            return@LaunchedEffect
+        }
+        val qId = state.command.cloudQuestionId
+        if (qId == 0L) {
+            cloudCoordinator.cancel()
+            return@LaunchedEffect
+        }
+        if (qId <= lastCloudQuestionId) return@LaunchedEffect
+        if (!screenVisible || !startupModel.hasBeenAdmitted) return@LaunchedEffect
+
+        lastCloudQuestionId = qId
+        val qType = state.command.cloudQuestionType
+        val qPrompt = state.command.cloudQuestionPrompt
+
+        model.consumeCloudQuestion(qId)
+
+        if (qType == "photo") {
+            cloudCoordinator.askPhotoQuestion(
+                questionId = qId,
+                prompt = qPrompt,
+                onResponse = { responseText ->
+                    model.speakCloudResponse(qId, responseText)
+                },
+                onError = { errorMessage ->
+                    model.reportCloudError(qId, errorMessage)
+                },
+            )
+        } else {
+            cloudCoordinator.askTextQuestion(
+                questionId = qId,
+                prompt = qPrompt,
+                onResponse = { responseText ->
+                    model.speakCloudResponse(qId, responseText)
+                },
+                onError = { errorMessage ->
+                    model.reportCloudError(qId, errorMessage)
+                },
+            )
+        }
+    }
+
+    LaunchedEffect(state.command.externalNavId, screenVisible, startupModel.hasBeenAdmitted, isServiceSynced) {
+        if (!isServiceSynced) return@LaunchedEffect
+        if (!hasExternalNavBaseline) {
+            lastExternalNavId = state.command.externalNavId
+            hasExternalNavBaseline = true
+            return@LaunchedEffect
+        }
+        val eventId = state.command.externalNavId
+        if (eventId == 0L || eventId <= lastExternalNavId) return@LaunchedEffect
+        if (!screenVisible || !startupModel.hasBeenAdmitted) return@LaunchedEffect
+
+        lastExternalNavId = eventId
+        val provider = NavigationProvider.fromId(state.command.externalNavProvider)
+        val destination = state.command.externalNavDestination
+
+        model.consumeNavigation(eventId)
+
+        if (provider != null && destination.isNotBlank()) {
+            when (externalLauncher.launch(provider, destination)) {
+                is NavigationLaunchResult.AppLaunched -> {
+                    Toast.makeText(
+                        context,
+                        "${provider.displayName} 앱으로 ${destination} 검색을 엽니다.",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                is NavigationLaunchResult.WebFallbackLaunched -> {
+                    Toast.makeText(
+                        context,
+                        "${provider.displayName} 앱이 설치되어 있지 않아 웹 검색으로 연결합니다.",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                is NavigationLaunchResult.Failed -> {
+                    Toast.makeText(
+                        context,
+                        com.ariateam.aria.R.string.nav_not_found,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
         }
     }
 
@@ -408,7 +649,8 @@ fun MainScreen(
         }
     }
 
-    val requestStartCamera: (Preview.SurfaceProvider?, VisionPipelineMode, Int) -> Unit = { provider, mode, rotation ->
+    val requestCameraStart: (Preview.SurfaceProvider?, VisionPipelineMode, Int, Boolean) -> Unit =
+        { provider, mode, rotation, explicitRestart ->
         val isResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         val isScreenEligible = PendingCameraStartGate.isCameraEligibleScreen(
             selectedTab = selectedTab,
@@ -418,16 +660,13 @@ fun MainScreen(
             isStartupSettingsVisible = startupModel.isStartupSettingsVisible,
             permissionLossDetected = permissionLossDetected,
         )
-        if (!isScreenEligible || !isResumed || isDistanceModeForeground) {
+        if (!isScreenEligible || isDistanceModeForeground) {
             invalidatePendingAndStopCamera()
+        } else if (!isResumed) {
+            invalidatePendingAndDetachPreview()
         } else if (StartupPermissionInventory.CAMERA !in refreshRuntimePermissions()) {
             pendingCameraGate.invalidate()
-            visionModel.ensureController().startCamera(
-                lifecycleOwner = lifecycleOwner,
-                surfaceProvider = provider,
-                mode = mode,
-                targetRotation = rotation,
-            )
+            VisionForegroundService.requestStart(context, provider, mode, rotation, explicitRestart)
         } else {
             pendingCameraGate.invalidate()
             visionModel.ensureController().permissionDenied()
@@ -436,6 +675,8 @@ fun MainScreen(
             }
         }
     }
+    val requestStartCamera: (Preview.SurfaceProvider?, VisionPipelineMode, Int) -> Unit =
+        { provider, mode, rotation -> requestCameraStart(provider, mode, rotation, false) }
 
     val openSettings = {
         context.startActivity(
@@ -477,7 +718,23 @@ fun MainScreen(
     }
 
     Surface(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(canHideBlackScreenManually, isBlackScreenVisible) {
+                if (canHideBlackScreenManually && !isBlackScreenVisible) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        startTouchActivity()
+                        try {
+                            do {
+                                val event = awaitPointerEvent()
+                            } while (event.changes.any { it.pressed })
+                        } finally {
+                            finishTouchActivity()
+                        }
+                    }
+                }
+            },
         color = MaterialTheme.colorScheme.background,
     ) {
         if ((!startupModel.hasBeenAdmitted || permissionLossDetected) && !startupModel.isStartupSettingsVisible) {
@@ -510,14 +767,22 @@ fun MainScreen(
                     val navSafeBottomPadding = calculateFloatingNavSafeBottomPadding(floatingTabBarHeightDp)
                     val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
                     val density = LocalDensity.current
-                    var measuredInsetHeightDp by remember { mutableStateOf(148.dp) }
+                    val view = LocalView.current
+                    val profileStore = remember(context) { BodyMountProfileStore(context) }
+                    DisposableEffect(profileStore) {
+                        onDispose { profileStore.close() }
+                    }
+                    val storedProfile by profileStore.profile.collectAsStateWithLifecycle()
+                    var measuredInsetHeightDp by remember { mutableStateOf(190.dp) }
+                    var measuredInsetWidthDp by remember { mutableStateOf(if (isLandscape) 280.dp else 300.dp) }
+                    var measuredRecoveryHeightDp by remember { mutableStateOf(0.dp) }
                     val homeTopInsetClearance = if (isLandscape) {
                         8.dp
                     } else {
-                        measuredInsetHeightDp + 12.dp
+                        measuredInsetHeightDp + measuredRecoveryHeightDp + 16.dp
                     }
                     val homeEndInsetClearance = if (isLandscape) {
-                        220.dp + 16.dp
+                        measuredInsetWidthDp + 16.dp
                     } else {
                         0.dp
                     }
@@ -547,9 +812,7 @@ fun MainScreen(
                                 onStartCamera = { provider, rotation ->
                                     requestStartCamera(provider, VisionPipelineMode.PREPROCESS_OR_INFERENCE, rotation)
                                 },
-                                onStopCamera = {
-                                    visionModel.stopCamera()
-                                },
+                                onStopCamera = visionModel::stopCamera,
                                 onSurfaceProviderUpdated = { provider, rotation ->
                                     visionModel.ensureController().updateSurfaceProvider(provider, rotation)
                                 },
@@ -559,15 +822,81 @@ fun MainScreen(
                                         startupPermissions.launch(arrayOf(StartupPermissionInventory.CAMERA))
                                     }
                                 },
+                                requiresExplicitRestart = visionModel.requiresExplicitRestart,
+                                onExplicitRestartCamera = { provider, rotation ->
+                                    requestCameraStart(
+                                        provider,
+                                        VisionPipelineMode.PREPROCESS_OR_INFERENCE,
+                                        rotation,
+                                        true,
+                                    )
+                                },
                                 onOpenAppSettings = openSettings,
                                 onOpenProfileSetup = { showBodyMountProfileDialog = true },
                                 modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(top = 8.dp, end = 12.dp)
+                                    .then(
+                                        if (isLandscape) {
+                                            Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(top = 8.dp, end = 12.dp)
+                                        } else {
+                                            Modifier
+                                                .align(Alignment.TopCenter)
+                                                .padding(top = 8.dp, start = 14.dp, end = 14.dp)
+                                        }
+                                    )
                                     .onGloballyPositioned { coordinates ->
                                         val heightDp = with(density) { coordinates.size.height.toDp() }
+                                        val widthDp = with(density) { coordinates.size.width.toDp() }
                                         if (heightDp > 0.dp && heightDp != measuredInsetHeightDp) {
                                             measuredInsetHeightDp = heightDp
+                                        }
+                                        if (widthDp > 0.dp && widthDp != measuredInsetWidthDp) {
+                                            measuredInsetWidthDp = widthDp
+                                        }
+                                    },
+                            )
+                            DashboardHomeRecoveryBar(
+                                hasCameraPermission = StartupPermissionInventory.CAMERA !in missingRuntimePermissions,
+                                cameraStatus = visionUiState.cameraStatus,
+                                requiresExplicitRestart = visionModel.requiresExplicitRestart,
+                                isProfileConfigured = storedProfile?.isValid == true,
+                                onRequestCameraPermission = {
+                                    val missing = refreshRuntimePermissions()
+                                    if (StartupPermissionInventory.CAMERA in missing) {
+                                        startupPermissions.launch(arrayOf(StartupPermissionInventory.CAMERA))
+                                    }
+                                },
+                                onExplicitRestartCamera = {
+                                    val rot = view.display?.rotation ?: android.view.Surface.ROTATION_0
+                                    requestCameraStart(
+                                        null,
+                                        VisionPipelineMode.PREPROCESS_OR_INFERENCE,
+                                        rot,
+                                        true,
+                                    )
+                                },
+                                onRetryCamera = {
+                                    val rot = view.display?.rotation ?: android.view.Surface.ROTATION_0
+                                    requestStartCamera(null, VisionPipelineMode.PREPROCESS_OR_INFERENCE, rot)
+                                },
+                                onOpenProfileSetup = { showBodyMountProfileDialog = true },
+                                modifier = Modifier
+                                    .then(
+                                        if (isLandscape) {
+                                            Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(top = measuredInsetHeightDp + 14.dp, end = 12.dp)
+                                        } else {
+                                            Modifier
+                                                .align(Alignment.TopCenter)
+                                                .padding(top = measuredInsetHeightDp + 14.dp, start = 16.dp, end = 16.dp)
+                                        }
+                                    )
+                                    .onGloballyPositioned { coordinates ->
+                                        val h = with(density) { coordinates.size.height.toDp() }
+                                        if (h != measuredRecoveryHeightDp) {
+                                            measuredRecoveryHeightDp = h
                                         }
                                     },
                             )
@@ -642,6 +971,7 @@ fun MainScreen(
                         else -> saveableStateHolder.SaveableStateProvider("settings") {
                             SettingsScreen(
                                 state = state,
+                                keyStorage = keyStorage,
                                 onStartWaiting = { requestAction(0) },
                                 onStop = model::stop,
                                 audibleFeedback = audibleFeedback,
@@ -713,6 +1043,15 @@ fun MainScreen(
                             .padding(bottom = FloatingTabBarBottomMargin),
                         onHeightChanged = { measuredHeight ->
                             floatingTabBarHeightDp = measuredHeight
+                        },
+                    )
+                }
+
+                if (isBlackScreenVisible) {
+                    BlackScreenOverlay(
+                        onReveal = {
+                            lastBlackScreenActivityAt = SystemClock.elapsedRealtime()
+                            isBlackScreenVisible = false
                         },
                     )
                 }

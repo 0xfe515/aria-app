@@ -1,10 +1,16 @@
 package com.ariateam.aria.command
 
+import com.ariateam.aria.navigation.NavigationCommandParser
+import com.ariateam.aria.navigation.NavigationProvider
+
 /** Platform-independent interpretation; only the coordinator may execute these values. */
-enum class AppCommand { Home, Settings, SoundOn, SoundOff, Status, Help, Cancel, Stop }
+enum class AppCommand { Home, Settings, SoundOn, SoundOff, HideScreen, ShowScreen, Status, Help, Cancel, Stop }
 
 sealed interface Interpretation {
     data class Execute(val command: AppCommand) : Interpretation
+    data class NavigateExternal(val provider: NavigationProvider, val destination: String) : Interpretation
+    data class CloudTextQuestion(val question: String) : Interpretation
+    data class CloudPhotoQuestion(val prompt: String) : Interpretation
     data class Clarify(val question: String) : Interpretation
     data object Unknown : Interpretation
 }
@@ -22,7 +28,7 @@ class RuleCommandInterpreter : CommandInterpreter {
         val value = normalize(text)
         if (value.isEmpty()) return Interpretation.Unknown
         // Negation must never fall through to positive substring matching.
-        if (listOf("하지마", "하지말", "켜지마", "끄지마", "열지마", "가지마").any(value::contains)) {
+        if (listOf("하지마", "하지말", "켜지마", "끄지마", "열지마", "가지마", "숨기지마", "보여주지마", "안내하지마", "길찾지마").any(value::contains)) {
             return Interpretation.Clarify("원하는 명령을 하나만 다시 말해 주세요.")
         }
         if (value in setOf("취소", "취소해", "취소해줘", "아니", "아니요", "됐어")) return execute(AppCommand.Cancel)
@@ -30,11 +36,26 @@ class RuleCommandInterpreter : CommandInterpreter {
         if (listOf("그리고", "하고", "다음에").any(value::contains)) {
             return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
         }
+
+        val navInterpretation = NavigationCommandParser.parse(text, context, now)
+        if (navInterpretation != null) {
+            return navInterpretation
+        }
+        val cloudInterpretation = com.ariateam.aria.cloud.CloudCommandParser.parse(text, context, now)
+        if (cloudInterpretation != null) {
+            return cloudInterpretation
+        }
         val candidates = mutableSetOf<AppCommand>()
         if (value in setOf("홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동")) candidates += AppCommand.Home
         if (value in setOf("설정", "설정열어", "설정열어줘", "설정으로가", "설정으로가줘", "설정으로이동", "설정화면열어")) candidates += AppCommand.Settings
         if (value in setOf("현재상태", "현재상태알려줘", "상태알려줘", "지금상태", "상태")) candidates += AppCommand.Status
         if (value in setOf("도움말", "도움말알려줘", "뭐할수있어", "사용법", "사용법알려줘")) candidates += AppCommand.Help
+        if (value in setOf("화면숨겨", "화면숨겨줘", "화면숨겨주세요", "화면꺼", "화면꺼줘", "화면끄기")) {
+            candidates += AppCommand.HideScreen
+        }
+        if (value in setOf("화면보여줘", "화면보여주세요", "화면켜", "화면켜줘", "화면켜기")) {
+            candidates += AppCommand.ShowScreen
+        }
         val sound = value.replace("안내", "").replace("효과음", "소리").replace("피드백", "소리")
         if (sound in setOf("소리켜", "소리켜줘", "소리켜주세요", "소리켜기")) candidates += AppCommand.SoundOn
         if (sound in setOf("소리꺼", "소리꺼줘", "소리꺼주세요", "소리끄기", "조용히해", "조용히해줘")) candidates += AppCommand.SoundOff

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nav_provider_google">구글 지도</string>
+    <string name="nav_provider_naver">네이버 지도</string>
+    <string name="nav_provider_kakao">카카오맵</string>
+
+    <string name="nav_open_search">%1$s로 %2$s 검색을 열어요.</string>
+    <string name="nav_open_search_toast">%1$s 앱으로 %2$s 검색을 엽니다.</string>
+    <string name="nav_fallback_web">%1$s 앱이 설치되어 있지 않아 웹 검색으로 연결해요.</string>
+    <string name="nav_fallback_web_toast">%1$s 앱이 설치되어 있지 않아 웹 검색으로 연결합니다.</string>
+    <string name="nav_not_found">지도를 열 수 있는 앱이나 웹 브라우저를 찾을 수 없어요.</string>
+
+    <string name="nav_clarify_provider">네이버 지도, 카카오맵, 구글 지도 중 어떤 지도로 안내할까요?</string>
+    <string name="nav_clarify_single_provider">네이버 지도, 카카오맵, 구글 지도 중 하나만 선택해 주세요.</string>
+    <string name="nav_clarify_destination">어디로 갈까요? 목적지를 말씀해 주세요.</string>
+    <string name="nav_clarify_provider_destination">%1$s로 갈 목적지를 말씀해 주세요.</string>
+    <string name="nav_invalid_destination">목적지를 올바르게 말씀해 주세요.</string>
+
+    <string name="nav_notification_channel">Aria 길안내</string>
+    <string name="nav_notification_title">Aria 길안내</string>
+    <string name="nav_notification_text">알림을 눌러 %1$s로 %2$s 검색을 열어 주세요.</string>
+</resources>

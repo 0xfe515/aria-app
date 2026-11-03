@@ -138,4 +138,65 @@ class DistanceActivitySmokeTest {
         composeTestRule.onNodeWithText("이 기기는 ARCore Raw Depth 모드를 지원하지 않습니다.").assertIsDisplayed()
         composeTestRule.onNodeWithText("Aria 홈으로 돌아가기").assertIsDisplayed()
     }
+
+    @Test
+    fun testSyntheticGroundContactValueReachesActualDistanceScreenMetricDisplay() {
+        val state = DistanceUiState(
+            status = DistanceStatus.TRACKING,
+            risk = DistanceRisk.CAUTION,
+            distanceMeters = 2.7f,
+            validSampleCount = 1,
+            message = "추정 거리 2.7m",
+            setupStage = DistanceSetupStage.TRACKING,
+            floorDetected = false,
+            rawDepthActive = false,
+            isMonocularMode = true,
+            profileConfigured = true,
+            sensorTrackingActive = true,
+            modelReady = true,
+            showOnboarding = false,
+        )
+
+        composeTestRule.setContent {
+            AriaTheme {
+                DistanceScreen(
+                    uiState = state,
+                    onBack = {},
+                    onRecalibrate = {},
+                    onDismissOnboarding = {},
+                )
+            }
+        }
+
+        // Verify that synthetic ground-contact pipeline distance reaches actual large metric widget
+        composeTestRule.onNodeWithText("보행 장애물 거리 감지").assertIsDisplayed()
+        composeTestRule.onNodeWithText("보행 복도 전방 추정 거리").assertIsDisplayed()
+        composeTestRule.onNodeWithText("2.7 m").assertIsDisplayed()
+        composeTestRule.onNodeWithText("주의: 전방 장애물 접근").assertIsDisplayed()
+        composeTestRule.onNodeWithText("추정 거리 2.7m").assertIsDisplayed()
+        composeTestRule.onNodeWithText("키·착용 위치 프로필 설정 완료").assertIsDisplayed()
+        composeTestRule.onNodeWithText("기기 기울기 및 중력 센서 정상").assertIsDisplayed()
+        composeTestRule.onNodeWithText("지면 접촉 기반 거리 추정 동작 중").assertIsDisplayed()
+    }
+
+    @Test
+    fun testNormalDistanceEntryDoesNotGateOnARCore() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        try {
+            InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
+                context.packageName,
+                Manifest.permission.CAMERA,
+            )
+        } catch (_: Throwable) {
+        }
+
+        val intent = DistanceActivity.createIntent(context)
+        ActivityScenario.launch<DistanceActivity>(intent).use { scenario ->
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            scenario.onActivity { activity ->
+                assertNotNull("DistanceActivity must instantiate without ARCore requirement", activity)
+                assertFalse("DistanceActivity must not be finishing", activity.isFinishing)
+            }
+        }
+    }
 }

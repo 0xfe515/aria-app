@@ -2,6 +2,7 @@ package com.ariateam.aria.ui.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,6 +64,7 @@ fun DistanceScreen(
     onBack: () -> Unit,
     onRecalibrate: () -> Unit,
     onDismissOnboarding: (dontShowAgain: Boolean) -> Unit,
+    onOpenProfileSetup: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier.fillMaxSize()) {
@@ -77,6 +79,7 @@ fun DistanceScreen(
             DistanceHeader(
                 onBack = onBack,
                 onRecalibrate = onRecalibrate,
+                onOpenProfileSetup = onOpenProfileSetup,
                 canRecalibrate = uiState.setupStage == DistanceSetupStage.TRACKING ||
                     uiState.setupStage == DistanceSetupStage.FLOOR_SEARCH,
             )
@@ -116,7 +119,10 @@ fun DistanceScreen(
                     MainDistanceCard(uiState)
 
                     // Readiness & Tracking Quality Gates
-                    ReadinessCard(uiState)
+                    ReadinessCard(
+                        uiState = uiState,
+                        onOpenProfileSetup = onOpenProfileSetup,
+                    )
 
                     // Threshold and Disclaimer Card
                     GuidanceCard()
@@ -137,6 +143,7 @@ fun DistanceScreen(
 private fun DistanceHeader(
     onBack: () -> Unit,
     onRecalibrate: () -> Unit,
+    onOpenProfileSetup: () -> Unit = {},
     canRecalibrate: Boolean,
 ) {
     Row(
@@ -169,17 +176,30 @@ private fun DistanceHeader(
             )
         }
 
-        OutlinedButton(
-            onClick = onRecalibrate,
-            enabled = canRecalibrate,
-            shape = RoundedCornerShape(20.dp),
-            colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = Color.White,
-                disabledContentColor = AriaSlate,
-            ),
-            modifier = Modifier.height(38.dp),
-        ) {
-            Text(stringResource(R.string.distance_recalibrate), fontSize = 13.sp)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = onOpenProfileSetup,
+                shape = RoundedCornerShape(20.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color.White,
+                ),
+                modifier = Modifier.height(38.dp),
+            ) {
+                Text(stringResource(R.string.distance_profile_setup_button), fontSize = 13.sp)
+            }
+
+            OutlinedButton(
+                onClick = onRecalibrate,
+                enabled = canRecalibrate,
+                shape = RoundedCornerShape(20.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color.White,
+                    disabledContentColor = AriaSlate,
+                ),
+                modifier = Modifier.height(38.dp),
+            ) {
+                Text(stringResource(R.string.distance_recalibrate), fontSize = 13.sp)
+            }
         }
     }
 }
@@ -223,7 +243,17 @@ private fun MainDistanceCard(uiState: DistanceUiState) {
                 )
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
+
+            // Honest estimated-distance label
+            Text(
+                text = stringResource(R.string.distance_estimated_label),
+                color = AriaSky,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                textAlign = TextAlign.Center,
+            )
+
+            Spacer(Modifier.height(6.dp))
 
             // Large metric distance display
             val distanceText = uiState.distanceMeters?.let {
@@ -258,7 +288,10 @@ private fun MainDistanceCard(uiState: DistanceUiState) {
 }
 
 @Composable
-private fun ReadinessCard(uiState: DistanceUiState) {
+private fun ReadinessCard(
+    uiState: DistanceUiState,
+    onOpenProfileSetup: () -> Unit = {},
+) {
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = Color(0xAA1F2937),
@@ -266,52 +299,132 @@ private fun ReadinessCard(uiState: DistanceUiState) {
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                text = "인식 상태 및 지면 추적",
+                text = stringResource(R.string.distance_readiness_header),
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = Color.White,
             )
 
-            // Floor Plane Quality Gate
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val floorColor = if (uiState.floorDetected) AriaGreen else AriaAmber
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(floorColor),
-                )
-                Spacer(Modifier.width(8.dp))
-                val floorText = if (uiState.floorDetected && uiState.groundOffsetMeters != null) {
-                    stringResource(R.string.distance_readiness_floor_detected, uiState.groundOffsetMeters)
-                } else {
-                    stringResource(R.string.distance_readiness_floor_searching)
+            if (uiState.isMonocularMode && !uiState.rawDepthActive) {
+                // Profile status
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val profileColor = if (uiState.profileConfigured) AriaGreen else AriaAmber
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(profileColor),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = if (uiState.profileConfigured) {
+                                stringResource(R.string.distance_readiness_profile_configured)
+                            } else {
+                                stringResource(R.string.distance_readiness_profile_missing)
+                            },
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (!uiState.profileConfigured) {
+                        Text(
+                            text = "설정",
+                            color = AriaSky,
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            modifier = Modifier
+                                .clickable { onOpenProfileSetup() }
+                                .padding(4.dp),
+                        )
+                    }
                 }
-                Text(
-                    text = floorText,
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
 
-            // Raw Depth Sensor Quality Gate
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val depthColor = if (uiState.rawDepthActive) AriaGreen else AriaSlate
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(depthColor),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = if (uiState.rawDepthActive) {
-                        stringResource(R.string.distance_readiness_raw_depth_active)
+                // Sensor status
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val sensorColor = if (uiState.sensorTrackingActive) AriaGreen else AriaAmber
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(sensorColor),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (uiState.sensorTrackingActive) {
+                            stringResource(R.string.distance_readiness_sensor_tracking)
+                        } else {
+                            stringResource(R.string.distance_readiness_sensor_waiting)
+                        },
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                // Monocular AI pipeline status
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val modeColor = if (uiState.modelReady) AriaGreen else AriaSlate
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(modeColor),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (uiState.modelReady) {
+                            stringResource(R.string.distance_readiness_monocular_active)
+                        } else {
+                            stringResource(R.string.distance_readiness_init)
+                        },
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            } else {
+                // Legacy AR Depth branch
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val floorColor = if (uiState.floorDetected) AriaGreen else AriaAmber
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(floorColor),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    val floorText = if (uiState.floorDetected && uiState.groundOffsetMeters != null) {
+                        stringResource(R.string.distance_readiness_floor_detected, uiState.groundOffsetMeters)
                     } else {
-                        stringResource(R.string.distance_readiness_init)
-                    },
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                        stringResource(R.string.distance_readiness_floor_searching)
+                    }
+                    Text(
+                        text = floorText,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val depthColor = if (uiState.rawDepthActive) AriaGreen else AriaSlate
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(depthColor),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (uiState.rawDepthActive) {
+                            stringResource(R.string.distance_readiness_raw_depth_active)
+                        } else {
+                            stringResource(R.string.distance_readiness_init)
+                        },
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
     }

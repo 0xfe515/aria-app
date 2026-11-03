@@ -37,12 +37,16 @@ import com.ariateam.aria.speech.VoiceError
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceState
 import com.ariateam.aria.ui.theme.AriaSlate
+import androidx.compose.material3.OutlinedTextField
+import com.ariateam.aria.cloud.AndroidKeyStoreAriaKeyStorage
+import com.ariateam.aria.cloud.AriaKeyStorage
 import kotlin.math.roundToInt
 
 private enum class SettingsPage {
     Root,
     Voice,
     Model,
+    Cloud,
     Demo,
     Diagnostics,
     AppInfo,
@@ -67,8 +71,18 @@ fun SettingsScreen(
     onOpenLicenses: () -> Unit = {},
     onOpenDistanceMode: () -> Unit = {},
     onOpenProfileSetup: () -> Unit = {},
+    keyStorage: AriaKeyStorage? = null,
 ) {
     val context = LocalContext.current
+    val effectiveKeyStorage = remember(context, keyStorage) {
+        keyStorage ?: AndroidKeyStoreAriaKeyStorage(context)
+    }
+    var hasApiKey by remember { mutableStateOf(effectiveKeyStorage.hasApiKey()) }
+    var maskedKey by remember { mutableStateOf(effectiveKeyStorage.getMaskedApiKey()) }
+    var showKeyInputDialog by rememberSaveable { mutableStateOf(false) }
+    var confirmKeyDelete by rememberSaveable { mutableStateOf(false) }
+    var keyInputText by rememberSaveable { mutableStateOf("") }
+
     val profileStore = remember(context) { BodyMountProfileStore(context) }
     androidx.compose.runtime.DisposableEffect(profileStore) {
         onDispose {
@@ -98,8 +112,11 @@ fun SettingsScreen(
         when (page) {
             SettingsPage.Root -> SettingsRoot(
                 state = state,
+                hasApiKey = hasApiKey,
+                maskedKey = maskedKey,
                 onOpenVoice = { page = SettingsPage.Voice },
                 onOpenModel = { page = SettingsPage.Model },
+                onOpenCloud = { page = SettingsPage.Cloud },
                 onOpenDemo = { page = SettingsPage.Demo },
                 onOpenDiagnostics = { page = SettingsPage.Diagnostics },
                 onOpenAppInfo = { page = SettingsPage.AppInfo },
@@ -122,6 +139,23 @@ fun SettingsScreen(
                 onDownloadModel = { onDownloadModel(mobileData) },
                 onCancelDownload = onCancelDownload,
                 onDeleteModel = { confirmModelDelete = true },
+                onBack = { page = SettingsPage.Root },
+            )
+
+            SettingsPage.Cloud -> CloudSettings(
+                hasApiKey = hasApiKey,
+                maskedKey = maskedKey,
+                onRegisterKey = {
+                    keyInputText = ""
+                    showKeyInputDialog = true
+                },
+                onChangeKey = {
+                    keyInputText = ""
+                    showKeyInputDialog = true
+                },
+                onClearKey = {
+                    confirmKeyDelete = true
+                },
                 onBack = { page = SettingsPage.Root },
             )
 
@@ -180,13 +214,84 @@ fun SettingsScreen(
             },
         )
     }
+
+    if (showKeyInputDialog) {
+        AlertDialog(
+            onDismissRequest = { showKeyInputDialog = false },
+            title = { Text(stringResource(R.string.settings_cloud_key_input_title)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = stringResource(R.string.settings_cloud_privacy_notice),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = keyInputText,
+                        onValueChange = { keyInputText = it },
+                        modifier = Modifier.fillMaxWidth().testTag("gemini_key_input"),
+                        label = { Text(stringResource(R.string.settings_cloud_key_input_hint)) },
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmed = keyInputText.trim()
+                        if (trimmed.isNotEmpty()) {
+                            effectiveKeyStorage.saveApiKey(trimmed)
+                            hasApiKey = effectiveKeyStorage.hasApiKey()
+                            maskedKey = effectiveKeyStorage.getMaskedApiKey()
+                        }
+                        showKeyInputDialog = false
+                    },
+                ) {
+                    Text(stringResource(R.string.settings_cloud_key_save))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showKeyInputDialog = false }) {
+                    Text(stringResource(R.string.settings_cancel))
+                }
+            },
+        )
+    }
+
+    if (confirmKeyDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmKeyDelete = false },
+            title = { Text(stringResource(R.string.settings_cloud_key_delete_title)) },
+            text = { Text(stringResource(R.string.settings_cloud_key_delete_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmKeyDelete = false
+                        effectiveKeyStorage.clearApiKey()
+                        hasApiKey = effectiveKeyStorage.hasApiKey()
+                        maskedKey = effectiveKeyStorage.getMaskedApiKey()
+                    },
+                ) {
+                    Text(stringResource(R.string.settings_cloud_key_delete_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmKeyDelete = false }) {
+                    Text(stringResource(R.string.settings_cancel))
+                }
+            },
+        )
+    }
 }
 
 @Composable
 private fun SettingsRoot(
     state: VoiceState,
+    hasApiKey: Boolean,
+    maskedKey: String?,
     onOpenVoice: () -> Unit,
     onOpenModel: () -> Unit,
+    onOpenCloud: () -> Unit,
     onOpenDemo: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onOpenAppInfo: () -> Unit,
@@ -209,6 +314,15 @@ private fun SettingsRoot(
         title = stringResource(R.string.settings_model_title),
         summary = state.command.model,
         onClick = onOpenModel,
+    )
+    SettingsNavigationRow(
+        title = stringResource(R.string.settings_cloud_title),
+        summary = if (hasApiKey) {
+            stringResource(R.string.settings_cloud_summary_registered, maskedKey.orEmpty())
+        } else {
+            stringResource(R.string.settings_cloud_summary_empty)
+        },
+        onClick = onOpenCloud,
     )
     SettingsNavigationRow(
         title = stringResource(R.string.settings_demo_page_title),
@@ -472,4 +586,65 @@ private fun SettingsSectionTitle(title: String) {
             .padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
             .semantics { heading() },
     )
+}
+
+@Composable
+private fun CloudSettings(
+    hasApiKey: Boolean,
+    maskedKey: String?,
+    onRegisterKey: () -> Unit,
+    onChangeKey: () -> Unit,
+    onClearKey: () -> Unit,
+    onBack: () -> Unit,
+) {
+    SettingsPageHeader(stringResource(R.string.settings_cloud_title), onBack)
+    SettingsSectionTitle(stringResource(R.string.settings_cloud_title))
+
+    SettingsNavigationRow(
+        title = stringResource(R.string.settings_cloud_model_title),
+        summary = stringResource(R.string.settings_cloud_model_summary),
+        onClick = {},
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = if (hasApiKey) {
+                stringResource(R.string.settings_cloud_key_registered, maskedKey.orEmpty())
+            } else {
+                stringResource(R.string.settings_cloud_key_empty)
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (hasApiKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (hasApiKey) {
+                TextButton(onClick = onChangeKey, modifier = Modifier.testTag("gemini_change_key_btn")) {
+                    Text(stringResource(R.string.settings_cloud_key_change_btn))
+                }
+                TextButton(onClick = onClearKey, modifier = Modifier.testTag("gemini_clear_key_btn")) {
+                    Text(stringResource(R.string.settings_cloud_key_clear_btn), color = MaterialTheme.colorScheme.error)
+                }
+            } else {
+                TextButton(onClick = onRegisterKey, modifier = Modifier.testTag("gemini_register_key_btn")) {
+                    Text(stringResource(R.string.settings_cloud_key_register_btn))
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.settings_cloud_privacy_notice),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }

@@ -43,6 +43,10 @@ data class DistanceUiState(
     val errorMessage: String? = null,
     val rawDepthActive: Boolean = false,
     val showOnboarding: Boolean = false,
+    val isMonocularMode: Boolean = true,
+    val profileConfigured: Boolean = false,
+    val sensorTrackingActive: Boolean = false,
+    val modelReady: Boolean = false,
 )
 
 class DistanceViewModel(

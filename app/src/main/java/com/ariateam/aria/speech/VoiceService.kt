@@ -51,7 +51,13 @@ class VoiceService : Service() {
         override fun consumeNavigation(requestId: Long) { main.post { coordinator.consumeNavigation(requestId) } }
         override fun downloadModel(mobileData: Boolean) { main.post { coordinator.download(mobileData) } }
         override fun cancelModelDownload() { main.post { coordinator.cancelDownload() } }
-        override fun deleteModel() { main.post { coordinator.deleteModel() } }
+        override fun deleteModel() { main.post { if (!destroyed) coordinator.deleteModel() } }
+        override fun consumeCloudQuestion(requestId: Long) { main.post { if (!destroyed) coordinator.consumeCloudQuestion(requestId) } }
+        override fun speakCloudResponse(questionId: Long, text: String) { main.post { if (!destroyed) coordinator.speakCloudResponse(questionId, text) } }
+        override fun reportCloudError(questionId: Long, errorText: String) { main.post { if (!destroyed) coordinator.reportCloudError(questionId, errorText) } }
+        override fun cancelCloudQuestion(questionId: Long) { main.post { if (!destroyed) coordinator.cancelCloudQuestion(questionId) } }
+        override fun speakHazardWarning(message: String) { main.post { if (!destroyed) coordinator.speakHazardWarning(message) } }
+        override fun preemptSpeech() { main.post { if (!destroyed) coordinator.preemptSpeech() } }
     }
 
     override fun onCreate() {

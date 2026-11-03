@@ -167,6 +167,9 @@ class ModelCommandValidationTest {
     private fun describeInterpretation(interpretation: Interpretation?): String = when (interpretation) {
         null -> "none"
         is Interpretation.Execute -> "Execute(${interpretation.command})"
+        is Interpretation.NavigateExternal -> "NavigateExternal(${interpretation.provider.id}:${interpretation.destination})"
+        is Interpretation.CloudTextQuestion -> "CloudTextQuestion(${interpretation.question})"
+        is Interpretation.CloudPhotoQuestion -> "CloudPhotoQuestion(${interpretation.prompt})"
         is Interpretation.Clarify -> "Clarify"
         Interpretation.Unknown -> "Unknown"
     }

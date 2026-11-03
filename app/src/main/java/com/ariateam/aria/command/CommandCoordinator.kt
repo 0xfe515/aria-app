@@ -12,6 +12,9 @@ import android.os.Looper
 import android.os.SystemClock
 import com.ariateam.aria.MainActivity
 import com.ariateam.aria.R
+import com.ariateam.aria.navigation.DestinationValidator
+import com.ariateam.aria.navigation.NavigationCommandParser
+import com.ariateam.aria.navigation.NavigationProvider
 import org.json.JSONObject
 
 /** Snapshot is replayable state; navigation is consumed explicitly, never inferred from text. */
@@ -26,6 +29,14 @@ data class CommandSnapshot(
     val ttsAvailable: Boolean = false,
     val eventId: Long = 0L,
     val languageStatus: LanguageStatus = LanguageStatus.Missing,
+    val screenVisibilityId: Long = 0L,
+    val screenHidden: Boolean = false,
+    val externalNavId: Long = 0L,
+    val externalNavProvider: String = "",
+    val externalNavDestination: String = "",
+    val cloudQuestionId: Long = 0L,
+    val cloudQuestionType: String = "",
+    val cloudQuestionPrompt: String = "",
 ) {
     fun toBundle() = Bundle().apply {
         putString("message", message); putBoolean("processing", processing)
@@ -34,6 +45,14 @@ data class CommandSnapshot(
         putBoolean("ttsAvailable", ttsAvailable)
         putLong("eventId", eventId)
         putInt("languageStatus", languageStatus.wireValue)
+        putLong("screenVisibilityId", screenVisibilityId)
+        putBoolean("screenHidden", screenHidden)
+        putLong("externalNavId", externalNavId)
+        putString("externalNavProvider", externalNavProvider)
+        putString("externalNavDestination", externalNavDestination)
+        putLong("cloudQuestionId", cloudQuestionId)
+        putString("cloudQuestionType", cloudQuestionType)
+        putString("cloudQuestionPrompt", cloudQuestionPrompt)
     }
     companion object {
         fun fromBundle(value: Bundle?) = if (value == null) CommandSnapshot() else CommandSnapshot(
@@ -43,6 +62,14 @@ data class CommandSnapshot(
             value.getString("destination").orEmpty(), value.getBoolean("ttsAvailable"),
             value.getLong("eventId"),
             LanguageStatus.fromWire(value.getInt("languageStatus", 0)),
+            value.getLong("screenVisibilityId"),
+            value.getBoolean("screenHidden", false),
+            value.getLong("externalNavId", 0L),
+            value.getString("externalNavProvider").orEmpty(),
+            value.getString("externalNavDestination").orEmpty(),
+            value.getLong("cloudQuestionId", 0L),
+            value.getString("cloudQuestionType").orEmpty(),
+            value.getString("cloudQuestionPrompt").orEmpty(),
         )
     }
 }
@@ -66,6 +93,7 @@ class CommandCoordinator(
     private var active = false
     private var visible = false
     private var screen = "home"
+    private var screenVisibilityAvailable = false
     private var navigationSequence = System.currentTimeMillis()
     private var awaiting = false
     private var stopPending = false
@@ -124,7 +152,10 @@ class CommandCoordinator(
         }
     }
     fun setVisible(value: Boolean) { visible = value }
-    fun setScreen(value: String) { if (value in setOf("home", "settings")) screen = value }
+    fun setScreen(value: String) {
+        if (value in setOf("home", "settings")) screen = value
+        if (value in setOf("home", "settings", "blocked")) screenVisibilityAvailable = value == "home"
+    }
 
     fun setAudible(enabled: Boolean) {
         preferences.edit().putBoolean("audible", enabled).apply()
@@ -159,6 +190,7 @@ class CommandCoordinator(
         }
         invalidate()
         speech.stop()
+        clearCloudQuestion()
         emit(snapshot.copy(processing = false))
     }
 
@@ -179,7 +211,16 @@ class CommandCoordinator(
         val ticket = generation.advance()
         val now = SystemClock.elapsedRealtime()
         val result = rules.interpret(text, commandContext, now)
-        if (result != Interpretation.Unknown) { handle(result); return }
+        if (result != Interpretation.Unknown) {
+            if (result is Interpretation.Clarify) {
+                val pending = NavigationCommandParser.extractPendingTarget(text)
+                if (pending != null) {
+                    commandContext = CommandContext(pending, now + 30_000)
+                }
+            }
+            handle(result)
+            return
+        }
         if (!store.installed()) {
             announce("지원하는 명령을 확인해 주세요. 홈, 설정, 안내 소리, 현재 상태, 도움말을 사용할 수 있어요.")
             return
@@ -234,6 +275,9 @@ class CommandCoordinator(
             }
             Interpretation.Unknown -> announce("지원하지 않는 명령이에요. 도움말이라고 말해 주세요.")
             is Interpretation.Execute -> execute(result.command)
+            is Interpretation.NavigateExternal -> navigateExternal(result.provider, result.destination)
+            is Interpretation.CloudTextQuestion -> handleCloudTextQuestion(result.question)
+            is Interpretation.CloudPhotoQuestion -> handleCloudPhotoQuestion(result.prompt)
         }
     }
 
@@ -241,6 +285,8 @@ class CommandCoordinator(
         when (command) {
             AppCommand.Home -> navigate("home")
             AppCommand.Settings -> navigate("settings")
+            AppCommand.HideScreen -> setScreenHidden(true)
+            AppCommand.ShowScreen -> setScreenHidden(false)
             AppCommand.SoundOn, AppCommand.SoundOff -> {
                 val enabled = command == AppCommand.SoundOn
                 setAudible(enabled)
@@ -248,20 +294,37 @@ class CommandCoordinator(
                 announce(if (enabled) "안내 소리를 켰어요." else "안내 소리를 껐어요.")
             }
             AppCommand.Status -> announce("음성 명령 대기 중이에요. 안내 소리는 ${if (snapshot.audible) "켜져" else "꺼져"} 있어요. ${snapshot.runtime.substringBefore(" · ")}.")
-            AppCommand.Help -> announce("홈으로 가, 설정 열어, 안내 소리 켜 또는 꺼, 현재 상태, 취소, 듣기 중지를 말할 수 있어요.")
+            AppCommand.Help -> announce("홈으로 가, 설정 열어, 네이버 지도 또는 카카오맵으로 길안내, 안내 소리 켜 또는 꺼, 화면 숨겨 또는 보여줘, 현재 상태, 취소, 듣기 중지를 말할 수 있어요.")
             AppCommand.Cancel -> {
                 commandContext = CommandContext()
                 clearNavigation()
+                clearExternalNavigation()
+                clearCloudQuestion()
                 announce("취소했어요.")
             }
             AppCommand.Stop -> {
                 commandContext = CommandContext()
                 clearNavigation()
+                clearExternalNavigation()
+                clearCloudQuestion()
                 stopPending = true
                 main.postDelayed(stopDeadline, 5_000)
                 announce("듣기를 중지해요.") { finishStop() }
             }
         }
+    }
+
+    private fun setScreenHidden(hidden: Boolean) {
+        if (!visible || screen != "home") {
+            announce("홈 화면이 표시될 때 화면 숨김 명령을 사용할 수 있어요.")
+            return
+        }
+        if (hidden && !screenVisibilityAvailable) {
+            announce("화면을 숨길 수 없는 상태예요. 화면의 안내를 확인해 주세요.")
+            return
+        }
+        emit(snapshot.copy(screenVisibilityId = generateEventId(), screenHidden = hidden))
+        announce(if (hidden) "화면을 숨겼어요. 화면을 탭하거나 화면 보여줘라고 말해 주세요." else "화면을 다시 표시할게요.")
     }
 
     private fun finishStop() {
@@ -294,13 +357,63 @@ class CommandCoordinator(
         })
     }
 
+    private fun navigateExternal(provider: NavigationProvider, destination: String) {
+        if (!DestinationValidator.isValid(destination)) {
+            announce("목적지를 올바르게 말씀해 주세요.")
+            return
+        }
+        val id = generateEventId()
+        commandContext = CommandContext()
+        emit(
+            snapshot.copy(
+                externalNavId = id,
+                externalNavProvider = provider.id,
+                externalNavDestination = destination,
+            )
+        )
+        main.postDelayed({
+            if (snapshot.externalNavId == id) clearExternalNavigation()
+        }, 30_000)
+
+        val message = "${provider.displayName}로 ${destination} 검색을 열어요."
+        if (!visible) {
+            notifyExternalNav(message, id, provider, destination)
+        }
+        announce(message)
+    }
+
     fun consumeNavigation(id: Long) {
         if (id != 0L && id == snapshot.navigationId) clearNavigation()
+        if (id != 0L && id == snapshot.externalNavId) clearExternalNavigation()
     }
 
     private fun clearNavigation() {
         emit(snapshot.copy(navigationId = 0, destination = ""))
         notifications.cancel(NAVIGATION_NOTIFICATION)
+    }
+
+    private fun clearExternalNavigation() {
+        emit(snapshot.copy(externalNavId = 0L, externalNavProvider = "", externalNavDestination = ""))
+        notifications.cancel(EXTERNAL_NAVIGATION_NOTIFICATION)
+    }
+
+    private fun notifyExternalNav(message: String, id: Long, provider: NavigationProvider, destination: String) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("externalNavId", id)
+            putExtra("externalNavProvider", provider.id)
+            putExtra("externalNavDestination", destination)
+        }
+        val pending = PendingIntent.getActivity(
+            context,
+            13,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_wakeword)
+            .setContentTitle("Aria 길안내").setContentText(message).setStyle(Notification.BigTextStyle().bigText(message))
+            .setContentIntent(pending).setAutoCancel(true).setOnlyAlertOnce(true).build()
+        runCatching { notifications.notify(EXTERNAL_NAVIGATION_NOTIFICATION, notification) }
     }
 
     private fun notifyResult(message: String, id: Long = 0, destination: String = "") {
@@ -320,6 +433,129 @@ class CommandCoordinator(
         runCatching { notifications.notify(if (navigation) NAVIGATION_NOTIFICATION else 11, notification) }
     }
 
+    private fun handleCloudTextQuestion(question: String) {
+        val id = generateEventId()
+        commandContext = CommandContext()
+        clearExternalNavigation()
+        emit(
+            snapshot.copy(
+                cloudQuestionId = id,
+                cloudQuestionType = "text",
+                cloudQuestionPrompt = question,
+                message = "질문 처리 중",
+                processing = true,
+            )
+        )
+        main.postDelayed({
+            if (snapshot.cloudQuestionId == id) {
+                clearCloudQuestion()
+                announce("질문 응답 시간이 초과되었어요.")
+            }
+        }, 60_000)
+        announce("질문을 확인하고 있어요.")
+    }
+
+    private fun handleCloudPhotoQuestion(prompt: String) {
+        val id = generateEventId()
+        commandContext = CommandContext()
+        clearExternalNavigation()
+        emit(
+            snapshot.copy(
+                cloudQuestionId = id,
+                cloudQuestionType = "photo",
+                cloudQuestionPrompt = prompt,
+                message = "사진 질문 처리 중",
+                processing = true,
+            )
+        )
+        main.postDelayed({
+            if (snapshot.cloudQuestionId == id) {
+                clearCloudQuestion()
+                announce("사진 질문 응답 시간이 초과되었어요.")
+            }
+        }, 60_000)
+        // Explicit disclosure when capturing and sending a photo
+        announce("사진을 촬영하여 Gemini에 질문을 보냅니다.")
+    }
+
+    fun consumeCloudQuestion(id: Long) {
+        // Keeps question identifier tracked until completion or cancel
+    }
+
+    fun cancelCloudQuestion(id: Long) {
+        if (id == 0L || id == snapshot.cloudQuestionId) {
+            clearCloudQuestion()
+            announce("질문을 취소했어요.")
+        }
+    }
+
+    fun speakHazardWarning(message: String) {
+        if (!active || message.isBlank()) return
+        val nextEventId = generateEventId()
+        emit(snapshot.copy(message = message, eventId = nextEventId, processing = false))
+        vibrate()
+        if (snapshot.audible) {
+            speech.speak(message, SpeechPriority.HazardWarning)
+        } else {
+            speech.stop()
+        }
+    }
+
+    fun preemptSpeech() {
+        speech.preemptSpeech()
+    }
+
+    fun speakCloudResponse(requestId: Long, responseText: String) {
+        if (!active || requestId == 0L || requestId != snapshot.cloudQuestionId || responseText.isBlank()) {
+            return
+        }
+        val nextEventId = generateEventId()
+        emit(
+            snapshot.copy(
+                message = responseText,
+                eventId = nextEventId,
+                processing = false,
+                cloudQuestionId = 0L,
+                cloudQuestionType = "",
+                cloudQuestionPrompt = "",
+            )
+        )
+        vibrate()
+        if (!visible) notifyResult(responseText)
+        if (snapshot.audible) {
+            speech.speak(responseText, SpeechPriority.CloudResponse)
+        }
+    }
+
+    fun reportCloudError(requestId: Long, errorMessage: String) {
+        if (!active || requestId == 0L || requestId != snapshot.cloudQuestionId) {
+            return
+        }
+        emit(
+            snapshot.copy(
+                cloudQuestionId = 0L,
+                cloudQuestionType = "",
+                cloudQuestionPrompt = "",
+                processing = false,
+            )
+        )
+        announce(errorMessage)
+    }
+
+    private fun clearCloudQuestion() {
+        speech.preemptCloudSpeech()
+        if (snapshot.cloudQuestionId != 0L) {
+            emit(
+                snapshot.copy(
+                    cloudQuestionId = 0L,
+                    cloudQuestionType = "",
+                    cloudQuestionPrompt = "",
+                    processing = false,
+                )
+            )
+        }
+    }
+
     fun stopped() {
         stopPending = false
         main.removeCallbacks(stopDeadline)
@@ -328,6 +564,8 @@ class CommandCoordinator(
         speech.stop()
         language.close()
         clearNavigation()
+        clearExternalNavigation()
+        clearCloudQuestion()
         emit(snapshot.copy(processing = false, runtime = "Gemma 대기"))
     }
 
@@ -336,6 +574,7 @@ class CommandCoordinator(
     companion object {
         private const val CHANNEL = "aria_commands"
         private const val NAVIGATION_NOTIFICATION = 12
+        private const val EXTERNAL_NAVIGATION_NOTIFICATION = 13
         private val eventSequenceLock = Any()
         private var lastGlobalEventId = 0L
 

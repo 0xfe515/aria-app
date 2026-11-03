@@ -1,0 +1,282 @@
+package com.ariateam.aria.navigation
+
+import com.ariateam.aria.command.CommandContext
+import com.ariateam.aria.command.Interpretation
+
+/**
+ * Parses Korean voice utterances for external navigation commands.
+ * Handles provider selection (Google Maps, Naver Map, KakaoMap), destination extraction,
+ * ambiguous providers, missing destinations, and two-turn conversational contexts.
+ */
+object NavigationCommandParser {
+    private const val CONTEXT_DEST_PREFIX = "nav_dest:"
+    private const val CONTEXT_PROV_PREFIX = "nav_prov:"
+
+    private val NEGATION_PATTERNS = listOf(
+        "하지마", "하지말", "켜지마", "끄지마", "열지마", "가지마", "숨기지마", "보여주지마",
+        "안내하지마", "길찾지마", "검색하지마",
+    )
+
+    private val COMPOUND_PATTERNS = listOf("그리고", "하고", "다음에")
+
+    private val APP_RESERVED_WORDS = setOf(
+        "홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동",
+        "설정", "설정열어", "설정열어줘", "설정으로가", "설정으로가줘", "설정으로이동", "설정화면열어",
+        "현재상태", "상태", "도움말", "사용법",
+        "화면숨겨", "화면꺼", "화면보여줘", "화면켜",
+        "소리켜", "소리꺼", "조용히해",
+    )
+
+    fun parse(text: String, context: CommandContext, now: Long): Interpretation? {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+
+        val compact = trimmed.lowercase().filter { it.isLetterOrDigit() }
+        if (compact.isEmpty()) return null
+
+        // Negation check
+        if (NEGATION_PATTERNS.any(compact::contains)) {
+            return Interpretation.Clarify("원하는 명령을 하나만 다시 말해 주세요.")
+        }
+
+        // Compound command check
+        if (COMPOUND_PATTERNS.any(compact::contains)) {
+            return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
+        }
+
+        // Cancel / Stop are handled by higher-level interpreter
+        if (compact in setOf("취소", "취소해", "취소해줘", "아니", "아니요", "됐어")) {
+            return null
+        }
+        if (compact in setOf("듣기중지", "듣기중지해", "그만들어", "그만들어줘", "음성인식꺼", "전체중지")) {
+            return null
+        }
+
+        // Check if this is an app-level command (Home, Settings, Screen, Sound)
+        if (compact in APP_RESERVED_WORDS) {
+            return null
+        }
+
+        // Check active conversational context (valid for 30s)
+        val activeTarget = context.target(now)
+        if (activeTarget != null) {
+            if (activeTarget.startsWith(CONTEXT_DEST_PREFIX)) {
+                val pendingDest = activeTarget.substring(CONTEXT_DEST_PREFIX.length).trim()
+                val detectedProviders = detectProviders(trimmed)
+                if (detectedProviders.size > 1) {
+                    return Interpretation.Clarify("네이버 지도, 카카오맵, 구글 지도 중 하나만 선택해 주세요.")
+                }
+                if (detectedProviders.size == 1) {
+                    return Interpretation.NavigateExternal(detectedProviders.first(), pendingDest)
+                }
+            } else if (activeTarget.startsWith(CONTEXT_PROV_PREFIX)) {
+                val providerId = activeTarget.substring(CONTEXT_PROV_PREFIX.length).trim()
+                val provider = NavigationProvider.fromId(providerId)
+                if (provider != null) {
+                    val candidate = extractDestinationCandidate(trimmed, null)
+                    if (DestinationValidator.isValid(candidate)) {
+                        return Interpretation.NavigateExternal(provider, candidate)
+                    }
+                }
+            }
+        }
+
+        val providers = detectProviders(trimmed)
+        if (providers.size > 1) {
+            return Interpretation.Clarify("네이버 지도, 카카오맵, 구글 지도 중 하나만 선택해 주세요.")
+        }
+
+        val provider = providers.firstOrNull()
+        val hasNavKeyword = containsNavigationKeyword(trimmed)
+
+        // If neither a provider nor a navigation verb is present, not a navigation command
+        if (provider == null && !hasNavKeyword) {
+            return null
+        }
+
+        val destinationCandidate = extractDestinationCandidate(trimmed, provider)
+
+        return when {
+            provider != null && DestinationValidator.isValid(destinationCandidate) -> {
+                Interpretation.NavigateExternal(provider, destinationCandidate)
+            }
+            provider != null && !DestinationValidator.isValid(destinationCandidate) -> {
+                Interpretation.Clarify("${provider.displayName}로 갈 목적지를 말씀해 주세요.")
+            }
+            provider == null && DestinationValidator.isValid(destinationCandidate) -> {
+                Interpretation.Clarify("네이버 지도, 카카오맵, 구글 지도 중 어떤 지도로 안내할까요?")
+            }
+            else -> {
+                Interpretation.Clarify("어디로 갈까요? 목적지를 말씀해 주세요.")
+            }
+        }
+    }
+
+    private fun detectProviders(text: String): Set<NavigationProvider> {
+        val normalized = text.lowercase()
+        val found = mutableSetOf<NavigationProvider>()
+
+        // Naver Map
+        if (listOf("네이버 지도", "네이버지도", "네이버 맵", "네이버맵").any(normalized::contains) ||
+            Regex("""\b네이버(로|에서)?\b""").containsMatchIn(normalized) ||
+            (normalized.contains("네이버") && !normalized.contains("네이버 본사") && !normalized.contains("네이버 사옥"))
+        ) {
+            found.add(NavigationProvider.Naver)
+        }
+
+        // KakaoMap
+        if (listOf("카카오 맵", "카카오맵", "카카오 지도", "카카오지도", "카카오 내비", "카카오내비").any(normalized::contains) ||
+            Regex("""\b카카오(로|에서)?\b""").containsMatchIn(normalized) ||
+            (normalized.contains("카카오") && !normalized.contains("카카오 본사") && !normalized.contains("카카오 오피스"))
+        ) {
+            found.add(NavigationProvider.Kakao)
+        }
+
+        // Google Maps
+        if (listOf("구글 지도", "구글지도", "구글 맵", "구글맵").any(normalized::contains) ||
+            Regex("""\b구글(로|에서)?\b""").containsMatchIn(normalized) ||
+            (normalized.contains("구글") && !normalized.contains("구글 코리아") && !normalized.contains("구글 본사"))
+        ) {
+            found.add(NavigationProvider.Google)
+        }
+
+        return found
+    }
+
+    private fun containsNavigationKeyword(text: String): Boolean {
+        val keywords = listOf(
+            "길안내", "길찾기", "길찾아", "안내해", "안내 해", "가자", "가줘", "가 주세요", "가는길", "가는 길",
+        )
+        return keywords.any(text::contains)
+    }
+
+    fun extractDestinationCandidate(text: String, provider: NavigationProvider?): String {
+        var result = text.trim()
+
+        // 1. Remove provider mentions (longer/more specific patterns first)
+        if (provider != null) {
+            val providerPatterns = when (provider) {
+                NavigationProvider.Naver -> listOf(
+                    "네이버 지도로", "네이버지도로", "네이버 지도에서", "네이버지도에서", "네이버 지도", "네이버지도",
+                    "네이버 맵으로", "네이버맵으로", "네이버 맵에서", "네이버맵에서", "네이버 맵", "네이버맵",
+                    "네이버로", "네이버에서", "네이버",
+                )
+                NavigationProvider.Kakao -> listOf(
+                    "카카오 지도로", "카카오지도로", "카카오 지도에서", "카카오지도에서", "카카오 지도", "카카오지도",
+                    "카카오 맵으로", "카카오맵으로", "카카오 맵에서", "카카오맵에서", "카카오 맵", "카카오맵",
+                    "카카오 내비로", "카카오내비로", "카카오 내비에서", "카카오내비에서", "카카오 내비", "카카오내비",
+                    "카카오로", "카카오에서", "카카오",
+                )
+                NavigationProvider.Google -> listOf(
+                    "구글 지도로", "구글지도로", "구글 지도에서", "구글지도에서", "구글 지도", "구글지도",
+                    "구글 맵으로", "구글맵으로", "구글 맵에서", "구글맵에서", "구글 맵", "구글맵",
+                    "구글로", "구글에서", "구글",
+                )
+            }
+            for (pattern in providerPatterns) {
+                result = result.replace(pattern, " ")
+            }
+        }
+        result = result.trim()
+
+        // Remove any orphan leading particles leftover from provider postpositions
+        val leadingParticles = listOf("으로", "로", "에서")
+        for (particle in leadingParticles) {
+            if (result.startsWith(particle) && (result.length == particle.length || result[particle.length].isWhitespace())) {
+                result = result.substring(particle.length).trim()
+                break
+            }
+        }
+
+        // 2. Remove leading action prefixes
+        val prefixes = listOf(
+            "길안내해줘", "길안내 해줘", "길안내", "길찾기", "안내해줘", "안내 해줘", "안내",
+            "가는길", "가는 길",
+        )
+        for (prefix in prefixes) {
+            if (result.startsWith(prefix)) {
+                result = result.substring(prefix.length).trim()
+            }
+        }
+
+        // 3. Remove trailing action suffixes
+        val suffixes = listOf(
+            "가는길 알려줘", "가는 길 알려줘", "가는길 안내해줘", "가는 길 안내해줘",
+            "가는방법 알려줘", "가는 방법 알려줘", "가는길", "가는 길",
+            "길안내해줘", "길안내 해줘", "길안내해주세요", "길안내 해주세요", "길안내해", "길안내 해", "길안내",
+            "길찾기해줘", "길찾기 해줘", "길찾아줘", "길찾아 줘", "길찾기",
+            "안내해줘", "안내 해줘", "안내해주세요", "안내 해주세요", "안내해", "안내 해", "안내",
+            "찾아봐줘", "찾아봐 줘", "찾아봐", "찾아줘", "찾아 줘",
+            "알려줘", "알려 줘",
+            "가 주세요", "가주세요", "가줘", "가자",
+            "이동해줘", "이동 해줘", "이동하자", "이동",
+            "검색해줘", "검색 해줘", "검색",
+            "열어줘", "열어 줘", "열어",
+            "보여줘", "보여 줘",
+        )
+        for (suffix in suffixes) {
+            if (result.endsWith(suffix)) {
+                result = result.substring(0, result.length - suffix.length).trim()
+            }
+        }
+
+        // 4. Remove trailing destination particles: "까지", "으로", "로", "에"
+        // Preserve Korean road/street names ending with "로" or "대로" (e.g. 대학로, 을지로, 충무로, 테헤란로, 세종대로)
+        val preservedRoadEndings = listOf(
+            "대로", "순환로", "간선로", "북로", "남로",
+            "대학로", "을지로", "충무로", "퇴계로", "테헤란로", "종로", "구로",
+            "압구정로", "도산대로", "남대문로", "한강대로", "마포대로", "백범로",
+            "율곡로", "사직로", "세종로", "창경궁로", "동호로", "다산로",
+        )
+
+        when {
+            result.endsWith("로로") && result.length > 2 -> {
+                result = result.substring(0, result.length - 1).trim()
+            }
+            result.endsWith("으로") && result.length > 3 -> {
+                result = result.substring(0, result.length - 2).trim()
+            }
+            result.endsWith("까지") && result.length > 3 -> {
+                result = result.substring(0, result.length - 2).trim()
+            }
+            result.endsWith("에") && result.length > 2 -> {
+                result = result.substring(0, result.length - 1).trim()
+            }
+            result.endsWith("로") && result.length > 2 -> {
+                val isPreserved = preservedRoadEndings.any { result.endsWith(it) }
+                if (!isPreserved) {
+                    result = result.substring(0, result.length - 1).trim()
+                }
+            }
+        }
+
+        return DestinationValidator.sanitize(result)
+    }
+
+    fun extractPendingTarget(text: String): String? {
+        val trimmed = text.trim()
+        val providers = detectProviders(trimmed)
+        if (providers.size > 1) return null
+
+        val provider = providers.firstOrNull()
+        val candidate = extractDestinationCandidate(trimmed, provider)
+
+        return when {
+            provider != null && !DestinationValidator.isValid(candidate) -> {
+                "$CONTEXT_PROV_PREFIX${provider.id}"
+            }
+            provider == null && DestinationValidator.isValid(candidate) -> {
+                "$CONTEXT_DEST_PREFIX$candidate"
+            }
+            else -> null
+        }
+    }
+
+    fun makeContextTarget(destination: String?, provider: NavigationProvider?): String? {
+        return when {
+            destination != null && destination.isNotBlank() -> "$CONTEXT_DEST_PREFIX$destination"
+            provider != null -> "$CONTEXT_PROV_PREFIX${provider.id}"
+            else -> null
+        }
+    }
+}

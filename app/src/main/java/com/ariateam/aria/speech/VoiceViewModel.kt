@@ -148,6 +148,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         try { remote?.setUiScreen(screen) } catch (_: RemoteException) { handleDeath() }
     }
     fun consumeNavigation(id: Long) { try { remote?.consumeNavigation(id) } catch (_: RemoteException) { handleDeath() } }
+    fun consumeCloudQuestion(id: Long) { try { remote?.consumeCloudQuestion(id) } catch (_: RemoteException) { handleDeath() } }
+    fun speakCloudResponse(id: Long, text: String) { try { remote?.speakCloudResponse(id, text) } catch (_: RemoteException) { handleDeath() } }
+    fun reportCloudError(id: Long, error: String) { try { remote?.reportCloudError(id, error) } catch (_: RemoteException) { handleDeath() } }
+    fun cancelCloudQuestion(id: Long) { try { remote?.cancelCloudQuestion(id) } catch (_: RemoteException) { handleDeath() } }
+    fun speakHazardWarning(message: String) { try { remote?.speakHazardWarning(message) } catch (_: RemoteException) { handleDeath() } }
+    fun preemptSpeech() { try { remote?.preemptSpeech() } catch (_: RemoteException) { handleDeath() } }
     fun downloadModel(mobileData: Boolean) { try { remote?.downloadModel(mobileData) } catch (_: RemoteException) { handleDeath() } }
     fun cancelModelDownload() { try { remote?.cancelModelDownload() } catch (_: RemoteException) { handleDeath() } }
     fun deleteModel() { try { remote?.deleteModel() } catch (_: RemoteException) { handleDeath() } }

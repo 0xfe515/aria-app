@@ -25,7 +25,8 @@ enum class VisionBackendType(val label: String) {
 
 /**
  * Policy governing vision inference execution.
- * Production enforces GPU-only inference; CPU reference is isolated to explicit diagnostic testing.
+ * Production prefers GPU and permits CPU only as an explicitly reported GPU-startup fallback;
+ * diagnostic CPU reference sessions remain isolated to explicit testing.
  */
 internal interface VisionInferencePolicy {
     val allowCpuReferenceForTesting: Boolean
@@ -46,9 +47,7 @@ internal data class DiagnosticInferencePolicy(
  */
 internal open class GpuEnvironment {
     open fun isGpuSupported(): Boolean {
-        return runCatching {
-            CompatibilityList().use { it.isDelegateSupportedOnThisDevice }
-        }.getOrDefault(false)
+        return CompatibilityList().use { it.isDelegateSupportedOnThisDevice }
     }
 
     open fun createDelegate(precisionLossAllowed: Boolean): GpuDelegate {
@@ -101,13 +100,19 @@ data class VisionInferenceOutput(
  * Thread-safe LiteRT GPU segmentation runner with atomic session commits, strict
  * local resource disposal on failure, and single-session ownership.
  *
- * Production enforces GPU-only FP32 model inference. CPU reference execution is isolated
- * to explicitly injected [inferencePolicy] for diagnostic parity testing.
+ * Production prefers GPU FP32 inference and reports a degraded CPU fallback when GPU startup fails.
+ * Diagnostic CPU reference configuration remains isolated to explicitly injected [inferencePolicy].
  */
 class LiteRtVisionSegmenter internal constructor(
     private val defaultCpuThreads: Int = VisionContract.DEFAULT_CPU_THREADS,
     internal val inferencePolicy: VisionInferencePolicy = ProductionGpuOnlyPolicy,
     internal val gpuEnvironment: GpuEnvironment = GpuEnvironment(),
+    private val sessionBuilderForTesting: ((
+        MappedByteBuffer,
+        VisionBackendType,
+        Int,
+        Boolean,
+    ) -> InferenceSession)? = null,
 ) : AutoCloseable {
     constructor() : this(VisionContract.DEFAULT_CPU_THREADS, ProductionGpuOnlyPolicy, GpuEnvironment())
     constructor(defaultCpuThreads: Int) : this(defaultCpuThreads, ProductionGpuOnlyPolicy, GpuEnvironment())
@@ -141,16 +146,56 @@ class LiteRtVisionSegmenter internal constructor(
     }
 
     internal class InferenceSession(
-        val interpreter: Interpreter,
+        val interpreter: Interpreter?,
         val gpuDelegate: GpuDelegate?,
         val mappedBuffer: MappedByteBuffer,
         val backendType: VisionBackendType,
         val cpuThreads: Int,
-        val backendDescription: String,
+        backendDescription: String,
+        private val runInferenceForTesting: ((ByteBuffer, ByteBuffer) -> Unit)? = null,
+        private val closeForTesting: (() -> Unit)? = null,
     ) : AutoCloseable {
+        var backendDescription: String = backendDescription
+            private set
+        var gpuFallbackCause: Throwable? = null
+            private set
+
+        fun run(input: ByteBuffer, output: ByteBuffer) {
+            val runtime = interpreter
+            if (runtime != null) {
+                runtime.run(input, output)
+            } else {
+                checkNotNull(runInferenceForTesting) { "Session has no inference runtime" }(input, output)
+            }
+        }
+
+        fun markGpuFallback(cause: Throwable) {
+            gpuFallbackCause = cause
+            val detail = "${cause.cause?.javaClass?.simpleName ?: cause.javaClass.simpleName}: " +
+                (cause.cause?.message ?: cause.message.orEmpty()).take(160)
+            backendDescription = "LiteRT CPU FP32 [저성능 폴백: GPU 초기화 실패 ($detail), XNNPACK, ${cpuThreads}스레드]"
+        }
+
         override fun close() {
-            runCatching { interpreter.close() }
+            runCatching { closeForTesting?.invoke() ?: interpreter?.close() }
             runCatching { gpuDelegate?.close() }
+        }
+    }
+
+    internal class GpuInitializationException(message: String, cause: Throwable? = null) :
+        IllegalStateException(message, cause)
+
+    internal class ModelValidationException(message: String) : IllegalArgumentException(message)
+
+    internal class CpuFallbackException(
+        val gpuFailure: Throwable,
+        val cpuFailure: Throwable,
+    ) : IllegalStateException(
+        "LiteRT GPU initialization failed and the low-performance CPU fallback could not be initialized.",
+        cpuFailure,
+    ) {
+        init {
+            addSuppressed(gpuFailure)
         }
     }
 
@@ -166,6 +211,14 @@ class LiteRtVisionSegmenter internal constructor(
 
     @Volatile
     var activeBackendDescription: String = "N/A (모델 미적용)"
+        private set
+
+    @Volatile
+    var activeBackendType: VisionBackendType? = null
+        private set
+
+    @Volatile
+    var gpuFallbackCause: Throwable? = null
         private set
 
     @Volatile
@@ -209,9 +262,8 @@ class LiteRtVisionSegmenter internal constructor(
      * Builds and validates a candidate session off the lock without touching any active session.
      * Guarantees all candidate locals are closed if building throws, preventing GPU or native leaks.
      *
-     * Production enforces GPU-only inference (FP32 sustained speed).
-     * If GPU is unsupported or fails to initialize, throws an exception immediately without falling back to CPU.
-     * CPU inference is only allowed when explicitly enabled via [inferencePolicy.allowCpuReferenceForTesting].
+     * GPU remains preferred. Production falls back to explicitly degraded CPU inference only when
+     * GPU initialization fails; model contract validation errors are never treated as backend failures.
      */
     internal fun buildSession(
         mappedBuffer: MappedByteBuffer,
@@ -224,9 +276,105 @@ class LiteRtVisionSegmenter internal constructor(
         if (requestedBackend == VisionBackendType.CPU) {
             if (!inferencePolicy.allowCpuReferenceForTesting) {
                 throw UnsupportedOperationException(
-                    "CPU inference is disabled in production. Aria enforces LiteRT GPU-only inference."
+                    "Manual CPU backend configuration is disabled in production; CPU is reserved for GPU-startup fallback."
                 )
             }
+            return createRequestedSession(mappedBuffer, requestedBackend, cpuThreads, precisionLossAllowed)
+        }
+
+        return try {
+            createRequestedSession(mappedBuffer, VisionBackendType.GPU, cpuThreads, precisionLossAllowed)
+        } catch (failure: ModelValidationException) {
+            throw failure
+        } catch (gpuFailure: GpuInitializationException) {
+            if (inferencePolicy.allowCpuReferenceForTesting) throw gpuFailure
+            try {
+                createCpuFallbackSession(mappedBuffer, cpuThreads, gpuFailure)
+            } catch (cpuFailure: Exception) {
+                throw CpuFallbackException(gpuFailure, cpuFailure)
+            } catch (cpuFailure: LinkageError) {
+                throw CpuFallbackException(gpuFailure, cpuFailure)
+            }
+        }
+    }
+
+    private fun createCpuFallbackSession(
+        mappedBuffer: MappedByteBuffer,
+        cpuThreads: Int,
+        gpuFailure: GpuInitializationException,
+    ): InferenceSession {
+        val session = createRequestedSession(
+            mappedBuffer = mappedBuffer,
+            requestedBackend = VisionBackendType.CPU,
+            threads = cpuThreads,
+            precisionLossAllowed = false,
+            allowProductionCpuFallback = true,
+        )
+        if (session.backendType != VisionBackendType.CPU) {
+            session.close()
+            throw IllegalStateException("CPU fallback builder returned ${session.backendType}, not CPU.")
+        }
+        session.markGpuFallback(gpuFailure)
+        return session
+    }
+
+    private fun createRequestedSession(
+        mappedBuffer: MappedByteBuffer,
+        requestedBackend: VisionBackendType,
+        threads: Int,
+        precisionLossAllowed: Boolean,
+        allowProductionCpuFallback: Boolean = false,
+    ): InferenceSession {
+        if (requestedBackend == VisionBackendType.CPU &&
+            !inferencePolicy.allowCpuReferenceForTesting &&
+            !allowProductionCpuFallback
+        ) {
+            throw UnsupportedOperationException(
+                "CPU inference is disabled in production. Aria permits CPU only as a GPU-failure fallback."
+            )
+        }
+        if (requestedBackend == VisionBackendType.GPU) {
+            val supported = try {
+                gpuEnvironment.isGpuSupported()
+            } catch (cause: Exception) {
+                throw GpuInitializationException("Unable to query LiteRT GPU support.", cause)
+            } catch (cause: LinkageError) {
+                throw GpuInitializationException("Unable to query LiteRT GPU support.", cause)
+            }
+            if (!supported) {
+                throw GpuInitializationException(
+                    "LiteRT GPU delegate is not supported on this device.",
+                    UnsupportedOperationException("GPU delegate unsupported on this device"),
+                )
+            }
+        }
+        return try {
+            sessionBuilderForTesting?.invoke(mappedBuffer, requestedBackend, threads, precisionLossAllowed)
+                ?: buildRuntimeSession(mappedBuffer, requestedBackend, threads, precisionLossAllowed)
+        } catch (failure: ModelValidationException) {
+            throw failure
+        } catch (failure: GpuInitializationException) {
+            throw failure
+        } catch (failure: Exception) {
+            if (requestedBackend == VisionBackendType.GPU) {
+                throw GpuInitializationException("LiteRT GPU session initialization failed.", failure)
+            }
+            throw failure
+        } catch (failure: LinkageError) {
+            if (requestedBackend == VisionBackendType.GPU) {
+                throw GpuInitializationException("LiteRT GPU runtime is unavailable.", failure)
+            }
+            throw failure
+        }
+    }
+
+    private fun buildRuntimeSession(
+        mappedBuffer: MappedByteBuffer,
+        requestedBackend: VisionBackendType,
+        cpuThreads: Int,
+        precisionLossAllowed: Boolean,
+    ): InferenceSession {
+        if (requestedBackend == VisionBackendType.CPU) {
             var candidateInterpreter: Interpreter? = null
             try {
                 val options = Interpreter.Options().apply {
@@ -237,17 +385,18 @@ class LiteRtVisionSegmenter internal constructor(
                 candidateInterpreter.allocateTensors()
                 when (val specResult = inspectInterpreterSpec(candidateInterpreter)) {
                     is VisionContract.SpecValidationResult.Valid -> {
+                        val purpose = if (inferencePolicy.allowCpuReferenceForTesting) "[진단 전용]" else "[저성능 GPU 폴백]"
                         return InferenceSession(
                             interpreter = candidateInterpreter,
                             gpuDelegate = null,
                             mappedBuffer = mappedBuffer,
                             backendType = VisionBackendType.CPU,
                             cpuThreads = cpuThreads,
-                            backendDescription = "LiteRT CPU FP32 [진단 전용] (XNNPACK, ${cpuThreads}스레드)",
+                            backendDescription = "LiteRT CPU FP32 $purpose (XNNPACK, ${cpuThreads}스레드)",
                         )
                     }
                     is VisionContract.SpecValidationResult.Invalid -> {
-                        throw IllegalArgumentException(specResult.detail)
+                        throw ModelValidationException(specResult.detail)
                     }
                 }
             } catch (t: Throwable) {
@@ -255,12 +404,6 @@ class LiteRtVisionSegmenter internal constructor(
                 throw t
             }
         }
-
-        // Requested GPU
-        if (!gpuEnvironment.isGpuSupported()) {
-            throw IllegalStateException("LiteRT GPU delegate is not supported on this device.")
-        }
-
         val effectivePrecisionLoss = if (inferencePolicy.allowCpuReferenceForTesting) {
             precisionLossAllowed
         } else {
@@ -290,7 +433,7 @@ class LiteRtVisionSegmenter internal constructor(
                     )
                 }
                 is VisionContract.SpecValidationResult.Invalid -> {
-                    throw IllegalArgumentException(specResult.detail)
+                    throw ModelValidationException(specResult.detail)
                 }
             }
         } catch (t: Throwable) {
@@ -304,19 +447,26 @@ class LiteRtVisionSegmenter internal constructor(
     /**
      * Atomically swaps in [newSession] and closes any prior session exactly once.
      */
-    internal fun commitSession(newSession: InferenceSession?) {
+    internal fun commitSession(
+        newSession: InferenceSession?,
+        preferredBackend: VisionBackendType = newSession?.backendType ?: VisionBackendType.GPU,
+        preferredThreads: Int = newSession?.cpuThreads ?: defaultCpuThreads.coerceIn(1, 8),
+    ) {
         val oldSession: InferenceSession?
         synchronized(lock) {
             oldSession = activeSession
             activeSession = newSession
             isReady = newSession != null
+            configuredBackend = preferredBackend
+            configuredCpuThreads = preferredThreads
             if (newSession != null) {
-                configuredBackend = newSession.backendType
-                configuredCpuThreads = newSession.cpuThreads
+                activeBackendType = newSession.backendType
                 activeBackendDescription = newSession.backendDescription
+                gpuFallbackCause = newSession.gpuFallbackCause
             } else {
-                configuredBackend = VisionBackendType.GPU
+                activeBackendType = null
                 activeBackendDescription = "N/A (모델 미적용)"
+                gpuFallbackCause = null
             }
         }
         // Close prior session exactly once
@@ -334,7 +484,7 @@ class LiteRtVisionSegmenter internal constructor(
     ) {
         if (backend == VisionBackendType.CPU && !inferencePolicy.allowCpuReferenceForTesting) {
             throw IllegalArgumentException(
-                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+                "Manual CPU backend configuration is disabled in production; CPU is reserved for GPU-startup fallback."
             )
         }
         val targetThreads = threads.coerceIn(1, 8)
@@ -348,7 +498,7 @@ class LiteRtVisionSegmenter internal constructor(
                 activeSession?.mappedBuffer
             } ?: return@runOnInferenceThread
             val candidate = buildSession(mapped, backend, targetThreads, precisionLossAllowed)
-            commitSession(candidate)
+            commitSession(candidate, backend, targetThreads)
         }
     }
 
@@ -406,13 +556,13 @@ class LiteRtVisionSegmenter internal constructor(
     ) {
         if (backend == VisionBackendType.CPU && !inferencePolicy.allowCpuReferenceForTesting) {
             throw IllegalArgumentException(
-                "CPU backend is disabled in production. Aria enforces LiteRT GPU-only inference."
+                "Manual CPU backend configuration is disabled in production; CPU is reserved for GPU-startup fallback."
             )
         }
         val targetThreads = threads.coerceIn(1, 8)
         runOnInferenceThread {
             val candidate = buildSession(session.mappedBuffer, backend, targetThreads, precisionLossAllowed)
-            commitSession(candidate)
+            commitSession(candidate, backend, targetThreads)
         }
     }
 
@@ -446,7 +596,7 @@ class LiteRtVisionSegmenter internal constructor(
                 outputByteBuffer.clear()
 
                 val invokeStart = SystemClock.elapsedRealtimeNanos()
-                session.interpreter.run(inputByteBuffer, outputByteBuffer)
+                session.run(inputByteBuffer, outputByteBuffer)
                 val invokeDurationNanos = (SystemClock.elapsedRealtimeNanos() - invokeStart).coerceAtLeast(0L)
 
                 val postStart = SystemClock.elapsedRealtimeNanos()
@@ -498,7 +648,7 @@ class LiteRtVisionSegmenter internal constructor(
                 inputByteBuffer.rewind()
                 outputByteBuffer.clear()
                 val start = SystemClock.elapsedRealtimeNanos()
-                session.interpreter.run(inputByteBuffer, outputByteBuffer)
+                session.run(inputByteBuffer, outputByteBuffer)
                 val duration = (SystemClock.elapsedRealtimeNanos() - start).coerceAtLeast(0L)
                 outputAsFloatBuffer().get(destinationArray, 0, VisionContract.OUTPUT_FLOATS)
                 duration

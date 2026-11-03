@@ -1073,7 +1073,7 @@ class VisionPipelineUnitTest {
                 segmenter.configureBackend(VisionBackendType.CPU)
             } catch (e: IllegalArgumentException) {
                 cpuRejected = true
-                assertTrue(e.message?.contains("CPU backend is disabled in production") == true)
+                assertTrue(e.message?.contains("Manual CPU backend configuration is disabled in production") == true)
             }
             assertTrue("configureBackend(CPU) must be rejected with IllegalArgumentException", cpuRejected)
             assertEquals("Backend must remain GPU after rejected CPU selection", VisionBackendType.GPU, segmenter.configuredBackend)
@@ -1113,7 +1113,7 @@ class VisionPipelineUnitTest {
                     segmenter.buildSession(mapped, VisionBackendType.CPU, 4)
                 } catch (e: UnsupportedOperationException) {
                     rejected = true
-                    assertTrue(e.message?.contains("CPU inference is disabled in production") == true)
+                    assertTrue(e.message?.contains("Manual CPU backend configuration is disabled in production") == true)
                 }
                 assertTrue("buildSession with CPU must throw UnsupportedOperationException", rejected)
             } finally {
@@ -1125,7 +1125,7 @@ class VisionPipelineUnitTest {
     }
 
     @Test
-    fun segmenterGpuPolicy_unsupportedGpuThrowsImmediatelyWithoutCpuFallback() {
+    fun segmenterGpuPolicy_unsupportedGpuActivatesExplicitCpuFallback() {
         val tempFile = File.createTempFile("dummy_model", ".tflite")
         tempFile.writeBytes(ByteArray(64))
         try {
@@ -1137,17 +1137,19 @@ class VisionPipelineUnitTest {
             }
             val segmenter = LiteRtVisionSegmenter(
                 gpuEnvironment = unsupportedEnv,
+                sessionBuilderForTesting = { buffer, backend, threads, _ ->
+                    assertEquals(VisionBackendType.CPU, backend)
+                    testSession(buffer, backend, threads)
+                },
             )
             try {
-                var thrown = false
-                try {
-                    segmenter.buildSession(mapped, VisionBackendType.GPU, 4)
-                } catch (e: IllegalStateException) {
-                    thrown = true
-                    assertTrue(e.message?.contains("LiteRT GPU delegate is not supported on this device") == true)
-                }
-                assertTrue("Unsupported GPU must throw IllegalStateException without CPU fallback", thrown)
+                segmenter.activatePreparedSession(LiteRtVisionSegmenter.PreparedModelSession(mapped))
                 assertEquals(VisionBackendType.GPU, segmenter.configuredBackend)
+                assertEquals(VisionBackendType.CPU, segmenter.activeBackendType)
+                assertTrue(segmenter.activeBackendDescription.contains("저성능 폴백"))
+                assertTrue(segmenter.activeBackendDescription.contains("GPU 초기화 실패"))
+                assertTrue(segmenter.gpuFallbackCause?.cause is UnsupportedOperationException)
+                assertTrue(segmenter.isReady)
             } finally {
                 segmenter.close()
             }
@@ -1157,7 +1159,7 @@ class VisionPipelineUnitTest {
     }
 
     @Test
-    fun segmenterGpuPolicy_failedGpuInitCleansUpAndRethrowsWithoutCpuFallback() {
+    fun segmenterGpuPolicy_failedGpuInitUsesCpuOnlyInProduction() {
         val tempFile = File.createTempFile("dummy_model", ".tflite")
         tempFile.writeBytes(ByteArray(64))
         try {
@@ -1171,17 +1173,18 @@ class VisionPipelineUnitTest {
                 }
             }
             val segmenter = LiteRtVisionSegmenter(
+                inferencePolicy = DiagnosticInferencePolicy(allowCpuReferenceForTesting = true),
                 gpuEnvironment = failingEnv,
             )
             try {
                 var thrown = false
                 try {
                     segmenter.buildSession(mapped, VisionBackendType.GPU, 4)
-                } catch (e: RuntimeException) {
+                } catch (e: LiteRtVisionSegmenter.GpuInitializationException) {
                     thrown = true
-                    assertEquals("Simulated GPU shader compilation failure", e.message)
+                    assertEquals("Simulated GPU shader compilation failure", e.cause?.message)
                 }
-                assertTrue("Failing GPU delegate init must rethrow without CPU fallback", thrown)
+                assertTrue("Diagnostic GPU failure must propagate without production fallback", thrown)
                 assertEquals(VisionBackendType.GPU, segmenter.configuredBackend)
             } finally {
                 segmenter.close()
@@ -1190,6 +1193,128 @@ class VisionPipelineUnitTest {
             tempFile.delete()
         }
     }
+
+    @Test
+    fun segmenterGpuPolicy_cpuFallbackFailureRetainsBothCausesAndLeavesInferenceUnavailable() {
+        val tempFile = File.createTempFile("dummy_model", ".tflite")
+        tempFile.writeBytes(ByteArray(64))
+        try {
+            val mapped = java.io.RandomAccessFile(tempFile, "r").use { raf ->
+                raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0L, raf.length())
+            }
+            val unsupportedEnv = object : GpuEnvironment() {
+                override fun isGpuSupported(): Boolean = false
+            }
+            val segmenter = LiteRtVisionSegmenter(
+                gpuEnvironment = unsupportedEnv,
+                sessionBuilderForTesting = { _, backend, _, _ ->
+                    assertEquals(VisionBackendType.CPU, backend)
+                    throw IllegalStateException("Simulated CPU runtime initialization failure")
+                },
+            )
+            try {
+                var failure: LiteRtVisionSegmenter.CpuFallbackException? = null
+                try {
+                    segmenter.activatePreparedSession(LiteRtVisionSegmenter.PreparedModelSession(mapped))
+                } catch (error: LiteRtVisionSegmenter.CpuFallbackException) {
+                    failure = error
+                }
+                assertNotNull(failure)
+                assertTrue(failure!!.gpuFailure.cause is UnsupportedOperationException)
+                assertEquals("Simulated CPU runtime initialization failure", failure.cpuFailure.message)
+                assertFalse(segmenter.isReady)
+                assertNull(segmenter.activeBackendType)
+            } finally {
+                segmenter.close()
+            }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    @Test
+    fun segmenterGpuPolicy_modelValidationErrorNeverTriggersCpuFallback() {
+        val tempFile = File.createTempFile("dummy_model", ".tflite")
+        tempFile.writeBytes(ByteArray(64))
+        try {
+            val mapped = java.io.RandomAccessFile(tempFile, "r").use { raf ->
+                raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0L, raf.length())
+            }
+            val supportedEnv = object : GpuEnvironment() {
+                override fun isGpuSupported(): Boolean = true
+            }
+            var cpuAttempted = false
+            val segmenter = LiteRtVisionSegmenter(
+                gpuEnvironment = supportedEnv,
+                sessionBuilderForTesting = { _, backend, _, _ ->
+                    if (backend == VisionBackendType.CPU) cpuAttempted = true
+                    throw LiteRtVisionSegmenter.ModelValidationException("Invalid output tensor shape")
+                },
+            )
+            try {
+                var validationFailure: LiteRtVisionSegmenter.ModelValidationException? = null
+                try {
+                    segmenter.activatePreparedSession(LiteRtVisionSegmenter.PreparedModelSession(mapped))
+                } catch (error: LiteRtVisionSegmenter.ModelValidationException) {
+                    validationFailure = error
+                }
+                assertNotNull(validationFailure)
+                assertFalse("Model validation failure must not be interpreted as GPU failure", cpuAttempted)
+                assertFalse(segmenter.isReady)
+                assertNull(segmenter.gpuFallbackCause)
+            } finally {
+                segmenter.close()
+            }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    @Test
+    fun segmenterGpuPolicy_gpuSuccessKeepsConfiguredAndActiveBackendGpu() {
+        val tempFile = File.createTempFile("dummy_model", ".tflite")
+        tempFile.writeBytes(ByteArray(64))
+        try {
+            val mapped = java.io.RandomAccessFile(tempFile, "r").use { raf ->
+                raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0L, raf.length())
+            }
+            val supportedEnv = object : GpuEnvironment() {
+                override fun isGpuSupported(): Boolean = true
+            }
+            val segmenter = LiteRtVisionSegmenter(
+                gpuEnvironment = supportedEnv,
+                sessionBuilderForTesting = { buffer, backend, threads, _ ->
+                    assertEquals(VisionBackendType.GPU, backend)
+                    testSession(buffer, backend, threads)
+                },
+            )
+            try {
+                segmenter.activatePreparedSession(LiteRtVisionSegmenter.PreparedModelSession(mapped))
+                assertEquals(VisionBackendType.GPU, segmenter.configuredBackend)
+                assertEquals(VisionBackendType.GPU, segmenter.activeBackendType)
+                assertNull(segmenter.gpuFallbackCause)
+                assertTrue(segmenter.isReady)
+            } finally {
+                segmenter.close()
+            }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private fun testSession(
+        mapped: java.nio.MappedByteBuffer,
+        backend: VisionBackendType,
+        threads: Int,
+    ) = LiteRtVisionSegmenter.InferenceSession(
+        interpreter = null,
+        gpuDelegate = null,
+        mappedBuffer = mapped,
+        backendType = backend,
+        cpuThreads = threads,
+        backendDescription = "Test ${backend.label}",
+        runInferenceForTesting = { _, _ -> },
+    )
 
     @Test
     fun visionUiStateAndMetadata_defaultsToGpu() {
