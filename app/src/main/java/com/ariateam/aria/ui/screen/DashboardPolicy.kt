@@ -197,10 +197,12 @@ fun evaluateHeadingPresentation(
 }
 
 /**
- * Adaptive sizing calculator for the enlarged Home vision dashboard.
+ * Adaptive sizing calculator for the Home vision overlay.
  *
- * Ensures expanded usable dimensions while accommodating portrait, landscape,
- * small screens, and large accessibility font scaling.
+ * Restores established layout proportions (~224dp x 150dp portrait, ~210dp x 140dp landscape)
+ * and constrains overlay bounds so it visually floats in the upper corner without occluding
+ * or displacing underlying Home controls, shrinking when necessary on small screens or
+ * high accessibility font scaling.
  */
 object DashboardSizing {
 
@@ -216,16 +218,36 @@ object DashboardSizing {
         fontScale: Float = 1.0f,
     ): Dimensions {
         return if (isLandscape) {
-            val targetWidth = (screenWidthDp * 0.36f).coerceIn(250.dp, 320.dp)
-            val fontHeightAdjust = if (fontScale > 1.25f) 24.dp else if (fontScale > 1.15f) 16.dp else 0.dp
-            val targetHeight = (screenHeightDp * 0.54f + fontHeightAdjust).coerceIn(160.dp, 240.dp)
-            Dimensions(widthDp = targetWidth, heightDp = targetHeight)
+            // Established landscape overlay: ~210dp wide, ~140dp tall.
+            // Constrain bounds to prevent occluding sibling controls; shrink at small screens or high font scale.
+            val maxWidth = (screenWidthDp * 0.40f).coerceIn(160.dp, 210.dp)
+            val maxHeight = (screenHeightDp * 0.45f).coerceIn(110.dp, 140.dp)
+            val scaleFactor = when {
+                fontScale > 1.35f -> 0.85f
+                fontScale > 1.15f -> 0.92f
+                else -> 1.0f
+            }
+            Dimensions(
+                widthDp = (maxWidth * scaleFactor).coerceAtLeast(150.dp),
+                heightDp = (maxHeight * scaleFactor).coerceAtLeast(105.dp),
+            )
         } else {
-            // Enlarged portrait dashboard: ~280..340dp wide, ~180..240dp tall
-            val targetWidth = (screenWidthDp - 28.dp).coerceIn(270.dp, 340.dp)
-            val fontHeightAdjust = if (fontScale > 1.35f) 32.dp else if (fontScale > 1.25f) 24.dp else if (fontScale > 1.1f) 12.dp else 0.dp
-            val targetHeight = (188.dp + fontHeightAdjust).coerceIn(180.dp, 240.dp)
-            Dimensions(widthDp = targetWidth, heightDp = targetHeight)
+            // Established portrait overlay: ~224dp wide, ~150dp tall.
+            // Floats in top-end corner without pushing Home siblings.
+            // Shrinks when necessary on narrow screens or high accessibility font scale.
+            val baseWidth = 224.dp
+            val baseHeight = 150.dp
+            val maxWidth = (screenWidthDp * 0.60f).coerceIn(160.dp, baseWidth)
+            val maxHeight = (screenHeightDp * 0.25f).coerceIn(110.dp, baseHeight)
+            val scaleFactor = when {
+                fontScale > 1.35f -> 0.88f
+                fontScale > 1.15f -> 0.94f
+                else -> 1.0f
+            }
+            Dimensions(
+                widthDp = (maxWidth * scaleFactor).coerceAtLeast(160.dp),
+                heightDp = (maxHeight * scaleFactor).coerceAtLeast(110.dp),
+            )
         }
     }
 }
@@ -242,10 +264,7 @@ data class HeadingArrowGeometry(
     val originY: Float,
     val tipX: Float,
     val tipY: Float,
-    val leftWingX: Float,
-    val leftWingY: Float,
-    val rightWingX: Float,
-    val rightWingY: Float,
+    val isVisible: Boolean,
     val arrowLength: Float,
 )
 
@@ -253,66 +272,62 @@ object HeadingArrowGeometryCalculator {
     fun calculate(
         width: Float,
         height: Float,
-        bottomInset: Float,
+        bottomInset: Float = 0f,
         normalizedAngleDeg: Float,
-        headLength: Float = 36f,
-        headAngleRad: Double = Math.toRadians(28.0),
-        safePadding: Float = 14f,
+        isAuthoritativeEligible: Boolean = true,
+        headLength: Float = 0f,
+        headAngleRad: Double = 0.0,
+        safePadding: Float = 8f,
+        strokeInset: Float = 4f,
     ): HeadingArrowGeometry {
         val originX = width / 2f
-        val availableHeight = (height - bottomInset).coerceAtLeast(60f)
-        val originY = availableHeight * 0.58f
+        val originY = (height - strokeInset).coerceAtLeast(0f)
 
-        val safeTop = safePadding
-        val safeBottom = (height - bottomInset - 4f).coerceAtLeast(originY + 16f)
-        val safeLeft = safePadding
-        val safeRight = (width - safePadding).coerceAtLeast(originX + 16f)
+        // Truthful invalid or rearward heading naturally hides the line
+        val isRearward = abs(normalizedAngleDeg) > 90f
+        if (!isAuthoritativeEligible || isRearward || width <= 0f || height <= 0f) {
+            return HeadingArrowGeometry(
+                originX = originX,
+                originY = originY,
+                tipX = originX,
+                tipY = originY,
+                isVisible = false,
+                arrowLength = 0f,
+            )
+        }
 
         val angleRad = Math.toRadians(normalizedAngleDeg.toDouble())
+        // In Aria: 0° = straight up, +deg = Left yaw (dx < 0), -deg = Right yaw (dx > 0)
         val dx = -sin(angleRad).toFloat()
         val dy = -cos(angleRad).toFloat()
 
-        val effectiveLeft = safeLeft + headLength
-        val effectiveRight = safeRight - headLength
-        val effectiveTop = safeTop + headLength
-        val effectiveBottom = safeBottom - headLength
+        val maxLength = minOf(width, height) * 0.45f
+
+        val safeLeft = safePadding
+        val safeRight = (width - safePadding).coerceAtLeast(originX + 8f)
+        val safeTop = safePadding
 
         val maxRayX = when {
-            dx > 1e-4f -> (effectiveRight - originX) / dx
-            dx < -1e-4f -> (effectiveLeft - originX) / dx
+            dx > 1e-4f -> (safeRight - originX) / dx
+            dx < -1e-4f -> (safeLeft - originX) / dx
             else -> Float.MAX_VALUE
         }
         val maxRayY = when {
-            dy > 1e-4f -> (effectiveBottom - originY) / dy
-            dy < -1e-4f -> (effectiveTop - originY) / dy
+            dy < -1e-4f -> (safeTop - originY) / dy
             else -> Float.MAX_VALUE
         }
 
-        val maxRadius = minOf(width, availableHeight) * 0.40f
-        val maxAllowed = minOf(maxRayX, maxRayY).coerceAtLeast(18f)
-        val arrowLength = minOf(maxRadius, maxAllowed)
-
-        val tipX = originX + dx * arrowLength
-        val tipY = originY + dy * arrowLength
-
-        val leftWingAngle = angleRad + Math.PI - headAngleRad
-        val leftWingX = tipX + (-sin(leftWingAngle).toFloat() * headLength)
-        val leftWingY = tipY + (-cos(leftWingAngle).toFloat() * headLength)
-
-        val rightWingAngle = angleRad + Math.PI + headAngleRad
-        val rightWingX = tipX + (-sin(rightWingAngle).toFloat() * headLength)
-        val rightWingY = tipY + (-cos(rightWingAngle).toFloat() * headLength)
+        val length = minOf(maxLength, maxRayX, maxRayY).coerceAtLeast(10f)
+        val tipX = originX + dx * length
+        val tipY = originY + dy * length
 
         return HeadingArrowGeometry(
             originX = originX,
             originY = originY,
             tipX = tipX,
             tipY = tipY,
-            leftWingX = leftWingX,
-            leftWingY = leftWingY,
-            rightWingX = rightWingX,
-            rightWingY = rightWingY,
-            arrowLength = arrowLength,
+            isVisible = true,
+            arrowLength = length,
         )
     }
 }

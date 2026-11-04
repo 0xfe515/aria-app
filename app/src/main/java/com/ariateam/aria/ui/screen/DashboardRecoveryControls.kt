@@ -15,7 +15,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -33,14 +32,12 @@ import com.ariateam.aria.ui.theme.AriaSlate
 import com.ariateam.aria.vision.CameraSessionStatus
 
 /**
- * Dedicated recovery action surface located on the Home screen outside of the read-only vision dashboard.
- *
- * Provides accessible recovery controls when user intervention is required (e.g. camera permission,
- * explicit camera restart, profile setup) without contaminating the read-only visual dashboard.
+ * Settings recovery controls for managing vision permissions and camera recovery
+ * in existing Settings surfaces, without adding intrusive rows to the Home screen.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun DashboardHomeRecoveryBar(
+fun SettingsVisionRecoveryBar(
     hasCameraPermission: Boolean,
     cameraStatus: CameraSessionStatus,
     requiresExplicitRestart: Boolean,
@@ -64,7 +61,7 @@ fun DashboardHomeRecoveryBar(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .testTag("dashboardHomeRecoveryBar"),
+            .testTag("settingsVisionRecoveryBar"),
         shape = RoundedCornerShape(12.dp),
         color = AriaPanel.copy(alpha = 0.95f),
         border = BorderStroke(1.dp, AriaSlate.copy(alpha = 0.35f)),

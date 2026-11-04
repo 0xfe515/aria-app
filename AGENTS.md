@@ -33,6 +33,8 @@ This is an isolated development environment. Builds, tests, and lint are part of
 
 ## Current Worker Policy
 
+- **2026-11-04 explicit UI correction:** Preserve the established Home layout. Vision overlay may shrink but must never push other components. Overlay subtree must have no buttons, clickable/toggle/profile/recovery actions. Direction visualization is exactly one plain line originating from the actual overlay image's bottom center near the implied user position; no arrows, circles, rings, dashed guides, extra strokes, or origin moved to image center. Keep essential recovery accessible in existing Settings/recovery surfaces without redesigning Home.
+
 - **2026-11-04 review override:** Codex performs the current whole-app review directly. Leave already-running Gemini review/fix Tasks in progress, then independently evaluate their final outputs before release; do not treat worker success as final acceptance. Preserve exclusive edit ownership while they run.
 
 - **2026-11-04 user priority override:** Prioritize direct Aria app features. Defer continuation scheduling, quota/account-rotation tooling, and other development automation. Keep continuation automations disabled; the user will manually resume work after quota recovery. This does not suspend app implementation or required validation.

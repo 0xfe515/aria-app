@@ -71,6 +71,7 @@ fun SettingsScreen(
     onOpenLicenses: () -> Unit = {},
     onOpenDistanceMode: () -> Unit = {},
     onOpenProfileSetup: () -> Unit = {},
+    onOpenAppSettings: () -> Unit = {},
     keyStorage: AriaKeyStorage? = null,
 ) {
     val context = LocalContext.current
@@ -174,6 +175,7 @@ fun SettingsScreen(
                 onOpenVisionDiagnostics = onOpenVisionDiagnostics,
                 onOpenVoiceDiagnostics = onOpenVoiceDiagnostics,
                 onOpenPresentationDemo = onOpenPresentationDemo,
+                onOpenAppSettings = onOpenAppSettings,
                 onBack = { page = SettingsPage.Root },
             )
 
@@ -523,6 +525,7 @@ private fun DiagnosticsSettings(
     onOpenVisionDiagnostics: () -> Unit,
     onOpenVoiceDiagnostics: () -> Unit,
     onOpenPresentationDemo: () -> Unit,
+    onOpenAppSettings: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     SettingsPageHeader(stringResource(R.string.settings_diagnostics_title), onBack)
@@ -541,6 +544,11 @@ private fun DiagnosticsSettings(
         title = stringResource(R.string.debug_open_demo),
         summary = stringResource(R.string.settings_demo_summary),
         onClick = onOpenPresentationDemo,
+    )
+    SettingsNavigationRow(
+        title = stringResource(R.string.open_app_settings),
+        summary = "카메라 및 시스템 권한 설정 관리",
+        onClick = onOpenAppSettings,
     )
 }
 

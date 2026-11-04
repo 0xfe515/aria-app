@@ -765,27 +765,6 @@ fun MainScreen(
                         )
                 ) {
                     val navSafeBottomPadding = calculateFloatingNavSafeBottomPadding(floatingTabBarHeightDp)
-                    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-                    val density = LocalDensity.current
-                    val view = LocalView.current
-                    val profileStore = remember(context) { BodyMountProfileStore(context) }
-                    DisposableEffect(profileStore) {
-                        onDispose { profileStore.close() }
-                    }
-                    val storedProfile by profileStore.profile.collectAsStateWithLifecycle()
-                    var measuredInsetHeightDp by remember { mutableStateOf(190.dp) }
-                    var measuredInsetWidthDp by remember { mutableStateOf(if (isLandscape) 280.dp else 300.dp) }
-                    var measuredRecoveryHeightDp by remember { mutableStateOf(0.dp) }
-                    val homeTopInsetClearance = if (isLandscape) {
-                        8.dp
-                    } else {
-                        measuredInsetHeightDp + measuredRecoveryHeightDp + 16.dp
-                    }
-                    val homeEndInsetClearance = if (isLandscape) {
-                        measuredInsetWidthDp + 16.dp
-                    } else {
-                        0.dp
-                    }
                     when {
                         selectedTab == 0 -> {
                             VoiceDemoScreen(
@@ -799,8 +778,6 @@ fun MainScreen(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(
-                                        top = homeTopInsetClearance,
-                                        end = homeEndInsetClearance,
                                         bottom = navSafeBottomPadding + transcriptContentClearance,
                                     ),
                             )
@@ -834,71 +811,8 @@ fun MainScreen(
                                 onOpenAppSettings = openSettings,
                                 onOpenProfileSetup = { showBodyMountProfileDialog = true },
                                 modifier = Modifier
-                                    .then(
-                                        if (isLandscape) {
-                                            Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(top = 8.dp, end = 12.dp)
-                                        } else {
-                                            Modifier
-                                                .align(Alignment.TopCenter)
-                                                .padding(top = 8.dp, start = 14.dp, end = 14.dp)
-                                        }
-                                    )
-                                    .onGloballyPositioned { coordinates ->
-                                        val heightDp = with(density) { coordinates.size.height.toDp() }
-                                        val widthDp = with(density) { coordinates.size.width.toDp() }
-                                        if (heightDp > 0.dp && heightDp != measuredInsetHeightDp) {
-                                            measuredInsetHeightDp = heightDp
-                                        }
-                                        if (widthDp > 0.dp && widthDp != measuredInsetWidthDp) {
-                                            measuredInsetWidthDp = widthDp
-                                        }
-                                    },
-                            )
-                            DashboardHomeRecoveryBar(
-                                hasCameraPermission = StartupPermissionInventory.CAMERA !in missingRuntimePermissions,
-                                cameraStatus = visionUiState.cameraStatus,
-                                requiresExplicitRestart = visionModel.requiresExplicitRestart,
-                                isProfileConfigured = storedProfile?.isValid == true,
-                                onRequestCameraPermission = {
-                                    val missing = refreshRuntimePermissions()
-                                    if (StartupPermissionInventory.CAMERA in missing) {
-                                        startupPermissions.launch(arrayOf(StartupPermissionInventory.CAMERA))
-                                    }
-                                },
-                                onExplicitRestartCamera = {
-                                    val rot = view.display?.rotation ?: android.view.Surface.ROTATION_0
-                                    requestCameraStart(
-                                        null,
-                                        VisionPipelineMode.PREPROCESS_OR_INFERENCE,
-                                        rot,
-                                        true,
-                                    )
-                                },
-                                onRetryCamera = {
-                                    val rot = view.display?.rotation ?: android.view.Surface.ROTATION_0
-                                    requestStartCamera(null, VisionPipelineMode.PREPROCESS_OR_INFERENCE, rot)
-                                },
-                                onOpenProfileSetup = { showBodyMountProfileDialog = true },
-                                modifier = Modifier
-                                    .then(
-                                        if (isLandscape) {
-                                            Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(top = measuredInsetHeightDp + 14.dp, end = 12.dp)
-                                        } else {
-                                            Modifier
-                                                .align(Alignment.TopCenter)
-                                                .padding(top = measuredInsetHeightDp + 14.dp, start = 16.dp, end = 16.dp)
-                                        }
-                                    )
-                                    .onGloballyPositioned { coordinates ->
-                                        val h = with(density) { coordinates.size.height.toDp() }
-                                        if (h != measuredRecoveryHeightDp) {
-                                            measuredRecoveryHeightDp = h
-                                        }
-                                    },
+                                    .align(Alignment.TopEnd)
+                                    .padding(top = 8.dp, end = 12.dp),
                             )
                         }
                         showLicenses -> LicensesScreen(
@@ -1002,6 +916,7 @@ fun MainScreen(
                                 onOpenLicenses = { showLicenses = true },
                                 onOpenDistanceMode = openDistanceMode,
                                 onOpenProfileSetup = { showBodyMountProfileDialog = true },
+                                onOpenAppSettings = openSettings,
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(bottom = navSafeBottomPadding + transcriptContentClearance),

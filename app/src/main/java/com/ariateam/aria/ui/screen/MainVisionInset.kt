@@ -503,10 +503,10 @@ fun MainVisionInset(
                 val dashboardTitle = "실시간 비전 대시보드 (읽기 전용)"
                 contentDescription = "$dashboardTitle · ${presentation.distanceDescription} · ${headingPresentation.talkBackDescription}$metricsInfo"
             },
-        shape = RoundedCornerShape(16.dp),
-        color = AriaPanel.copy(alpha = 0.92f),
+        shape = RoundedCornerShape(14.dp),
+        color = AriaPanel.copy(alpha = 0.90f),
         border = BorderStroke(1.dp, AriaSlate.copy(alpha = 0.35f)),
-        shadowElevation = 8.dp,
+        shadowElevation = 6.dp,
     ) {
         Box(
             modifier = Modifier.fillMaxSize(),
@@ -536,10 +536,10 @@ fun MainVisionInset(
                     )
                 }
 
-                // Relative heading arrow originating above bottom telemetry bar
+                // Direction line originating at horizontal center at bottom of actual preview area
                 DashboardHeadingArrow(
                     presentation = headingPresentation,
-                    bottomInsetDp = if (fontScale > 1.25f) 44.dp else 34.dp,
+                    bottomInsetDp = 2.dp,
                     modifier = Modifier.fillMaxSize(),
                 )
 
@@ -688,11 +688,11 @@ fun MainVisionInset(
                         status == MainVisionStatus.PermissionDenied ->
                             "카메라 권한을 허용해야 비전 모니터링이 시작됩니다."
                         requiresExplicitRestart ->
-                            "음성 명령 또는 홈의 시작 버튼으로 다시 시작할 수 있습니다."
+                            "음성 명령 또는 설정에서 다시 시작할 수 있습니다."
                         presentation.isActionableSetupHint ->
                             "설정에서 키와 착용 위치를 등록할 수 있습니다."
                         else ->
-                            "홈 화면의 제어 또는 음성 명령으로 활성화할 수 있습니다."
+                            "음성 명령으로 활성화할 수 있습니다."
                     }
                     Text(
                         text = guidance,

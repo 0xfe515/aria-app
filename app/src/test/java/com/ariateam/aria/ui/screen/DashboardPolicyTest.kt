@@ -492,17 +492,25 @@ class DashboardPolicyTest {
             screenHeightDp = 785.dp,
             fontScale = 1.0f,
         )
-        assertTrue("Portrait width (${portrait.widthDp}) must be >= 270dp", portrait.widthDp >= 270.dp)
-        assertTrue("Portrait height (${portrait.heightDp}) must be >= 180dp", portrait.heightDp >= 180.dp)
+        // Restores established layout proportions (~224dp x 150dp)
+        assertEquals(224.dp, portrait.widthDp)
+        assertEquals(150.dp, portrait.heightDp)
 
-        // Portrait with large accessibility font scale
+        // Portrait with large accessibility font scale shrinks overlay to avoid occluding siblings
         val portraitLargeFont = DashboardSizing.calculate(
             isLandscape = false,
             screenWidthDp = 392.dp,
             screenHeightDp = 785.dp,
             fontScale = 1.3f,
         )
-        assertTrue("Large font portrait height must expand", portraitLargeFont.heightDp > portrait.heightDp)
+        assertTrue(
+            "Large font portrait width must shrink to protect Home controls",
+            portraitLargeFont.widthDp <= portrait.widthDp,
+        )
+        assertTrue(
+            "Large font portrait height must shrink to protect Home controls",
+            portraitLargeFont.heightDp <= portrait.heightDp,
+        )
 
         // Landscape phone (785dp x 392dp)
         val landscape = DashboardSizing.calculate(
@@ -511,100 +519,84 @@ class DashboardPolicyTest {
             screenHeightDp = 392.dp,
             fontScale = 1.0f,
         )
-        assertTrue("Landscape width (${landscape.widthDp}) must be >= 250dp", landscape.widthDp >= 250.dp)
-        assertTrue("Landscape height (${landscape.heightDp}) must be >= 160dp", landscape.heightDp >= 160.dp)
+        // Restores established landscape proportions (~210dp x 140dp)
+        assertEquals(210.dp, landscape.widthDp)
+        assertEquals(140.dp, landscape.heightDp)
     }
 
     @Test
-    fun headingArrowGeometry_rearFacingAnglesDoNotClip() {
+    fun headingArrowGeometry_rearFacingAnglesNaturallyHide() {
         val testSizes = listOf(
-            Triple(270f, 180f, 34f), // Portrait min
-            Triple(340f, 230f, 34f), // Portrait max
-            Triple(300f, 200f, 44f), // Portrait with large font inset
-            Triple(250f, 160f, 34f), // Landscape min
-            Triple(320f, 220f, 34f), // Landscape max
+            Pair(224f, 150f),
+            Pair(210f, 140f),
+            Pair(180f, 120f),
         )
         val rearAngles = listOf(
             91f, 105f, 120f, 135f, 150f, 170f, 179f, 180f,
             -91f, -105f, -120f, -135f, -150f, -170f, -179f, -180f,
         )
 
-        for ((width, height, bottomInset) in testSizes) {
+        for ((width, height) in testSizes) {
+            val strokeInset = 4f
             for (angle in rearAngles) {
                 val geom = HeadingArrowGeometryCalculator.calculate(
                     width = width,
                     height = height,
-                    bottomInset = bottomInset,
                     normalizedAngleDeg = angle,
-                    headLength = 14f,
-                    safePadding = 12f,
+                    isAuthoritativeEligible = true,
+                    strokeInset = strokeInset,
                 )
 
-                // 1. Tip must stay inside canvas and strictly above bottom telemetry bar
-                assertTrue("tipX ($angle° at ${width}x$height) must be >= 0", geom.tipX >= 0f)
-                assertTrue("tipX ($angle° at ${width}x$height) must be <= width", geom.tipX <= width)
-                assertTrue("tipY ($angle° at ${width}x$height) must be >= 0", geom.tipY >= 0f)
-                assertTrue(
-                    "tipY (${geom.tipY} for $angle° at ${width}x$height) must not clip into bottom bar (${height - bottomInset})",
-                    geom.tipY <= height - bottomInset,
-                )
+                // 1. Origin must be strictly at horizontal center and bottom of preview area
+                assertEquals("originX must be horizontal center", width / 2f, geom.originX, 0.01f)
+                assertEquals("originY must be at bottom with strokeInset", height - strokeInset, geom.originY, 0.01f)
 
-                // 2. Left wing must stay inside canvas and strictly above bottom telemetry bar
-                assertTrue("leftWingX ($angle° at ${width}x$height) must be >= 0", geom.leftWingX >= 0f)
-                assertTrue("leftWingX ($angle° at ${width}x$height) must be <= width", geom.leftWingX <= width)
-                assertTrue("leftWingY ($angle° at ${width}x$height) must be >= 0", geom.leftWingY >= 0f)
-                assertTrue(
-                    "leftWingY (${geom.leftWingY} for $angle° at ${width}x$height) must not clip into bottom bar (${height - bottomInset})",
-                    geom.leftWingY <= height - bottomInset,
-                )
-
-                // 3. Right wing must stay inside canvas and strictly above bottom telemetry bar
-                assertTrue("rightWingX ($angle° at ${width}x$height) must be >= 0", geom.rightWingX >= 0f)
-                assertTrue("rightWingX ($angle° at ${width}x$height) must be <= width", geom.rightWingX <= width)
-                assertTrue("rightWingY ($angle° at ${width}x$height) must be >= 0", geom.rightWingY >= 0f)
-                assertTrue(
-                    "rightWingY (${geom.rightWingY} for $angle° at ${width}x$height) must not clip into bottom bar (${height - bottomInset})",
-                    geom.rightWingY <= height - bottomInset,
-                )
-
-                // 4. Arrow must have positive visible length
-                assertTrue("arrowLength must be positive", geom.arrowLength >= 18f)
+                // 2. Rearward directions naturally hide the line
+                assertFalse("Rearward direction ($angle°) must naturally hide line", geom.isVisible)
+                assertEquals("Hidden line must have zero length", 0f, geom.arrowLength, 0.01f)
             }
         }
     }
 
     @Test
-    fun headingArrowGeometry_forwardAndLateralAnglesDoNotClip() {
+    fun headingArrowGeometry_forwardAndLateralAnglesAreVisibleAndBounded() {
         val testAngles = listOf(0f, 15f, -15f, 30f, -30f, 45f, -45f, 60f, -60f, 90f, -90f)
-        val width = 300f
-        val height = 200f
-        val bottomInset = 34f
+        val width = 224f
+        val height = 150f
+        val strokeInset = 4f
 
         for (angle in testAngles) {
             val geom = HeadingArrowGeometryCalculator.calculate(
                 width = width,
                 height = height,
-                bottomInset = bottomInset,
                 normalizedAngleDeg = angle,
-                headLength = 14f,
-                safePadding = 12f,
+                isAuthoritativeEligible = true,
+                strokeInset = strokeInset,
+                safePadding = 8f,
             )
+
+            assertTrue("Forward/lateral direction ($angle°) must be visible", geom.isVisible)
+            assertEquals("originX must be horizontal center", width / 2f, geom.originX, 0.01f)
+            assertEquals("originY must be at bottom", height - strokeInset, geom.originY, 0.01f)
 
             assertTrue("tipX ($angle°) must be >= 0", geom.tipX >= 0f)
             assertTrue("tipX ($angle°) must be <= width", geom.tipX <= width)
             assertTrue("tipY ($angle°) must be >= 0", geom.tipY >= 0f)
-            assertTrue("tipY ($angle°) must be <= height - bottomInset", geom.tipY <= height - bottomInset)
-
-            assertTrue("leftWingX ($angle°) must be >= 0", geom.leftWingX >= 0f)
-            assertTrue("leftWingX ($angle°) must be <= width", geom.leftWingX <= width)
-            assertTrue("leftWingY ($angle°) must be >= 0", geom.leftWingY >= 0f)
-            assertTrue("leftWingY ($angle°) must be <= height - bottomInset", geom.leftWingY <= height - bottomInset)
-
-            assertTrue("rightWingX ($angle°) must be >= 0", geom.rightWingX >= 0f)
-            assertTrue("rightWingX ($angle°) must be <= width", geom.rightWingX <= width)
-            assertTrue("rightWingY ($angle°) must be >= 0", geom.rightWingY >= 0f)
-            assertTrue("rightWingY ($angle°) must be <= height - bottomInset", geom.rightWingY <= height - bottomInset)
+            assertTrue("tipY ($angle°) must point upward or lateral", geom.tipY <= geom.originY)
+            assertTrue("arrowLength must be positive", geom.arrowLength >= 10f)
         }
+    }
+
+    @Test
+    fun headingArrowGeometry_ineligibleHidesLine() {
+        val geom = HeadingArrowGeometryCalculator.calculate(
+            width = 224f,
+            height = 150f,
+            normalizedAngleDeg = 0f,
+            isAuthoritativeEligible = false,
+        )
+        assertFalse("Ineligible heading must hide line", geom.isVisible)
+        assertEquals(0f, geom.arrowLength, 0.01f)
     }
 
     @Test
@@ -613,8 +605,9 @@ class DashboardPolicyTest {
         val large = DashboardSizing.calculate(isLandscape = false, screenWidthDp = 392.dp, screenHeightDp = 785.dp, fontScale = 1.5f)
         val largest = DashboardSizing.calculate(isLandscape = false, screenWidthDp = 392.dp, screenHeightDp = 785.dp, fontScale = 2.0f)
 
-        assertTrue(large.heightDp > normal.heightDp)
-        assertTrue(largest.heightDp >= large.heightDp)
-        assertTrue(largest.heightDp <= 240.dp)
+        assertTrue(large.widthDp <= normal.widthDp)
+        assertTrue(largest.widthDp <= large.widthDp)
+        assertTrue(largest.widthDp >= 160.dp)
+        assertTrue(largest.heightDp >= 110.dp)
     }
 }
