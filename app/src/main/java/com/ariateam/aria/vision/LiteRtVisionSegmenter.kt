@@ -96,6 +96,18 @@ data class VisionInferenceOutput(
     val overlayBitmap: Bitmap?,
 )
 
+internal interface OverlayBitmapFactory {
+    fun create(colors: IntArray, width: Int, height: Int): Bitmap?
+}
+
+internal object DefaultOverlayBitmapFactory : OverlayBitmapFactory {
+    override fun create(colors: IntArray, width: Int, height: Int): Bitmap {
+        val targetBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        targetBitmap.setPixels(colors, 0, width, 0, 0, width, height)
+        return targetBitmap
+    }
+}
+
 /**
  * Thread-safe LiteRT GPU segmentation runner with atomic session commits, strict
  * local resource disposal on failure, and single-session ownership.
@@ -113,6 +125,7 @@ class LiteRtVisionSegmenter internal constructor(
         Int,
         Boolean,
     ) -> InferenceSession)? = null,
+    internal var bitmapFactory: OverlayBitmapFactory = DefaultOverlayBitmapFactory,
 ) : AutoCloseable {
     constructor() : this(VisionContract.DEFAULT_CPU_THREADS, ProductionGpuOnlyPolicy, GpuEnvironment())
     constructor(defaultCpuThreads: Int) : this(defaultCpuThreads, ProductionGpuOnlyPolicy, GpuEnvironment())
@@ -128,6 +141,12 @@ class LiteRtVisionSegmenter internal constructor(
             inferenceThread = t
         }
     }
+
+    val pipelineExecutor: ExecutorService
+        get() = inferenceExecutor
+
+    val executionThread: Thread?
+        get() = inferenceThread
 
     private fun <T> runOnInferenceThread(block: () -> T): T {
         if (inferenceExecutor.isShutdown) {
@@ -614,12 +633,7 @@ class LiteRtVisionSegmenter internal constructor(
                     modelHeight = VisionContract.MODEL_INPUT_HEIGHT,
                 )
                 val bitmap = if (produceOverlayBitmap) {
-                    Bitmap.createBitmap(
-                        reusableOverlayArgb,
-                        VisionContract.MODEL_WIDTH,
-                        VisionContract.MODEL_HEIGHT,
-                        Bitmap.Config.ARGB_8888,
-                    )
+                    bitmapFactory.create(reusableOverlayArgb, VisionContract.MODEL_WIDTH, VisionContract.MODEL_HEIGHT)
                 } else {
                     null
                 }

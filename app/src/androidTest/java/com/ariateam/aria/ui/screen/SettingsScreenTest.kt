@@ -5,7 +5,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
-import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -13,8 +12,10 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
 import androidx.test.platform.app.InstrumentationRegistry
 import com.ariateam.aria.R
+import com.ariateam.aria.cloud.AriaKeyStorage
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceState
 import com.ariateam.aria.ui.theme.AriaTheme
@@ -25,6 +26,20 @@ import com.ariateam.aria.vision.VisionUiState
 import org.junit.Rule
 import org.junit.Test
 
+private class FakeAriaKeyStorage(private var key: String? = null) : AriaKeyStorage {
+    override fun saveApiKey(key: String): Boolean {
+        this.key = key
+        return true
+    }
+    override fun getApiKey(): String? = key
+    override fun clearApiKey(): Boolean {
+        this.key = null
+        return true
+    }
+    override fun hasApiKey(): Boolean = !key.isNullOrBlank()
+    override fun getMaskedApiKey(): String? = if (hasApiKey()) "***" else null
+}
+
 class SettingsScreenTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
@@ -33,19 +48,22 @@ class SettingsScreenTest {
         compose.setContent {
             AriaTheme { SettingsScreen(VoiceState(), {}, {}) }
         }
-        compose.onNodeWithText(context.getString(R.string.settings_voice_title)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.settings_model_title)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.settings_demo_page_title)).assertIsDisplayed()
+        // Verify exact 5 reorganized root categories
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_account_title)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.settings_diagnostics_title)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_demo_page_title)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.app_info)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.engine_description)).assertDoesNotExist()
         compose.onNodeWithText("음성 엔진 확인").assertDoesNotExist()
 
-        compose.onNodeWithText(context.getString(R.string.settings_voice_title)).performClick()
+        // Click General ("일반")
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).performClick()
         compose.onNodeWithText(context.getString(R.string.settings_voice_service_summary)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.body_mount_profile_title)).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.engine_description)).assertDoesNotExist()
         compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
-        compose.onNodeWithText(context.getString(R.string.settings_model_title)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).assertIsDisplayed()
     }
 
     @Test fun voiceHelpUsesConciseWakeCommandWording() {
@@ -53,37 +71,46 @@ class SettingsScreenTest {
         compose.setContent {
             AriaTheme { SettingsScreen(VoiceState(), {}, {}) }
         }
-        compose.onNodeWithText(context.getString(R.string.settings_voice_title)).performClick()
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).performClick()
         compose.onNodeWithText("“헤이 아리아”라고 말해 음성 명령을 시작합니다.").assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.engine_description)).assertDoesNotExist()
     }
 
-    @Test fun modelDownloadDefaultsToWifiAndCanBeCancelled() {
-        var mobileAllowed: Boolean? = null
-        var cancelled = false
-        val state = mutableStateOf(VoiceState())
+    @Test fun accountPageManagesApiKeyAndRetainsLocalModels() {
+        val fakeStorage = FakeAriaKeyStorage()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         compose.setContent {
             AriaTheme {
                 SettingsScreen(
-                    state = state.value,
+                    state = VoiceState(),
                     onStartWaiting = {},
                     onStop = {},
-                    onDownloadModel = { mobileAllowed = it },
-                    onCancelDownload = { cancelled = true },
+                    keyStorage = fakeStorage,
                 )
             }
         }
-        compose.onNodeWithText(context.getString(R.string.settings_model_title)).performClick()
-        compose.onNodeWithText(context.getString(R.string.gemma_download)).performClick()
-        compose.runOnIdle { org.junit.Assert.assertEquals(false, mobileAllowed) }
-        compose.onNodeWithText(context.getString(R.string.gemma_mobile_data)).assertIsOff().performClick()
-        compose.onNodeWithText(context.getString(R.string.gemma_download)).performClick()
-        compose.runOnIdle { org.junit.Assert.assertEquals(true, mobileAllowed) }
-        compose.onNodeWithText(context.getString(R.string.gemma_delete)).assertIsNotEnabled()
-        state.value = VoiceState(command = VoiceState().command.copy(model = "다운로드 대기 중"))
-        compose.onNodeWithText(context.getString(R.string.gemma_cancel)).performClick()
-        compose.runOnIdle { org.junit.Assert.assertTrue(cancelled) }
+        compose.onNodeWithText(context.getString(R.string.settings_account_title)).performClick()
+
+        // Unregistered key status
+        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_empty)).assertIsDisplayed()
+        compose.onNodeWithTag("gemini_register_key_btn").assertIsDisplayed().performClick()
+
+        // Enter key in dialog
+        compose.onNodeWithTag("gemini_key_input").performTextInput("test-gemini-key")
+        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_save)).performClick()
+
+        // Key is registered and masked key displayed
+        compose.onNodeWithTag("gemini_change_key_btn").assertIsDisplayed()
+        compose.onNodeWithTag("gemini_clear_key_btn").assertIsDisplayed()
+
+        // Retained on-device local models (ASR and Vision) are displayed
+        compose.onNodeWithText(context.getString(R.string.settings_account_local_asr_title)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_account_local_vision_title)).assertIsDisplayed()
+
+        // Clear key
+        compose.onNodeWithTag("gemini_clear_key_btn").performClick()
+        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_delete_confirm)).performClick()
+        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_empty)).assertIsDisplayed()
     }
 
     @Test fun feedbackSwitchUpdatesTheSelectedMode() {
@@ -91,11 +118,16 @@ class SettingsScreenTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         compose.setContent {
             AriaTheme {
-                SettingsScreen(VoiceState(), {}, {}, audibleFeedback = audible.value,
-                    onAudibleFeedbackChanged = { audible.value = it })
+                SettingsScreen(
+                    state = VoiceState(),
+                    onStartWaiting = {},
+                    onStop = {},
+                    audibleFeedback = audible.value,
+                    onAudibleFeedbackChanged = { audible.value = it },
+                )
             }
         }
-        compose.onNodeWithText(context.getString(R.string.settings_voice_title)).performClick()
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).performClick()
         val switch = compose.onNodeWithText(context.getString(R.string.audible_feedback))
         switch.assertIsOn().performClick().assertIsOff()
         compose.onNodeWithText(context.getString(R.string.settings_feedback_disabled)).assertIsDisplayed()
@@ -115,18 +147,18 @@ class SettingsScreenTest {
                 )
             }
         }
-        compose.onNodeWithText(context.getString(R.string.settings_voice_title)).performClick()
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).performClick()
         val wakeSwitch = compose.onNodeWithText(context.getString(R.string.wake_setting))
         wakeSwitch.assertIsOff().performClick().assertIsOn().performClick().assertIsOff()
         compose.onNodeWithText(context.getString(R.string.command_notification_settings)).performClick()
         compose.runOnIdle { org.junit.Assert.assertEquals(1, notificationSettingsOpened) }
     }
 
-    @Test fun diagnosticsSubpageOpensAllThreeDestinations() {
+    @Test fun diagnosticsSubpageOpensDeveloperProbesAndHasNoDemoEntrance() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         var openedVision = 0
         var openedVoice = 0
-        var openedDemo = 0
+        var openedAppSettings = 0
         compose.setContent {
             AriaTheme {
                 SettingsScreen(
@@ -135,13 +167,15 @@ class SettingsScreenTest {
                     onStop = {},
                     onOpenVisionDiagnostics = { openedVision++ },
                     onOpenVoiceDiagnostics = { openedVoice++ },
-                    onOpenPresentationDemo = { openedDemo++ },
+                    onOpenAppSettings = { openedAppSettings++ },
                 )
             }
         }
         compose.onNodeWithText(context.getString(R.string.settings_diagnostics_title)).performClick()
 
-        // Diagnostics page only has Vision, Voice, Demo; AR distance entry belongs exclusively to Demo page
+        // Diagnostics only has developer probes (Vision, Voice, App Settings)
+        // Presentation demo and AR distance must NOT exist in Diagnostics
+        compose.onNodeWithText(context.getString(R.string.debug_open_demo)).assertDoesNotExist()
         compose.onNodeWithText(context.getString(R.string.distance_mode_title)).assertDoesNotExist()
 
         compose.onNodeWithText(context.getString(R.string.debug_open_vision))
@@ -150,14 +184,14 @@ class SettingsScreenTest {
         compose.onNodeWithText(context.getString(R.string.debug_open_voice))
             .assertIsDisplayed()
             .performClick()
-        compose.onNodeWithText(context.getString(R.string.debug_open_demo))
+        compose.onNodeWithText(context.getString(R.string.open_app_settings))
             .assertIsDisplayed()
             .performClick()
 
         compose.runOnIdle {
             org.junit.Assert.assertEquals(1, openedVision)
             org.junit.Assert.assertEquals(1, openedVoice)
-            org.junit.Assert.assertEquals(1, openedDemo)
+            org.junit.Assert.assertEquals(1, openedAppSettings)
         }
     }
 
@@ -176,33 +210,29 @@ class SettingsScreenTest {
         compose.onNodeWithText(context.getString(R.string.debug_open_vision)).assertIsDisplayed()
         compose.onNodeWithContentDescription(context.getString(R.string.debug_back_to_settings))
             .performClick()
-        compose.onNodeWithText(context.getString(R.string.settings_model_title)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).assertIsDisplayed()
     }
 
-    @Test fun modelDeleteRequiresConfirmationAndCanBeDismissed() {
+    @Test fun generalSubpageShowsBodyMountProfileAndOpensDialog() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val installedState = VoiceState(command = VoiceState().command.copy(model = "설치됨 · 오프라인 사용 가능"))
-        var deleteCount = 0
+        var profileSetupOpened = 0
         compose.setContent {
             AriaTheme {
                 SettingsScreen(
-                    state = installedState,
+                    state = VoiceState(),
                     onStartWaiting = {},
                     onStop = {},
-                    onDeleteModel = { deleteCount++ },
+                    onOpenProfileSetup = { profileSetupOpened++ },
                 )
             }
         }
 
-        compose.onNodeWithText(context.getString(R.string.settings_model_title)).performClick()
-        compose.onNodeWithText(context.getString(R.string.gemma_delete)).performClick()
-        compose.onNodeWithText(context.getString(R.string.settings_model_delete_title)).assertIsDisplayed()
-        compose.runOnIdle { org.junit.Assert.assertEquals(0, deleteCount) }
-
-        compose.onNodeWithText(context.getString(R.string.settings_cancel)).performClick()
-        compose.onNodeWithText(context.getString(R.string.gemma_delete)).performClick()
-        compose.onNodeWithText(context.getString(R.string.settings_model_delete_confirm)).performClick()
-        compose.runOnIdle { org.junit.Assert.assertEquals(1, deleteCount) }
+        // Stature/mount profile is consolidated in General
+        compose.onNodeWithText(context.getString(R.string.settings_general_title)).performClick()
+        compose.onNodeWithText(context.getString(R.string.body_mount_profile_title))
+            .assertIsDisplayed()
+            .performClick()
+        compose.runOnIdle { org.junit.Assert.assertEquals(1, profileSetupOpened) }
     }
 
     @Test fun visionDiagnosticsAndPresentationDemoShowHonestMissingModelAndBackNavigation() {
@@ -444,7 +474,7 @@ class SettingsScreenTest {
         }
     }
 
-    @Test fun demoSubpageOpensArDistanceAndShowsProfileSetupAndDisclaimer() {
+    @Test fun demoSubpageUnifiesPresentationAndArDistanceAndHasNoOrdinarySettings() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         var openedArDistance = 0
         var openedDemo = 0
@@ -465,27 +495,33 @@ class SettingsScreenTest {
             .assertIsDisplayed()
             .performClick()
 
-        // 1. AR Distance row
-        compose.onNodeWithText(context.getString(R.string.settings_demo_ar_title))
-            .assertIsDisplayed()
-            .performClick()
-        compose.runOnIdle { org.junit.Assert.assertEquals(1, openedArDistance) }
-
-        // 2. Body mount profile row
-        compose.onNodeWithText(context.getString(R.string.body_mount_profile_title))
-            .assertIsDisplayed()
-
-        // 3. Presentation demo row
+        // 1. Presentation demo row
         compose.onNodeWithText(context.getString(R.string.debug_open_demo))
             .assertIsDisplayed()
             .performClick()
         compose.runOnIdle { org.junit.Assert.assertEquals(1, openedDemo) }
 
-        // 4. Flat ground safety disclaimer
+        // 2. AR Distance row
+        compose.onNodeWithText(context.getString(R.string.settings_demo_ar_title))
+            .assertIsDisplayed()
+            .performClick()
+        compose.runOnIdle { org.junit.Assert.assertEquals(1, openedArDistance) }
+
+        // 3. Stature/mount profile is NOT in Demo (moved to General)
+        compose.onNodeWithText(context.getString(R.string.body_mount_profile_title))
+            .assertDoesNotExist()
+
+        // 4. Developer diagnostics are NOT in Demo
+        compose.onNodeWithText(context.getString(R.string.debug_open_vision))
+            .assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.debug_open_voice))
+            .assertDoesNotExist()
+
+        // 5. Flat ground safety disclaimer
         compose.onNodeWithTag("demoSafetyDisclaimer")
             .assertIsDisplayed()
 
-        // 5. Back navigation returns to Root
+        // 6. Back navigation returns to Root
         compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
         compose.onNodeWithText(context.getString(R.string.settings_demo_page_title)).assertIsDisplayed()
     }

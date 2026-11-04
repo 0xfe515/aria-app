@@ -2,8 +2,8 @@
 <resources>
     <!-- Settings Demo Page -->
     <string name="settings_demo_page_title">데모</string>
-    <string name="settings_demo_page_summary">AR 거리 측정 및 기능 체험</string>
-    <string name="settings_demo_page_group">체험 및 시연</string>
+    <string name="settings_demo_page_summary">통합 시연 데모 및 AR 거리 측정</string>
+    <string name="settings_demo_page_group">기능 시연 및 데모</string>
     <string name="settings_demo_ar_title">AR 거리 측정</string>
     <string name="settings_demo_ar_summary">ARCore Raw Depth 기반 보행 공간 거리 측정 데모</string>
     <string name="settings_demo_safety_disclaimer">※ 바닥과의 접점을 단안 카메라로 기하 추정한 값이며, 평평한 지면을 가정한 수치입니다. 경사로, 계단, 단차 구간에서는 오차가 발생할 수 있으므로 보행 안전을 보장하지 않습니다.</string>

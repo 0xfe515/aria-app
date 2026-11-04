@@ -251,7 +251,6 @@ fun BodyMountProfileDialog(
                                 modifier = Modifier.weight(1f),
                                 position = BodyMountPosition.SHOULDER,
                                 title = stringResource(R.string.body_mount_position_shoulder),
-                                description = stringResource(R.string.body_mount_position_shoulder_desc),
                                 selected = selectedPosition == BodyMountPosition.SHOULDER,
                                 onSelect = {
                                     saveErrorMessage = null
@@ -264,7 +263,6 @@ fun BodyMountProfileDialog(
                                 modifier = Modifier.weight(1f),
                                 position = BodyMountPosition.CHEST,
                                 title = stringResource(R.string.body_mount_position_chest),
-                                description = stringResource(R.string.body_mount_position_chest_desc),
                                 selected = selectedPosition == BodyMountPosition.CHEST,
                                 onSelect = {
                                     saveErrorMessage = null
@@ -398,7 +396,6 @@ fun BodyMountProfileDialog(
 private fun MountPositionCard(
     position: BodyMountPosition,
     title: String,
-    description: String,
     selected: Boolean,
     onSelect: () -> Unit,
     testTag: String,
@@ -422,7 +419,7 @@ private fun MountPositionCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 6.dp),
+                .padding(horizontal = 8.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             RadioButton(
@@ -433,21 +430,13 @@ private fun MountPositionCard(
                     unselectedColor = AriaSlate,
                 ),
             )
-            Spacer(modifier = Modifier.width(4.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selected) AriaSky else MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
-                    color = AriaSlate,
-                    maxLines = 2,
-                )
-            }
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = if (selected) AriaSky else MaterialTheme.colorScheme.onSurface,
+            )
         }
     }
 }

@@ -13,9 +13,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,24 +33,22 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ariateam.aria.R
+import com.ariateam.aria.cloud.AndroidKeyStoreAriaKeyStorage
+import com.ariateam.aria.cloud.AriaKeyStorage
 import com.ariateam.aria.distance.BodyMountProfile
 import com.ariateam.aria.distance.BodyMountProfileStore
 import com.ariateam.aria.speech.VoiceError
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceState
 import com.ariateam.aria.ui.theme.AriaSlate
-import androidx.compose.material3.OutlinedTextField
-import com.ariateam.aria.cloud.AndroidKeyStoreAriaKeyStorage
-import com.ariateam.aria.cloud.AriaKeyStorage
 import kotlin.math.roundToInt
 
 private enum class SettingsPage {
     Root,
-    Voice,
-    Model,
-    Cloud,
-    Demo,
+    General,
+    Account,
     Diagnostics,
+    Demo,
     AppInfo,
 }
 
@@ -85,7 +85,7 @@ fun SettingsScreen(
     var keyInputText by rememberSaveable { mutableStateOf("") }
 
     val profileStore = remember(context) { BodyMountProfileStore(context) }
-    androidx.compose.runtime.DisposableEffect(profileStore) {
+    DisposableEffect(profileStore) {
         onDispose {
             profileStore.close()
         }
@@ -95,8 +95,6 @@ fun SettingsScreen(
     var page by rememberSaveable {
         mutableStateOf(if (initialDebugExpanded) SettingsPage.Diagnostics else SettingsPage.Root)
     }
-    var mobileData by rememberSaveable { mutableStateOf(false) }
-    var confirmModelDelete by rememberSaveable { mutableStateOf(false) }
     var showInternalProfileDialog by rememberSaveable { mutableStateOf(false) }
 
     BackHandler(enabled = page != SettingsPage.Root) {
@@ -112,38 +110,31 @@ fun SettingsScreen(
     ) {
         when (page) {
             SettingsPage.Root -> SettingsRoot(
-                state = state,
                 hasApiKey = hasApiKey,
                 maskedKey = maskedKey,
-                onOpenVoice = { page = SettingsPage.Voice },
-                onOpenModel = { page = SettingsPage.Model },
-                onOpenCloud = { page = SettingsPage.Cloud },
-                onOpenDemo = { page = SettingsPage.Demo },
+                onOpenGeneral = { page = SettingsPage.General },
+                onOpenAccount = { page = SettingsPage.Account },
                 onOpenDiagnostics = { page = SettingsPage.Diagnostics },
+                onOpenDemo = { page = SettingsPage.Demo },
                 onOpenAppInfo = { page = SettingsPage.AppInfo },
             )
 
-            SettingsPage.Voice -> VoiceSettings(
+            SettingsPage.General -> GeneralSettings(
                 state = state,
                 audibleFeedback = audibleFeedback,
                 onAudibleFeedbackChanged = onAudibleFeedbackChanged,
                 onStartWaiting = onStartWaiting,
                 onStop = onStop,
                 onNotificationSettings = onNotificationSettings,
+                profile = profile,
+                onOpenProfileSetup = {
+                    onOpenProfileSetup()
+                    showInternalProfileDialog = true
+                },
                 onBack = { page = SettingsPage.Root },
             )
 
-            SettingsPage.Model -> ModelSettings(
-                state = state,
-                mobileData = mobileData,
-                onMobileDataChanged = { mobileData = it },
-                onDownloadModel = { onDownloadModel(mobileData) },
-                onCancelDownload = onCancelDownload,
-                onDeleteModel = { confirmModelDelete = true },
-                onBack = { page = SettingsPage.Root },
-            )
-
-            SettingsPage.Cloud -> CloudSettings(
+            SettingsPage.Account -> AccountSettings(
                 hasApiKey = hasApiKey,
                 maskedKey = maskedKey,
                 onRegisterKey = {
@@ -160,22 +151,16 @@ fun SettingsScreen(
                 onBack = { page = SettingsPage.Root },
             )
 
-            SettingsPage.Demo -> DemoSettings(
-                profile = profile,
-                onOpenProfileSetup = {
-                    onOpenProfileSetup()
-                    showInternalProfileDialog = true
-                },
-                onOpenDistanceMode = onOpenDistanceMode,
-                onOpenPresentationDemo = onOpenPresentationDemo,
-                onBack = { page = SettingsPage.Root },
-            )
-
             SettingsPage.Diagnostics -> DiagnosticsSettings(
                 onOpenVisionDiagnostics = onOpenVisionDiagnostics,
                 onOpenVoiceDiagnostics = onOpenVoiceDiagnostics,
-                onOpenPresentationDemo = onOpenPresentationDemo,
                 onOpenAppSettings = onOpenAppSettings,
+                onBack = { page = SettingsPage.Root },
+            )
+
+            SettingsPage.Demo -> DemoSettings(
+                onOpenDistanceMode = onOpenDistanceMode,
+                onOpenPresentationDemo = onOpenPresentationDemo,
                 onBack = { page = SettingsPage.Root },
             )
 
@@ -191,29 +176,6 @@ fun SettingsScreen(
             onDismiss = { showInternalProfileDialog = false },
             initialProfile = profile,
             profileStore = profileStore,
-        )
-    }
-
-    if (confirmModelDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmModelDelete = false },
-            title = { Text(stringResource(R.string.settings_model_delete_title)) },
-            text = { Text(stringResource(R.string.settings_model_delete_message)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmModelDelete = false
-                        onDeleteModel()
-                    },
-                ) {
-                    Text(stringResource(R.string.settings_model_delete_confirm))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmModelDelete = false }) {
-                    Text(stringResource(R.string.settings_cancel))
-                }
-            },
         )
     }
 
@@ -288,14 +250,12 @@ fun SettingsScreen(
 
 @Composable
 private fun SettingsRoot(
-    state: VoiceState,
     hasApiKey: Boolean,
     maskedKey: String?,
-    onOpenVoice: () -> Unit,
-    onOpenModel: () -> Unit,
-    onOpenCloud: () -> Unit,
-    onOpenDemo: () -> Unit,
+    onOpenGeneral: () -> Unit,
+    onOpenAccount: () -> Unit,
     onOpenDiagnostics: () -> Unit,
+    onOpenDemo: () -> Unit,
     onOpenAppInfo: () -> Unit,
 ) {
     Text(
@@ -305,37 +265,40 @@ private fun SettingsRoot(
     )
     Spacer(Modifier.height(8.dp))
     SettingsSectionTitle(stringResource(R.string.settings_main_group))
+
+    // 1. 일반 (General)
     SettingsNavigationRow(
-        title = stringResource(R.string.settings_voice_title),
-        summary = stringResource(
-            if (state.isActive) R.string.settings_voice_enabled else R.string.settings_voice_disabled
-        ),
-        onClick = onOpenVoice,
+        title = stringResource(R.string.settings_general_title),
+        summary = stringResource(R.string.settings_general_summary),
+        onClick = onOpenGeneral,
     )
+
+    // 2. 계정 (Account)
     SettingsNavigationRow(
-        title = stringResource(R.string.settings_model_title),
-        summary = state.command.model,
-        onClick = onOpenModel,
-    )
-    SettingsNavigationRow(
-        title = stringResource(R.string.settings_cloud_title),
+        title = stringResource(R.string.settings_account_title),
         summary = if (hasApiKey) {
             stringResource(R.string.settings_cloud_summary_registered, maskedKey.orEmpty())
         } else {
             stringResource(R.string.settings_cloud_summary_empty)
         },
-        onClick = onOpenCloud,
+        onClick = onOpenAccount,
     )
-    SettingsNavigationRow(
-        title = stringResource(R.string.settings_demo_page_title),
-        summary = stringResource(R.string.settings_demo_page_summary),
-        onClick = onOpenDemo,
-    )
+
+    // 3. 진단 (Diagnostics)
     SettingsNavigationRow(
         title = stringResource(R.string.settings_diagnostics_title),
         summary = stringResource(R.string.settings_diagnostics_summary),
         onClick = onOpenDiagnostics,
     )
+
+    // 4. 데모 (Demo)
+    SettingsNavigationRow(
+        title = stringResource(R.string.settings_demo_page_title),
+        summary = stringResource(R.string.settings_demo_page_summary),
+        onClick = onOpenDemo,
+    )
+
+    // 5. 앱 정보 (App info)
     SettingsNavigationRow(
         title = stringResource(R.string.app_info),
         summary = stringResource(R.string.app_version),
@@ -344,70 +307,21 @@ private fun SettingsRoot(
 }
 
 @Composable
-private fun DemoSettings(
-    profile: BodyMountProfile?,
-    onOpenProfileSetup: () -> Unit,
-    onOpenDistanceMode: () -> Unit,
-    onOpenPresentationDemo: () -> Unit,
-    onBack: () -> Unit,
-) {
-    SettingsPageHeader(stringResource(R.string.settings_demo_page_title), onBack)
-    SettingsSectionTitle(stringResource(R.string.settings_demo_page_group))
-
-    // 1. AR 거리 측정 (ARCore DistanceActivity)
-    SettingsNavigationRow(
-        title = stringResource(R.string.settings_demo_ar_title),
-        summary = stringResource(R.string.settings_demo_ar_summary),
-        onClick = onOpenDistanceMode,
-    )
-
-    // 2. 키·착용 위치 설정
-    val profileSummary = if (profile != null && profile.isValid) {
-        val heightCm = profile.estimatedCameraHeightMeters?.let { (it * 100f).roundToInt() }
-        val heightStr = if (heightCm != null) " (추정 렌즈 높이 약 ${heightCm}cm)" else ""
-        val statureStr = if (profile.statureCm % 1f == 0f) profile.statureCm.toInt().toString() else profile.statureCm.toString()
-        "${statureStr}cm · ${profile.position.koreanLabel}$heightStr"
-    } else {
-        stringResource(R.string.body_mount_profile_unconfigured)
-    }
-    SettingsNavigationRow(
-        title = stringResource(R.string.body_mount_profile_title),
-        summary = profileSummary,
-        onClick = onOpenProfileSetup,
-    )
-
-    // 3. 통합 시연 데모 (Presentation Demo)
-    SettingsNavigationRow(
-        title = stringResource(R.string.debug_open_demo),
-        summary = stringResource(R.string.settings_demo_summary),
-        onClick = onOpenPresentationDemo,
-    )
-
-    Spacer(Modifier.height(12.dp))
-
-    // Flat ground assumption & safety notice
-    Text(
-        text = stringResource(R.string.settings_demo_safety_disclaimer),
-        style = MaterialTheme.typography.bodySmall,
-        color = AriaSlate,
-        modifier = Modifier
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .testTag("demoSafetyDisclaimer"),
-    )
-}
-
-@Composable
-private fun VoiceSettings(
+private fun GeneralSettings(
     state: VoiceState,
     audibleFeedback: Boolean,
     onAudibleFeedbackChanged: (Boolean) -> Unit,
     onStartWaiting: () -> Unit,
     onStop: () -> Unit,
     onNotificationSettings: () -> Unit,
+    profile: BodyMountProfile?,
+    onOpenProfileSetup: () -> Unit,
     onBack: () -> Unit,
 ) {
-    SettingsPageHeader(stringResource(R.string.settings_voice_title), onBack)
-    SettingsSectionTitle(stringResource(R.string.settings_voice_group))
+    SettingsPageHeader(stringResource(R.string.settings_general_title), onBack)
+
+    // 음성 및 알림
+    SettingsSectionTitle(stringResource(R.string.settings_general_voice_section))
     SettingsSwitchRow(
         title = stringResource(R.string.wake_setting),
         summary = stringResource(
@@ -451,153 +365,26 @@ private fun VoiceSettings(
         summary = stringResource(R.string.settings_notification_summary),
         onClick = onNotificationSettings,
     )
-}
 
-@Composable
-private fun ModelSettings(
-    state: VoiceState,
-    mobileData: Boolean,
-    onMobileDataChanged: (Boolean) -> Unit,
-    onDownloadModel: () -> Unit,
-    onCancelDownload: () -> Unit,
-    onDeleteModel: () -> Unit,
-    onBack: () -> Unit,
-) {
-    val modelStatus = state.command.model
-    val installed = modelStatus.startsWith("설치됨")
-    val activeDownload = modelStatus == "다운로드 대기 중" ||
-        (modelStatus.startsWith("다운로드 ") && modelStatus.contains("%")) ||
-        modelStatus == "다운로드 파일 검증 중"
-    val cancelAvailable = activeDownload
-
-    SettingsPageHeader(stringResource(R.string.settings_model_title), onBack)
-    SettingsSectionTitle(stringResource(R.string.settings_model_group))
-    Text(
-        text = stringResource(R.string.gemma_heading),
-        style = MaterialTheme.typography.titleMedium,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-    )
-    Text(
-        text = modelStatus,
-        style = MaterialTheme.typography.bodyMedium,
-        modifier = Modifier.padding(horizontal = 16.dp),
-    )
-    Text(
-        text = stringResource(R.string.settings_model_size_summary),
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-    )
-    SettingsSwitchRow(
-        title = stringResource(R.string.gemma_mobile_data),
-        summary = stringResource(
-            if (mobileData) R.string.settings_mobile_data_enabled
-            else R.string.settings_mobile_data_disabled
-        ),
-        checked = mobileData,
-        onCheckedChange = onMobileDataChanged,
-    )
-    SettingsActionRow(
-        title = stringResource(R.string.gemma_download),
-        summary = stringResource(
-            if (activeDownload) R.string.settings_model_download_active
-            else R.string.settings_model_download_summary
-        ),
-        enabled = !installed && !activeDownload,
-        onClick = onDownloadModel,
-    )
-    SettingsActionRow(
-        title = stringResource(R.string.gemma_cancel),
-        summary = stringResource(R.string.settings_model_cancel_summary),
-        enabled = cancelAvailable,
-        onClick = onCancelDownload,
-    )
-    SettingsActionRow(
-        title = stringResource(R.string.gemma_delete),
-        summary = stringResource(R.string.settings_model_delete_summary),
-        enabled = installed,
-        destructive = true,
-        onClick = onDeleteModel,
-    )
-}
-
-@Composable
-private fun DiagnosticsSettings(
-    onOpenVisionDiagnostics: () -> Unit,
-    onOpenVoiceDiagnostics: () -> Unit,
-    onOpenPresentationDemo: () -> Unit,
-    onOpenAppSettings: () -> Unit = {},
-    onBack: () -> Unit,
-) {
-    SettingsPageHeader(stringResource(R.string.settings_diagnostics_title), onBack)
-    SettingsSectionTitle(stringResource(R.string.settings_diagnostics_group))
-    SettingsNavigationRow(
-        title = stringResource(R.string.debug_open_vision),
-        summary = stringResource(R.string.settings_vision_diagnostics_summary),
-        onClick = onOpenVisionDiagnostics,
-    )
-    SettingsNavigationRow(
-        title = stringResource(R.string.debug_open_voice),
-        summary = stringResource(R.string.settings_voice_diagnostics_summary),
-        onClick = onOpenVoiceDiagnostics,
-    )
-    SettingsNavigationRow(
-        title = stringResource(R.string.debug_open_demo),
-        summary = stringResource(R.string.settings_demo_summary),
-        onClick = onOpenPresentationDemo,
-    )
-    SettingsNavigationRow(
-        title = stringResource(R.string.open_app_settings),
-        summary = "카메라 및 시스템 권한 설정 관리",
-        onClick = onOpenAppSettings,
-    )
-}
-
-@Composable
-private fun AppInfoSettings(onOpenLicenses: () -> Unit, onBack: () -> Unit) {
-    SettingsPageHeader(stringResource(R.string.app_info), onBack)
-    SettingsSectionTitle(stringResource(R.string.settings_app_info_group))
-    Text(
-        text = stringResource(R.string.app_version),
-        style = MaterialTheme.typography.bodyMedium,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-    )
-    SettingsNavigationRow(
-        title = stringResource(R.string.licenses_title),
-        summary = stringResource(R.string.licenses_description),
-        onClick = onOpenLicenses,
-    )
-}
-
-@Composable
-private fun SettingsPageHeader(title: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        BackIconButton(onClick = onBack)
-        Text(
-            text = title,
-            style = MaterialTheme.typography.headlineSmall,
-            modifier = Modifier.padding(start = 8.dp).semantics { heading() },
-        )
+    // 신체 장착 기준 (키·착용 위치)
+    SettingsSectionTitle(stringResource(R.string.settings_general_mount_section))
+    val profileSummary = if (profile != null && profile.isValid) {
+        val heightCm = profile.estimatedCameraHeightMeters?.let { (it * 100f).roundToInt() }
+        val heightStr = if (heightCm != null) " (추정 렌즈 높이 약 ${heightCm}cm)" else ""
+        val statureStr = if (profile.statureCm % 1f == 0f) profile.statureCm.toInt().toString() else profile.statureCm.toString()
+        "${statureStr}cm · ${profile.position.koreanLabel}$heightStr"
+    } else {
+        stringResource(R.string.body_mount_profile_unconfigured)
     }
-}
-
-@Composable
-private fun SettingsSectionTitle(title: String) {
-    Text(
-        text = title,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
-            .semantics { heading() },
+    SettingsNavigationRow(
+        title = stringResource(R.string.body_mount_profile_title),
+        summary = profileSummary,
+        onClick = onOpenProfileSetup,
     )
 }
 
 @Composable
-private fun CloudSettings(
+private fun AccountSettings(
     hasApiKey: Boolean,
     maskedKey: String?,
     onRegisterKey: () -> Unit,
@@ -605,8 +392,8 @@ private fun CloudSettings(
     onClearKey: () -> Unit,
     onBack: () -> Unit,
 ) {
-    SettingsPageHeader(stringResource(R.string.settings_cloud_title), onBack)
-    SettingsSectionTitle(stringResource(R.string.settings_cloud_title))
+    SettingsPageHeader(stringResource(R.string.settings_account_title), onBack)
+    SettingsSectionTitle(stringResource(R.string.settings_account_group))
 
     SettingsNavigationRow(
         title = stringResource(R.string.settings_cloud_model_title),
@@ -655,4 +442,123 @@ private fun CloudSettings(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+
+    // 온디바이스 AI 컴포넌트 (음성 인식 및 비전)
+    SettingsSectionTitle(stringResource(R.string.settings_account_local_models_group))
+    SettingsNavigationRow(
+        title = stringResource(R.string.settings_account_local_asr_title),
+        summary = stringResource(R.string.settings_account_local_asr_summary),
+        onClick = {},
+    )
+    SettingsNavigationRow(
+        title = stringResource(R.string.settings_account_local_vision_title),
+        summary = stringResource(R.string.settings_account_local_vision_summary),
+        onClick = {},
+    )
+}
+
+@Composable
+private fun DiagnosticsSettings(
+    onOpenVisionDiagnostics: () -> Unit,
+    onOpenVoiceDiagnostics: () -> Unit,
+    onOpenAppSettings: () -> Unit = {},
+    onBack: () -> Unit,
+) {
+    SettingsPageHeader(stringResource(R.string.settings_diagnostics_title), onBack)
+    SettingsSectionTitle(stringResource(R.string.settings_diagnostics_group))
+    SettingsNavigationRow(
+        title = stringResource(R.string.debug_open_vision),
+        summary = stringResource(R.string.settings_vision_diagnostics_summary),
+        onClick = onOpenVisionDiagnostics,
+    )
+    SettingsNavigationRow(
+        title = stringResource(R.string.debug_open_voice),
+        summary = stringResource(R.string.settings_voice_diagnostics_summary),
+        onClick = onOpenVoiceDiagnostics,
+    )
+    SettingsNavigationRow(
+        title = stringResource(R.string.open_app_settings),
+        summary = "카메라 및 시스템 권한 설정 관리",
+        onClick = onOpenAppSettings,
+    )
+}
+
+@Composable
+private fun DemoSettings(
+    onOpenDistanceMode: () -> Unit,
+    onOpenPresentationDemo: () -> Unit,
+    onBack: () -> Unit,
+) {
+    SettingsPageHeader(stringResource(R.string.settings_demo_page_title), onBack)
+    SettingsSectionTitle(stringResource(R.string.settings_demo_page_group))
+
+    // 1. 통합 시연 데모 (Presentation Demo)
+    SettingsNavigationRow(
+        title = stringResource(R.string.debug_open_demo),
+        summary = stringResource(R.string.settings_demo_summary),
+        onClick = onOpenPresentationDemo,
+    )
+
+    // 2. AR 거리 측정 (ARCore DistanceActivity)
+    SettingsNavigationRow(
+        title = stringResource(R.string.settings_demo_ar_title),
+        summary = stringResource(R.string.settings_demo_ar_summary),
+        onClick = onOpenDistanceMode,
+    )
+
+    Spacer(Modifier.height(12.dp))
+
+    // Flat ground assumption & safety notice
+    Text(
+        text = stringResource(R.string.settings_demo_safety_disclaimer),
+        style = MaterialTheme.typography.bodySmall,
+        color = AriaSlate,
+        modifier = Modifier
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("demoSafetyDisclaimer"),
+    )
+}
+
+@Composable
+private fun AppInfoSettings(onOpenLicenses: () -> Unit, onBack: () -> Unit) {
+    SettingsPageHeader(stringResource(R.string.app_info), onBack)
+    SettingsSectionTitle(stringResource(R.string.settings_app_info_group))
+    Text(
+        text = stringResource(R.string.app_version),
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+    )
+    SettingsNavigationRow(
+        title = stringResource(R.string.licenses_title),
+        summary = stringResource(R.string.licenses_description),
+        onClick = onOpenLicenses,
+    )
+}
+
+@Composable
+private fun SettingsPageHeader(title: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BackIconButton(onClick = onBack)
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.padding(start = 8.dp).semantics { heading() },
+        )
+    }
+}
+
+@Composable
+private fun SettingsSectionTitle(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
+            .semantics { heading() },
+    )
 }

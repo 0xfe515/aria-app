@@ -1,10 +1,7 @@
 package com.ariateam.aria.vision
 
 import android.Manifest
-import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -17,8 +14,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import com.ariateam.aria.MainActivity
-import com.ariateam.aria.R
+import com.ariateam.aria.runtime.AriaRuntimeStateBridge
+import com.ariateam.aria.runtime.AriaUnifiedNotificationCoordinator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,9 +38,7 @@ class VisionForegroundService : Service(), LifecycleOwner {
     override fun onCreate() {
         super.onCreate()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "비전 모니터링", NotificationManager.IMPORTANCE_LOW),
-        )
+        AriaUnifiedNotificationCoordinator.ensureChannel(this)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -54,6 +49,7 @@ class VisionForegroundService : Service(), LifecycleOwner {
             ACTION_STOP -> {
                 VisionSession.markExplicitStop(this)
                 VisionSession.cancelPendingStartRequest()
+                stopForegroundSession()
                 stopSelf(startId)
             }
             else -> stopSelf(startId)
@@ -70,17 +66,29 @@ class VisionForegroundService : Service(), LifecycleOwner {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             val controller = VisionSession.ensureController(applicationContext)
             controller.permissionDenied()
-            postCameraFailureNotification(controller.uiState.value.cameraErrorDetail.orEmpty())
+            AriaUnifiedNotificationCoordinator.postErrorNotification(
+                context = this,
+                title = "비전 모니터링 중지",
+                detail = controller.uiState.value.cameraErrorDetail.orEmpty().ifBlank {
+                    "카메라 권한이 필요합니다. 설정에서 권한을 허용해 주세요."
+                },
+            )
             stopForegroundSession()
             stopSelf(startId)
             return
         }
 
         try {
+            AriaRuntimeStateBridge.setVisionActive(this, true)
             if (!foreground) {
+                val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this)
                 startForeground(
-                    NOTIFICATION_ID,
-                    buildNotification(),
+                    AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
+                    AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                        context = this,
+                        voiceActive = voiceActive,
+                        visionActive = true,
+                    ),
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA,
                 )
                 foreground = true
@@ -118,69 +126,72 @@ class VisionForegroundService : Service(), LifecycleOwner {
         sessionWatchJob?.cancel()
         sessionWatchJob = serviceScope.launch {
             controller.uiState.collect { state ->
-                if (state.cameraStatus == CameraSessionStatus.Error ||
-                    state.cameraStatus == CameraSessionStatus.PermissionDenied
-                ) {
-                    Log.w(TAG, "Camera session ended: ${state.cameraErrorDetail.orEmpty()}")
-                    postCameraFailureNotification(state.cameraErrorDetail.orEmpty())
-                    stopForegroundSession()
-                    stopSelf()
+                when (state.cameraStatus) {
+                    CameraSessionStatus.CameraUnavailable -> {
+                        val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this@VisionForegroundService)
+                        val notif = AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                            context = this@VisionForegroundService,
+                            voiceActive = voiceActive,
+                            visionActive = true,
+                            cameraUnavailable = true,
+                        )
+                        getSystemService(NotificationManager::class.java)?.notify(
+                            AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
+                            notif,
+                        )
+                    }
+                    CameraSessionStatus.Running -> {
+                        AriaUnifiedNotificationCoordinator.cancelErrorNotification(this@VisionForegroundService)
+                        val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this@VisionForegroundService)
+                        val notif = AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                            context = this@VisionForegroundService,
+                            voiceActive = voiceActive,
+                            visionActive = true,
+                            cameraUnavailable = false,
+                        )
+                        getSystemService(NotificationManager::class.java)?.notify(
+                            AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
+                            notif,
+                        )
+                    }
+                    CameraSessionStatus.Error, CameraSessionStatus.PermissionDenied -> {
+                        Log.w(TAG, "Camera session ended: ${state.cameraErrorDetail.orEmpty()}")
+                        AriaUnifiedNotificationCoordinator.postErrorNotification(
+                            context = this@VisionForegroundService,
+                            title = "비전 모니터링 중지",
+                            detail = state.cameraErrorDetail.orEmpty().ifBlank {
+                                "카메라 세션이 중지되었습니다. 앱을 열어 상태를 확인해 주세요."
+                            },
+                        )
+                        stopForegroundSession()
+                        stopSelf()
+                    }
+                    else -> Unit
                 }
             }
         }
     }
 
     private fun stopForegroundSession() {
+        AriaRuntimeStateBridge.setVisionActive(this, false)
         if (foreground) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this)
+            if (voiceActive) {
+                stopForeground(STOP_FOREGROUND_DETACH)
+                val notif = AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                    context = this,
+                    voiceActive = true,
+                    visionActive = false,
+                )
+                getSystemService(NotificationManager::class.java)?.notify(
+                    AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
+                    notif,
+                )
+            } else {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
             foreground = false
         }
-    }
-
-    private fun postCameraFailureNotification(detail: String) {
-        val openIntent = PendingIntent.getActivity(
-            this,
-            ERROR_NOTIFICATION_ID,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("비전 모니터링 중지")
-            .setContentText(detail.ifBlank { "카메라 세션이 중지되었습니다. 앱을 열어 상태를 확인해 주세요." })
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(openIntent)
-            .setAutoCancel(true)
-            .build()
-        getSystemService(NotificationManager::class.java).notify(ERROR_NOTIFICATION_ID, notification)
-    }
-
-    private fun buildNotification(): Notification {
-        val openIntent = PendingIntent.getActivity(
-            this,
-            NOTIFICATION_ID,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val stopIntent = PendingIntent.getService(
-            this,
-            STOP_REQUEST_CODE,
-            Intent(this, VisionForegroundService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText("카메라로 주변 위험을 모니터링 중입니다.")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(openIntent)
-            .addAction(
-                Notification.Action.Builder(null, "모니터링 중지", stopIntent).build(),
-            )
-            .setOngoing(true)
-            .build()
     }
 
     override fun onDestroy() {
@@ -198,10 +209,6 @@ class VisionForegroundService : Service(), LifecycleOwner {
     companion object {
         const val ACTION_START = "com.ariateam.aria.vision.START"
         const val ACTION_STOP = "com.ariateam.aria.vision.STOP"
-        private const val CHANNEL_ID = "aria_vision_camera"
-        private const val NOTIFICATION_ID = 3
-        private const val ERROR_NOTIFICATION_ID = 5
-        private const val STOP_REQUEST_CODE = 4
         private const val TAG = "AriaVisionService"
 
         fun requestStart(

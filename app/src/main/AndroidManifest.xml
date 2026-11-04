@@ -60,6 +60,20 @@
             android:foregroundServiceType="camera"
             android:stopWithTask="false" />
         <service android:name=".command.LanguageService" android:exported="false" android:process=":language" />
+
+        <provider
+            android:name=".runtime.AriaRuntimeProvider"
+            android:authorities="${applicationId}.runtime.provider"
+            android:exported="false"
+            android:initOrder="100" />
+
+        <receiver
+            android:name=".runtime.AriaUnifiedStopReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.ariateam.aria.ACTION_STOP_ALL" />
+            </intent-filter>
+        </receiver>
         <activity
             android:name=".MainActivity"
             android:exported="true"

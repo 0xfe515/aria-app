@@ -30,15 +30,22 @@ internal object VisionSession {
     @Volatile
     private var userStopRequested = false
 
+    internal fun setUserStopRequestedForTesting(value: Boolean) {
+        userStopRequested = value
+    }
+
+    internal val isUserStopRequestedForTesting: Boolean
+        get() = userStopRequested
+
     @Volatile
     private var controller: VisionPipelineController? = null
 
     val isInitialized: Boolean
-        get() = controller != null
+        get() = controller?.isClosed == false
 
     fun captureSingleFrame(callback: (Bitmap?) -> Unit) {
         val ctrl = controller
-        if (ctrl == null) {
+        if (ctrl == null || ctrl.isClosed) {
             callback(null)
             return
         }
@@ -67,12 +74,33 @@ internal object VisionSession {
         if (!persisted) Log.e("AriaVisionSession", "Could not persist explicit camera stop state")
     }
 
+    fun onExplicitAppStart(context: Context) {
+        clearExplicitStop(context)
+        synchronized(lock) {
+            if (controller?.isClosed == true) {
+                controller = null
+            }
+            if (mutableUiState.value.cameraStatus == CameraSessionStatus.Error) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    cameraStatus = CameraSessionStatus.Stopped,
+                    cameraErrorDetail = null,
+                )
+            }
+        }
+    }
+
     private var pendingStartRequest: VisionSessionStartRequest? = null
 
     fun ensureController(context: Context): VisionPipelineController {
-        controller?.let { return it }
+        val current = controller
+        if (current != null && !current.isClosed) return current
         return synchronized(lock) {
-            controller ?: createController(context.applicationContext).also { controller = it }
+            val lockedCurrent = controller
+            if (lockedCurrent != null && !lockedCurrent.isClosed) {
+                lockedCurrent
+            } else {
+                createController(context.applicationContext).also { controller = it }
+            }
         }
     }
 

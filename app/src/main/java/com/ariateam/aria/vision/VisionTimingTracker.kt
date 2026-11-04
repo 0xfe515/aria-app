@@ -73,7 +73,14 @@ data class VisionTimingSnapshot(
     val totalAnalyzerMs: StagePercentiles? = null,
     val resultPublicationMs: StagePercentiles? = null,
     val cameraToResultAgeMs: StagePercentiles? = null,
+    val cameraStartMs: StagePercentiles? = null,
+    val alertProcessingMs: StagePercentiles? = null,
 ) {
+    fun formatCameraStartLabel(): String = cameraStartMs?.formatP50P95() ?: "대기 중"
+
+    fun formatAlertProcessingLabel(): String =
+        if (mode == VisionPipelineMode.PREVIEW_ONLY) "N/A (미리보기 전용)"
+        else alertProcessingMs?.formatP50P95() ?: "대기 중"
     fun formatModelInvokeLabel(): String =
         if (!modelLoaded) "N/A (모델 미적용)" else modelInvokeMs?.formatP50P95() ?: "N/A (샘플 대기)"
 
@@ -216,6 +223,8 @@ class VisionTimingTracker(
     private val steadyTotalAnalyzerRing = BoundedNanoSampleRing(ringCapacity)
     private val steadyPublicationRing = BoundedNanoSampleRing(ringCapacity)
     private val steadyCameraToResultAgeRing = BoundedNanoSampleRing(ringCapacity)
+    private val steadyAlertProcessingRing = BoundedNanoSampleRing(ringCapacity)
+    private val cameraStartRing = BoundedNanoSampleRing(ringCapacity)
 
     fun reset() {
         synchronized(lock) {
@@ -249,6 +258,24 @@ class VisionTimingTracker(
             steadyTotalAnalyzerRing.clear()
             steadyPublicationRing.clear()
             steadyCameraToResultAgeRing.clear()
+            steadyAlertProcessingRing.clear()
+            cameraStartRing.clear()
+        }
+    }
+
+    fun recordCameraStart(startDurationNanos: Long) {
+        synchronized(lock) {
+            if (startDurationNanos >= 0L) {
+                cameraStartRing.add(startDurationNanos)
+            }
+        }
+    }
+
+    fun recordAlertProcessing(alertDurationNanos: Long) {
+        synchronized(lock) {
+            if (alertDurationNanos >= 0L) {
+                steadyAlertProcessingRing.add(alertDurationNanos)
+            }
         }
     }
 
@@ -489,6 +516,8 @@ class VisionTimingTracker(
                 } else {
                     null
                 },
+                cameraStartMs = cameraStartRing.computePercentiles(),
+                alertProcessingMs = if (mode == VisionPipelineMode.PREVIEW_ONLY) null else steadyAlertProcessingRing.computePercentiles(),
             )
         }
     }

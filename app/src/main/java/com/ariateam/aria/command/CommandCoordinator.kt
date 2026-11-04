@@ -108,8 +108,8 @@ class CommandCoordinator(
     )
     private val store: GemmaModelStore = GemmaModelStore(context) { value ->
         val installed = storeInstalled()
-        val langStatus = if (installed) {
-            if (active) language.currentStatus else LanguageStatus.Preparing
+        val langStatus = if (installed && language.ready) {
+            LanguageStatus.Ready
         } else {
             LanguageStatus.Missing
         }
@@ -136,17 +136,9 @@ class CommandCoordinator(
 
     private fun prepareModel() {
         if (store.installed()) {
-            when (language.currentStatus) {
-                LanguageStatus.Ready -> {
-                    emit(snapshot.copy(runtime = language.lastStatus, languageStatus = LanguageStatus.Ready))
-                    return
-                }
-                LanguageStatus.Preparing -> emit(
-                    snapshot.copy(runtime = language.lastStatus, languageStatus = LanguageStatus.Preparing)
-                )
-                LanguageStatus.Missing,
-                LanguageStatus.Failed
-                -> emit(snapshot.copy(languageStatus = LanguageStatus.Preparing))
+            if (language.currentStatus == LanguageStatus.Ready) {
+                emit(snapshot.copy(runtime = language.lastStatus, languageStatus = LanguageStatus.Ready))
+                return
             }
             language.prepare(store.modelFile.absolutePath)
         }
@@ -221,45 +213,31 @@ class CommandCoordinator(
             handle(result)
             return
         }
-        if (!store.installed()) {
-            announce("지원하는 명령을 확인해 주세요. 홈, 설정, 안내 소리, 현재 상태, 도움말을 사용할 수 있어요.")
-            return
-        }
-        if (!language.ready) {
-            if (language.preparing) {
-                announce("Gemma 모델을 준비 중이에요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요.")
-            } else {
-                prepareModel()
-                announce("Gemma 모델을 다시 준비하고 있어요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요.")
+        if (store.installed() && language.ready) {
+            if (language.busy) {
+                handleCloudTextQuestion(text)
+                return
             }
-            return
-        }
-        if (language.busy) {
-            announce("이전 명령을 아직 처리 중이에요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요.")
-            return
-        }
-        emit(snapshot.copy(message = "명령 해석 중", processing = true))
-        val prompt = buildModelPrompt(text, commandContext.target(now))
-        language.interpretOutcome(prompt) { outcome ->
-            if (!active || !generation.accepts(ticket)) return@interpretOutcome
-            when (outcome) {
-                is LanguageOutcome.Success -> handle(parseModelResult(outcome.output))
-                is LanguageOutcome.Failure -> announce(
-                    when (outcome.reason) {
-                        FailureReason.ResponseTimeout ->
-                            "Gemma 응답 시간이 초과되어 언어 엔진을 정리했어요. 다음 명령에 다시 준비하며, 지금은 기본 명령을 사용할 수 있어요."
-                        FailureReason.MemoryError ->
-                            "기기 메모리가 부족해 Gemma 해석을 중단했어요. 기본 명령으로 다시 말해 주세요."
-                        FailureReason.Busy ->
-                            "이전 명령을 아직 처리 중이에요. 잠시 후 다시 말하거나 기본 명령을 사용해 주세요."
-                        FailureReason.NotReady, FailureReason.PreparationTimeout ->
-                            "Gemma 모델이 아직 준비되지 않았어요. 기본 명령으로 다시 말해 주세요."
-                        FailureReason.ConnectionError, FailureReason.InferenceError ->
-                            "Gemma 해석 오류가 발생했어요. 기본 명령으로 다시 말해 주세요."
+            emit(snapshot.copy(message = "명령 해석 중", processing = true))
+            val prompt = buildModelPrompt(text, commandContext.target(now))
+            language.interpretOutcome(prompt) { outcome ->
+                if (!active || !generation.accepts(ticket)) return@interpretOutcome
+                when (outcome) {
+                    is LanguageOutcome.Success -> {
+                        val parsed = parseModelResult(outcome.output)
+                        if (parsed != Interpretation.Unknown) {
+                            handle(parsed)
+                        } else {
+                            handleCloudTextQuestion(text)
+                        }
                     }
-                )
+                    is LanguageOutcome.Failure -> handleCloudTextQuestion(text)
+                }
             }
+            return
         }
+        // Conversational question without local Gemma prerequisite: route directly to Gemini cloud
+        handleCloudTextQuestion(text)
     }
 
     private fun handle(result: Interpretation) {

@@ -33,6 +33,8 @@ This is an isolated development environment. Builds, tests, and lint are part of
 
 ## Current Worker Policy
 
+- **Current field-fix iteration:** User explicitly excludes real-device tests and installation because no device is connected. Run JVM tests, build, lint and androidTest compilation only; do not claim hardware recovery/performance verified. Settings order: 일반, 계정, 진단, 데모, 앱 정보. General contains stature/mount and voice options; Account is Gemini API configuration, replacing local conversation LLM setup (retain local ASR and vision). Mount labels only 어깨/가슴. One persistent Aria notification with whole-session Stop.
+
 - **2026-11-04 explicit UI correction:** Preserve the established Home layout. Vision overlay may shrink but must never push other components. Overlay subtree must have no buttons, clickable/toggle/profile/recovery actions. Direction visualization is exactly one plain line originating from the actual overlay image's bottom center near the implied user position; no arrows, circles, rings, dashed guides, extra strokes, or origin moved to image center. Keep essential recovery accessible in existing Settings/recovery surfaces without redesigning Home.
 
 - **2026-11-04 review override:** Codex performs the current whole-app review directly. Leave already-running Gemini review/fix Tasks in progress, then independently evaluate their final outputs before release; do not treat worker success as final acceptance. Preserve exclusive edit ownership while they run.

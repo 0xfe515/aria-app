@@ -1,5 +1,37 @@
 <resources>
     <string name="settings_main_group">설정 항목</string>
+
+    <!-- General (일반) -->
+    <string name="settings_general_title">일반</string>
+    <string name="settings_general_group">일반 설정</string>
+    <string name="settings_general_summary">음성 호출, 피드백 안내, 키·착용 위치 설정</string>
+    <string name="settings_general_voice_section">음성 및 알림</string>
+    <string name="settings_general_mount_section">신체 장착 기준</string>
+
+    <!-- Account (계정) -->
+    <string name="settings_account_title">계정</string>
+    <string name="settings_account_group">Gemini 계정</string>
+    <string name="settings_account_summary_registered">Gemini API 키 등록됨 (%1$s)</string>
+    <string name="settings_account_summary_empty">Gemini API 키 미설정</string>
+    <string name="settings_account_local_models_group">온디바이스 AI</string>
+    <string name="settings_account_local_asr_title">한국어 음성 인식</string>
+    <string name="settings_account_local_asr_summary">온디바이스 (Sherpa-ONNX) · 오프라인 동작</string>
+    <string name="settings_account_local_vision_title">보행 안전 비전</string>
+    <string name="settings_account_local_vision_summary">온디바이스 (LiteRT) · 오프라인 동작</string>
+    <string name="settings_account_model_info_title">대화 및 복합 질문</string>
+    <string name="settings_account_model_info_summary">Google Gemini API (클라우드)</string>
+
+    <!-- Diagnostics (진단) -->
+    <string name="settings_diagnostics_title">진단</string>
+    <string name="settings_diagnostics_group">개발자 점검 도구</string>
+    <string name="settings_diagnostics_summary">카메라·비전 및 음성 진단, 권한 관리</string>
+    <string name="settings_vision_diagnostics_summary">카메라 및 비전 상태 확인</string>
+    <string name="settings_voice_diagnostics_summary">음성 인식 상태 확인</string>
+
+    <!-- Demo (데모) -->
+    <string name="settings_demo_summary">음성 및 비전 기능 시연</string>
+
+    <!-- Voice Settings (General Subpage) -->
     <string name="settings_voice_title">음성 및 알림</string>
     <string name="settings_voice_group">음성 설정</string>
     <string name="settings_voice_enabled">호출어 대기 중</string>
@@ -9,6 +41,8 @@
     <string name="settings_feedback_disabled">진동으로만 안내</string>
     <string name="settings_notification_summary">백그라운드 명령 알림 권한 관리</string>
     <string name="settings_tts_unavailable">한국어 음성 안내를 사용하려면 시스템에 음성 데이터를 설치하세요.</string>
+
+    <!-- Legacy Model Management (Retained for binary/resource safety) -->
     <string name="settings_model_title">모델 관리</string>
     <string name="settings_model_group">온디바이스 모델</string>
     <string name="settings_model_size_summary">약 2.59 GB · Wi-Fi 기본</string>
@@ -22,11 +56,7 @@
     <string name="settings_cancel">취소</string>
     <string name="settings_mobile_data_enabled">Wi-Fi와 모바일 데이터 사용</string>
     <string name="settings_mobile_data_disabled">Wi-Fi에서만 다운로드</string>
-    <string name="settings_diagnostics_title">시연 및 진단</string>
-    <string name="settings_diagnostics_group">도구</string>
-    <string name="settings_diagnostics_summary">시연 화면과 음성·비전 점검</string>
-    <string name="settings_vision_diagnostics_summary">카메라 및 비전 상태 확인</string>
-    <string name="settings_voice_diagnostics_summary">음성 인식 상태 확인</string>
-    <string name="settings_demo_summary">음성 및 비전 기능 시연</string>
+
+    <!-- App Info (앱 정보) -->
     <string name="settings_app_info_group">ARIA</string>
 </resources>

@@ -677,6 +677,8 @@ fun MainScreen(
     }
     val requestStartCamera: (Preview.SurfaceProvider?, VisionPipelineMode, Int) -> Unit =
         { provider, mode, rotation -> requestCameraStart(provider, mode, rotation, false) }
+    val requestExplicitCameraStart: (Preview.SurfaceProvider?, VisionPipelineMode, Int) -> Unit =
+        { provider, mode, rotation -> requestCameraStart(provider, mode, rotation, true) }
 
     val openSettings = {
         context.startActivity(
@@ -828,7 +830,7 @@ fun MainScreen(
                                 invalidatePendingAndStopCamera()
                                 debugDestination = DebugDestination.None
                             },
-                            onStartCamera = requestStartCamera,
+                            onStartCamera = requestExplicitCameraStart,
                             onStopCamera = invalidatePendingAndStopCamera,
                             onSelectPipelineMode = visionModel::setPipelineMode,
                             onResetMetrics = visionModel::resetMetrics,
@@ -868,7 +870,7 @@ fun MainScreen(
                                 invalidatePendingAndStopCamera()
                                 debugDestination = DebugDestination.None
                             },
-                            onStartCamera = requestStartCamera,
+                            onStartCamera = requestExplicitCameraStart,
                             onStopCamera = invalidatePendingAndStopCamera,
                             onStartVoiceWaiting = { requestAction(0) },
                             onStopVoice = model::stop,

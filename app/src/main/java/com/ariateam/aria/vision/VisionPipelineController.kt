@@ -7,10 +7,14 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.TotalCaptureResult
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.OptIn
@@ -39,6 +43,7 @@ import com.ariateam.aria.hazard.HazardLevel
 import com.ariateam.aria.hazard.MotionDegradedReason
 import com.ariateam.aria.hazard.MotionState
 import com.ariateam.aria.hazard.MotionTracker
+import com.ariateam.aria.runtime.AriaRuntimeTimingTracker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -122,9 +127,6 @@ class VisionPipelineController(
     val groundContactDistanceEstimator: GroundContactDistanceEstimator = GroundContactDistanceEstimator(),
     private val mutableUiState: MutableStateFlow<VisionUiState> = MutableStateFlow(VisionUiState()),
 ) : AutoCloseable {
-    private val analyzerExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "aria-vision-analyzer").apply { isDaemon = true }
-    }
     private val running = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
     private val sessionGeneration = AtomicLong(0L)
@@ -137,6 +139,18 @@ class VisionPipelineController(
     private val imageProxyCloses = AtomicLong(0L)
     private val cameraCaptureCallbacks = AtomicLong(0L)
     private val pendingFrameSnapshot = java.util.concurrent.atomic.AtomicReference<((android.graphics.Bitmap?) -> Unit)?>()
+
+    val isClosed: Boolean
+        get() = closed.get()
+
+    val isRunning: Boolean
+        get() = running.get()
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var retryRunnable: Runnable? = null
+    private var retryCount = 0
+    private var availabilityCallback: CameraManager.AvailabilityCallback? = null
+    private var sessionStartNanos = 0L
 
     fun captureSingleFrame(callback: (android.graphics.Bitmap?) -> Unit) {
         if (!running.get()) {
@@ -249,6 +263,7 @@ class VisionPipelineController(
         if (currentMode == mode) return
         currentMode = mode
         timingTracker.reset()
+        AriaRuntimeTimingTracker.reset()
         lastPublishedNanos.set(0L)
         groundContactDistanceEstimator.reset()
         val owner = activeLifecycleOwner
@@ -270,6 +285,7 @@ class VisionPipelineController(
 
     fun resetMetrics() {
         timingTracker.reset()
+        AriaRuntimeTimingTracker.reset()
         lastPublishedNanos.set(0L)
         val now = SystemClock.elapsedRealtimeNanos()
         val modelLoaded = modelStore.segmenter.isReady
@@ -306,7 +322,7 @@ class VisionPipelineController(
                 "Manual CPU backend configuration is disabled in production; CPU is reserved for GPU-startup fallback."
             )
         }
-        analyzerExecutor.execute {
+        modelStore.segmenter.pipelineExecutor.execute {
             try {
                 modelStore.setPreferredBackend(backend, threads)
             } catch (t: Throwable) {
@@ -380,7 +396,10 @@ class VisionPipelineController(
             return
         }
 
+        cancelScheduledRetry()
         val ticket = sessionGeneration.incrementAndGet()
+        sessionStartNanos = SystemClock.elapsedRealtimeNanos()
+        retryCount = 0
         analyzerEntries.set(0L)
         pipelineInputs.set(0L)
         inferenceCallEntries.set(0L)
@@ -394,6 +413,7 @@ class VisionPipelineController(
         activeTargetRotation = targetRotation
         running.set(true)
         timingTracker.reset()
+        AriaRuntimeTimingTracker.reset()
         lastPublishedNanos.set(0L)
 
         motionTracker.start(targetRotation)
@@ -420,6 +440,22 @@ class VisionPipelineController(
             )
         }
 
+        startCameraInternal(lifecycleOwner, surfaceProvider, mode, targetRotation, ticket)
+    }
+
+    private fun startCameraInternal(
+        lifecycleOwner: LifecycleOwner,
+        surfaceProvider: Preview.SurfaceProvider?,
+        mode: VisionPipelineMode,
+        targetRotation: Int,
+        ticket: Long,
+    ) {
+        if (!isSessionLive(ticket)) return
+        val existing = cameraProvider
+        if (existing != null) {
+            bindUseCases(existing, lifecycleOwner, surfaceProvider, mode, targetRotation, ticket)
+            return
+        }
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener(
             {
@@ -431,7 +467,8 @@ class VisionPipelineController(
                     bindUseCases(provider, lifecycleOwner, surfaceProvider, mode, targetRotation, ticket)
                 } catch (t: Throwable) {
                     if (!isSessionLive(ticket)) return@addListener
-                    failCameraSession(ticket, "카메라 초기화 실패 (${t.javaClass.simpleName})")
+                    val classified = CameraErrorClassifier.classifyException(t)
+                    handleCameraFailure(ticket, classified)
                 }
             },
             ContextCompat.getMainExecutor(context),
@@ -439,7 +476,7 @@ class VisionPipelineController(
     }
 
     private fun isSessionLive(ticket: Long): Boolean =
-        running.get() && !closed.get() && sessionGeneration.get() == ticket
+        running.get() && !closed.get() && sessionGeneration.get() == ticket && !VisionSession.requiresExplicitRestart(context)
 
     @OptIn(ExperimentalCamera2Interop::class)
     private fun bindUseCases(
@@ -510,6 +547,16 @@ class VisionPipelineController(
                     cameraCaptureCallbacks.incrementAndGet()
                     timingTracker.recordSensorCapture(nowNanos)
                     if (currentMode == VisionPipelineMode.PREVIEW_ONLY) {
+                        if (mutableUiState.value.cameraStatus != CameraSessionStatus.Running && isSessionLive(ticket)) {
+                            retryCount = 0
+                            val startLatency = if (sessionStartNanos > 0L) (nowNanos - sessionStartNanos).coerceAtLeast(0L) else 0L
+                            timingTracker.recordCameraStart(startLatency)
+                            AriaRuntimeTimingTracker.recordStart(startLatency / 1_000_000.0)
+                            mutableUiState.update {
+                                if (isSessionLive(ticket)) it.copy(cameraStatus = CameraSessionStatus.Running, cameraErrorDetail = null)
+                                else it
+                            }
+                        }
                         publishPreviewOnlyMetricsThrottled(ticket, nowNanos)
                     }
                 }
@@ -545,7 +592,7 @@ class VisionPipelineController(
             if (mode == VisionPipelineMode.PREVIEW_ONLY) {
                 analysis.clearAnalyzer()
             } else {
-                analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
+                analysis.setAnalyzer(modelStore.segmenter.pipelineExecutor) { imageProxy ->
                     analyzerEntries.incrementAndGet()
                     analyzeFrame(imageProxy, ticket)
                 }
@@ -558,10 +605,8 @@ class VisionPipelineController(
             val stateObserver = Observer<CameraState> { cameraState ->
                 val cameraError = cameraState.error ?: return@Observer
                 if (isSessionLive(ticket)) {
-                    failCameraSession(
-                        ticket,
-                        "카메라 연결이 중단되었습니다 (${cameraError.toString().take(100)}).",
-                    )
+                    val classified = CameraErrorClassifier.classifyStateError(cameraError)
+                    handleCameraFailure(ticket, classified)
                 }
             }
             observedCameraState = camera.cameraInfo.cameraState
@@ -589,7 +634,7 @@ class VisionPipelineController(
                 val modelLoaded = modelStore.segmenter.isReady
                 mutableUiState.update {
                     it.copy(
-                        cameraStatus = CameraSessionStatus.Running,
+                        cameraStatus = CameraSessionStatus.Starting, // Avoid false Running until fresh frame arrives!
                         cameraErrorDetail = null,
                         timing = timingTracker.snapshot(
                             mode = mode,
@@ -605,12 +650,97 @@ class VisionPipelineController(
                 }
             }
         } catch (t: Throwable) {
-            failCameraSession(ticket, "카메라 스트림 바인딩 실패 (${t.javaClass.simpleName})")
+            val classified = CameraErrorClassifier.classifyException(t)
+            handleCameraFailure(ticket, classified)
         }
+    }
+
+    private fun handleCameraFailure(ticket: Long, failure: CameraFailureKind) {
+        if (!isSessionLive(ticket)) return
+        when (failure) {
+            is CameraFailureKind.Permission -> permissionDenied()
+            is CameraFailureKind.TransientInUse -> {
+                mutableUiState.update {
+                    it.copy(
+                        cameraStatus = CameraSessionStatus.CameraUnavailable,
+                        cameraErrorDetail = failure.description,
+                    )
+                }
+                scheduleTransientRetry(ticket, failure.description)
+            }
+            is CameraFailureKind.Fatal -> failCameraSession(ticket, failure.description)
+        }
+    }
+
+    private fun scheduleTransientRetry(ticket: Long, detail: String) {
+        if (!isSessionLive(ticket)) return
+        if (retryCount >= MAX_RETRY_COUNT) {
+            failCameraSession(ticket, "카메라 연결 재시도 횟수를 초과했습니다 (${detail}). 앱 화면에서 다시 시작해 주세요.")
+            return
+        }
+        val delayMs = BACKOFF_DELAYS_MS[retryCount.coerceIn(0, BACKOFF_DELAYS_MS.size - 1)]
+        retryCount++
+        registerAvailabilityCallback(ticket)
+
+        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            if (!isSessionLive(ticket)) return@Runnable
+            retryCameraSession(ticket)
+        }
+        retryRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun registerAvailabilityCallback(ticket: Long) {
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return
+        unregisterAvailabilityCallback()
+        val callback = object : CameraManager.AvailabilityCallback() {
+            override fun onCameraAvailable(cameraId: String) {
+                if (!isSessionLive(ticket)) return
+                Log.i(TAG, "Camera $cameraId became available, retrying session $ticket")
+                mainHandler.post {
+                    if (isSessionLive(ticket)) {
+                        retryCameraSession(ticket)
+                    }
+                }
+            }
+        }
+        availabilityCallback = callback
+        try {
+            manager.registerAvailabilityCallback(ContextCompat.getMainExecutor(context), callback)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to register CameraManager availability callback", t)
+        }
+    }
+
+    private fun unregisterAvailabilityCallback() {
+        val callback = availabilityCallback ?: return
+        availabilityCallback = null
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return
+        runCatching { manager.unregisterAvailabilityCallback(callback) }
+    }
+
+    private fun retryCameraSession(ticket: Long) {
+        if (!isSessionLive(ticket)) return
+        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+        retryRunnable = null
+        unregisterAvailabilityCallback()
+        val owner = activeLifecycleOwner ?: return
+        val provider = activeSurfaceProvider
+        val mode = currentMode
+        val rotation = activeTargetRotation
+        startCameraInternal(owner, provider, mode, rotation, ticket)
+    }
+
+    private fun cancelScheduledRetry() {
+        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+        retryRunnable = null
+        unregisterAvailabilityCallback()
     }
 
     private fun failCameraSession(ticket: Long, detail: String) {
         if (sessionGeneration.get() != ticket || !running.getAndSet(false)) return
+        cancelScheduledRetry()
         sessionGeneration.incrementAndGet()
         activeLifecycleOwner = null
         activeSurfaceProvider = null
@@ -636,6 +766,17 @@ class VisionPipelineController(
         val analyzerStartNanos = SystemClock.elapsedRealtimeNanos()
         try {
             if (!isSessionLive(ticket)) return
+            if (mutableUiState.value.cameraStatus != CameraSessionStatus.Running) {
+                retryCount = 0
+                val nowNanos = SystemClock.elapsedRealtimeNanos()
+                val startLatency = if (sessionStartNanos > 0L) (nowNanos - sessionStartNanos).coerceAtLeast(0L) else 0L
+                timingTracker.recordCameraStart(startLatency)
+                AriaRuntimeTimingTracker.recordStart(startLatency / 1_000_000.0)
+                mutableUiState.update {
+                    if (isSessionLive(ticket)) it.copy(cameraStatus = CameraSessionStatus.Running, cameraErrorDetail = null)
+                    else it
+                }
+            }
             val planes = imageProxy.planes
             require(planes.size >= 3) { "YUV_420_888 requires 3 planes" }
 
@@ -744,6 +885,8 @@ class VisionPipelineController(
             val analyzerEndNanos = SystemClock.elapsedRealtimeNanos()
             if (!isSessionLive(ticket)) return
 
+            val alertStartNanos = SystemClock.elapsedRealtimeNanos()
+
             // Query aligned motion state and assess hazard
             val isClockRealtime = timingTracker.sensorTimestampSource == SensorTimestampSource.REALTIME_VERIFIED
             val motionRaw = motionTracker.stateAt(imageTimestampNanos)
@@ -831,6 +974,9 @@ class VisionPipelineController(
                     timestampNanos = imageTimestampNanos,
                 )
             }
+            val alertDurationNanos = (SystemClock.elapsedRealtimeNanos() - alertStartNanos).coerceAtLeast(0L)
+            timingTracker.recordAlertProcessing(alertDurationNanos)
+            AriaRuntimeTimingTracker.recordAlerts(alertDurationNanos / 1_000_000.0)
 
             val modelLoaded = inferenceOutput != null
             timingTracker.recordAnalyzerFrame(
@@ -846,6 +992,11 @@ class VisionPipelineController(
                 frameCropRect = cropRect,
                 sensorTimestampSource = sensorTimestampSource,
             )
+            val analyzerDurationNanos = (analyzerEndNanos - analyzerStartNanos).coerceAtLeast(0L)
+            AriaRuntimeTimingTracker.recordAnalyzer(analyzerDurationNanos / 1_000_000.0)
+            AriaRuntimeTimingTracker.recordPreprocess(preprocessDurationNanos / 1_000_000.0)
+            inferenceOutput?.invokeDurationNanos?.let { AriaRuntimeTimingTracker.recordInvoke(it / 1_000_000.0) }
+            inferenceOutput?.postprocessDurationNanos?.let { AriaRuntimeTimingTracker.recordPost(it / 1_000_000.0) }
             completedFrames.incrementAndGet()
 
             if (shouldPublishUi && isSessionLive(ticket)) {
@@ -880,6 +1031,8 @@ class VisionPipelineController(
                     imageTimestampNanos = imageTimestampNanos,
                     sensorTimestampSource = sensorTimestampSource,
                 )
+                val uiDurationNanos = (publishCompletedNanos - analyzerEndNanos).coerceAtLeast(0L)
+                AriaRuntimeTimingTracker.recordUi(uiDurationNanos / 1_000_000.0)
                 val updatedSnap = timingTracker.snapshot(
                     mode = currentMode,
                     modelLoaded = modelLoaded,
@@ -978,6 +1131,8 @@ class VisionPipelineController(
     }
 
     fun stopCamera() {
+        cancelScheduledRetry()
+        retryCount = 0
         pendingFrameSnapshot.getAndSet(null)?.invoke(null)
         sessionGeneration.incrementAndGet()
         running.set(false)
@@ -1083,7 +1238,6 @@ class VisionPipelineController(
         groundContactMotionTracker.close()
         bodyMountProfileStore.close()
         groundContactDistanceEstimator.reset()
-        analyzerExecutor.shutdown()
         modelStore.close()
         if (terminalStatus == CameraSessionStatus.Error || terminalStatus == CameraSessionStatus.PermissionDenied) {
             mutableUiState.update {
@@ -1094,6 +1248,9 @@ class VisionPipelineController(
 
     companion object {
         private const val METRICS_PUBLISH_INTERVAL_NANOS = 250_000_000L
+        internal const val MAX_RETRY_COUNT = 5
+        internal val BACKOFF_DELAYS_MS = longArrayOf(500L, 1000L, 2000L, 4000L, 8000L)
+        private const val TAG = "AriaVisionPipeline"
     }
 }
 

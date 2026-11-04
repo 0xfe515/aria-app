@@ -17,6 +17,8 @@ import android.util.Log
 import com.ariateam.aria.MainActivity
 import com.ariateam.aria.R
 import com.ariateam.aria.command.CommandCoordinator
+import com.ariateam.aria.runtime.AriaRuntimeStateBridge
+import com.ariateam.aria.runtime.AriaUnifiedNotificationCoordinator
 
 /** One main-thread controller owns all platform recognition, including background wake listening. */
 class VoiceService : Service() {
@@ -110,8 +112,7 @@ class VoiceService : Service() {
             stopListening = { requestStop() },
             vibrate = { feedback.play(VoiceCue.Detected, audible = false) },
         )
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, getString(R.string.listening_channel), NotificationManager.IMPORTANCE_LOW))
+        AriaUnifiedNotificationCoordinator.ensureChannel(this)
         publish(state)
     }
 
@@ -121,9 +122,19 @@ class VoiceService : Service() {
         when (intent?.action) {
             ACTION_WAIT, ACTION_DICTATE, ACTION_RETRY, ACTION_RESTART -> {
                 try {
-                    getSystemService(NotificationManager::class.java).cancel(ERROR_NOTIFICATION)
+                    AriaUnifiedNotificationCoordinator.cancelErrorNotification(this)
+                    AriaRuntimeStateBridge.setVoiceActive(this, true)
                     if (!foreground) {
-                        startForeground(NOTIFICATION, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                        val visionActive = AriaRuntimeStateBridge.isVisionActive(this)
+                        startForeground(
+                            AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
+                            AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                                context = this,
+                                voiceActive = true,
+                                visionActive = visionActive,
+                            ),
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+                        )
                         foreground = true
                     }
                     if (!wakeLock.isHeld) wakeLock.acquire()
@@ -161,8 +172,25 @@ class VoiceService : Service() {
 
     private fun releaseResources() {
         if (wakeLock.isHeld) wakeLock.release()
-        if (foreground) stopForeground(STOP_FOREGROUND_REMOVE)
-        foreground = false
+        AriaRuntimeStateBridge.setVoiceActive(this, false)
+        if (foreground) {
+            val visionActive = AriaRuntimeStateBridge.isVisionActive(this)
+            if (visionActive) {
+                stopForeground(STOP_FOREGROUND_DETACH)
+                val notif = AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                    context = this,
+                    voiceActive = false,
+                    visionActive = true,
+                )
+                getSystemService(NotificationManager::class.java)?.notify(
+                    AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
+                    notif,
+                )
+            } else {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+            foreground = false
+        }
     }
 
     private fun publish(next: VoiceState) {
@@ -181,12 +209,6 @@ class VoiceService : Service() {
     }
 
     private fun postErrorNotification(errorCode: Int) {
-        val manager = getSystemService(NotificationManager::class.java)
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pending = PendingIntent.getActivity(
-            this, ERROR_NOTIFICATION, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val message = when (errorCode) {
             VoiceError.PERMISSION -> getString(R.string.error_permission)
             VoiceError.MICROPHONE -> getString(R.string.error_microphone)
@@ -197,31 +219,11 @@ class VoiceService : Service() {
             VoiceError.TIMEOUT -> getString(R.string.error_timeout)
             else -> getString(R.string.error_engine)
         }
-        val notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(message)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pending)
-            .setAutoCancel(true)
-            .build()
-        manager.notify(ERROR_NOTIFICATION, notification)
-    }
-
-    private fun notification(): Notification {
-        val openIntent = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val stopIntent = PendingIntent.getService(
-            this, 1, Intent(this, VoiceService::class.java).apply { action = ACTION_STOP },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, CHANNEL)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.listening_notification))
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(openIntent)
-            .addAction(Notification.Action.Builder(null, getString(R.string.stop_listening), stopIntent).build())
-            .setOngoing(true)
-            .build()
+        AriaUnifiedNotificationCoordinator.postErrorNotification(
+            context = this,
+            title = getString(R.string.app_name),
+            detail = message,
+        )
     }
 
     override fun onDestroy() {
@@ -240,9 +242,6 @@ class VoiceService : Service() {
         const val ACTION_RETRY = "com.ariateam.aria.RETRY"
         const val ACTION_RESTART = "com.ariateam.aria.RESTART"
         const val ACTION_STOP = "com.ariateam.aria.STOP"
-        private const val CHANNEL = "wakeword"
-        private const val NOTIFICATION = 1
-        private const val ERROR_NOTIFICATION = 2
         private const val TAG = "AriaVoiceService"
     }
 }

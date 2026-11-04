@@ -1,6 +1,7 @@
 package com.ariateam.aria.speech
 
 import android.util.Log
+import com.ariateam.aria.runtime.AriaRuntimeTimingTracker
 
 internal data class ListeningSnapshot(
     val phase: VoicePhase = VoicePhase.Stopped,
@@ -40,6 +41,7 @@ internal class VoiceListeningSession(
     private var ending = false
     private var activated = false
     private var inputAnnounced = false
+    private var inputAnnouncedAt: Long? = null
     private var draft = ""
     private var lastFinal = ""
     private var failures = 0
@@ -152,6 +154,7 @@ internal class VoiceListeningSession(
     private fun announceInput() {
         if (inputAnnounced) return
         inputAnnounced = true
+        inputAnnouncedAt = scheduler.now()
         listener.inputStarted()
     }
 
@@ -159,6 +162,7 @@ internal class VoiceListeningSession(
         mode = next
         activated = false
         inputAnnounced = false
+        inputAnnouncedAt = null
         draft = ""
         inputReadyAt = null
         beganSpeech = false
@@ -382,6 +386,10 @@ internal class VoiceListeningSession(
     }
 
     private fun confirmed(text: String) {
+        val now = scheduler.now()
+        inputAnnouncedAt?.let { announcedAt ->
+            AriaRuntimeTimingTracker.recordRecognition((now - announcedAt).toDouble())
+        }
         lastFinal = text.take(VoiceLimits.MAX_TEXT_CHARS)
         closeAttempt()
         failures = 0

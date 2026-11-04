@@ -257,4 +257,27 @@ class BodyMountProfileUiTest {
             assertEquals(savedProfile, store.profile.value)
         }
     }
+
+    @Test
+    fun mountChoicesAreConciseWithoutExplanatorySubtitles() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        compose.setContent {
+            AriaTheme {
+                BodyMountProfileDialog(
+                    onDismiss = {},
+                    profileStore = store,
+                )
+            }
+        }
+
+        // Mount choices must show "어깨" and "가슴"
+        compose.onNodeWithTag("bodyMountPositionShoulder").assertIsDisplayed()
+        compose.onNodeWithTag("bodyMountPositionChest").assertIsDisplayed()
+        compose.onNodeWithText(context.getString(com.ariateam.aria.R.string.body_mount_position_shoulder)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(com.ariateam.aria.R.string.body_mount_position_chest)).assertIsDisplayed()
+
+        // Subtitles/descriptions must NOT exist
+        compose.onNodeWithText(context.getString(com.ariateam.aria.R.string.body_mount_position_shoulder_desc)).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(com.ariateam.aria.R.string.body_mount_position_chest_desc)).assertDoesNotExist()
+    }
 }
