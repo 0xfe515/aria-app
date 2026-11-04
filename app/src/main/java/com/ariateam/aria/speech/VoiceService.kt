@@ -20,8 +20,11 @@ import com.ariateam.aria.command.CommandCoordinator
 import com.ariateam.aria.runtime.AriaRuntimeStateBridge
 import com.ariateam.aria.runtime.AriaUnifiedNotificationCoordinator
 
+import java.util.UUID
+
 /** One main-thread controller owns all platform recognition, including background wake listening. */
 class VoiceService : Service() {
+    private val serviceSessionId = "voice_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
     private val main = Handler(Looper.getMainLooper())
     private val callbacks = object : RemoteCallbackList<IVoiceCallback>() {
         override fun onCallbackDied(callback: IVoiceCallback?) {
@@ -31,6 +34,8 @@ class VoiceService : Service() {
     private data class PublishedState(val value: VoiceState, val revision: Long)
     @Volatile private var published = PublishedState(VoiceState(), 0)
     private val state get() = published.value
+    private val isEffectivelyActive: Boolean
+        get() = state.isActive && state.phase != VoicePhase.Stopping
     private var destroyed = false
     private var foreground = false
     private lateinit var session: VoiceListeningSession
@@ -51,15 +56,17 @@ class VoiceService : Service() {
         override fun setUiVisible(visible: Boolean) { main.post { coordinator.setVisible(visible) } }
         override fun setUiScreen(screen: String) { main.post { coordinator.setScreen(screen) } }
         override fun consumeNavigation(requestId: Long) { main.post { coordinator.consumeNavigation(requestId) } }
-        override fun downloadModel(mobileData: Boolean) { main.post { coordinator.download(mobileData) } }
-        override fun cancelModelDownload() { main.post { coordinator.cancelDownload() } }
-        override fun deleteModel() { main.post { if (!destroyed) coordinator.deleteModel() } }
         override fun consumeCloudQuestion(requestId: Long) { main.post { if (!destroyed) coordinator.consumeCloudQuestion(requestId) } }
         override fun speakCloudResponse(questionId: Long, text: String) { main.post { if (!destroyed) coordinator.speakCloudResponse(questionId, text) } }
         override fun reportCloudError(questionId: Long, errorText: String) { main.post { if (!destroyed) coordinator.reportCloudError(questionId, errorText) } }
         override fun cancelCloudQuestion(questionId: Long) { main.post { if (!destroyed) coordinator.cancelCloudQuestion(questionId) } }
         override fun speakHazardWarning(message: String) { main.post { if (!destroyed) coordinator.speakHazardWarning(message) } }
+        override fun postHazardAlert(session: Long, sequence: Long, timestampNanos: Long, message: String) {
+            main.post { if (!destroyed) coordinator.postHazardAlert(session, sequence, timestampNanos, message) }
+        }
         override fun preemptSpeech() { main.post { if (!destroyed) coordinator.preemptSpeech() } }
+        override fun isServiceActive(): Boolean = this@VoiceService.isEffectivelyActive
+        override fun getServiceSessionId(): String = serviceSessionId
     }
 
     override fun onCreate() {
@@ -116,14 +123,21 @@ class VoiceService : Service() {
         publish(state)
     }
 
-    override fun onBind(intent: Intent): IBinder = binder
+    override fun onBind(intent: Intent): IBinder {
+        if (isEffectivelyActive) {
+            runCatching {
+                AriaRuntimeStateBridge.setVoiceActive(this, true, sessionId = serviceSessionId, token = binder)
+            }
+        }
+        return binder
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_WAIT, ACTION_DICTATE, ACTION_RETRY, ACTION_RESTART -> {
                 try {
                     AriaUnifiedNotificationCoordinator.cancelErrorNotification(this)
-                    AriaRuntimeStateBridge.setVoiceActive(this, true)
+                    AriaRuntimeStateBridge.setVoiceActive(this, true, sessionId = serviceSessionId, token = binder)
                     if (!foreground) {
                         val visionActive = AriaRuntimeStateBridge.isVisionActive(this)
                         startForeground(
@@ -138,12 +152,12 @@ class VoiceService : Service() {
                         foreground = true
                     }
                     if (!wakeLock.isHeld) wakeLock.acquire()
-                    if (!state.isActive) {
+                    if (!isEffectivelyActive) {
                         coordinator.started()
                     } else if (intent.action == ACTION_RETRY) {
                         coordinator.retryPreparation()
                     }
-                    if (state.isActive && intent.action == ACTION_RESTART) {
+                    if (isEffectivelyActive && intent.action == ACTION_RESTART) {
                         session.stop()
                     }
                     session.start(manual = intent.action == ACTION_DICTATE)
@@ -172,7 +186,7 @@ class VoiceService : Service() {
 
     private fun releaseResources() {
         if (wakeLock.isHeld) wakeLock.release()
-        AriaRuntimeStateBridge.setVoiceActive(this, false)
+        AriaRuntimeStateBridge.setVoiceActive(this, false, sessionId = serviceSessionId, token = binder)
         if (foreground) {
             val visionActive = AriaRuntimeStateBridge.isVisionActive(this)
             if (visionActive) {

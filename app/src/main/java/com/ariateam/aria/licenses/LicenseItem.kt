@@ -17,7 +17,7 @@ enum class LicenseCategory(val displayName: String) {
  * @param category Category grouping.
  * @param projectNotice Specific upstream copyright/NOTICE text without fabricated dates/authors.
  * @param licenseAssetPath Path in assets to the authoritative full license text (e.g. Apache-2.0, MIT). Empty if NOT PROVIDED.
- * @param thirdPartyNoticeAssetPath Path in assets to bundled native third-party notice (e.g. for LiteRT-LM), if any.
+ * @param thirdPartyNoticeAssetPath Path in assets to bundled native third-party notice (e.g. for native AARs), if any.
  */
 data class LicenseItem(
     val id: String,

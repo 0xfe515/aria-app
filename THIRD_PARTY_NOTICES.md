@@ -10,7 +10,6 @@ The following software components are provided under the Apache License, Version
 - **kaldifst**: `bundled in Sherpa-ONNX 1.13.8` (k2-fsa, https://github.com/k2-fsa/kaldifst)
 - **Google SentencePiece**: `bundled in Sherpa-ONNX 1.13.8` (Google LLC, https://github.com/google/sentencepiece)
 - **Google LiteRT**: `1.4.2` (Google LLC, https://ai.google.dev/edge/litert) — includes `litert`, `litert-gpu`, and `litert-gpu-api`
-- **Google LiteRT-LM**: `0.16.1` (Google LLC, https://ai.google.dev/edge/litert) - Also bundles native third-party notices.
 - **AndroidX Jetpack Compose**: `BOM 2026.02.01 / UI 1.10.4` (The Android Open Source Project)
 - **AndroidX CameraX**: `1.6.2` (The Android Open Source Project)
 - **AndroidX Lifecycle & Core**: `Lifecycle 2.10.0 / Core 1.19.1 / Activity 1.13.0 / NavigationEvent 1.0.0` (The Android Open Source Project)
@@ -30,7 +29,6 @@ The following software components are provided under the Apache License, Version
 - **Google AutoValue Annotations**: `1.6.3` (Google LLC, https://github.com/google/auto)
 - **Google J2ObjC Annotations**: `3.0.0` (Google LLC, https://github.com/google/j2objc)
 - **Sherpa Zipformer Korean Model**: `2024-06-16-mobile` (johnBamma / icefall)
-- **Gemma 4 E2B-IT On-Device LLM**: `gemma-4-E2B-it-litert-lm` (Google LLC / LiteRT community)
 
 ```text
                                  Apache License
@@ -243,8 +241,6 @@ SOFTWARE.
 ---
 
 ## 3. Bundled Native and Project Notices
-- **Google LiteRT-LM (`litertlm-android-0.16.1.aar`)**:
-  Bundles an extensive native third-party notice document covering LLM runtime dependencies. This notice is included in full within `app/src/main/assets/licenses/litertlm_third_party_notice.txt` and is readable offline directly inside the application's Open Source Licenses viewer.
 - **Eclipse Jakarta Dependency Injection API (`jakarta.inject-api-2.0.1.jar`)**:
   Includes official NOTICE.md from Eclipse Foundation within `app/src/main/assets/licenses/jakarta_inject_NOTICE.md`.
 

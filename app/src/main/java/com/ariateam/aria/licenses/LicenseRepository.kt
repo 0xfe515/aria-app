@@ -61,19 +61,6 @@ Copyright (c) Microsoft Corporation. All rights reserved.""",
 Copyright The TensorFlow / LiteRT Authors.""",
             licenseAssetPath = "licenses/apache-2.0.txt",
         ),
-        LicenseItem(
-            id = "litert-lm",
-            name = "Google LiteRT-LM (On-Device LLM Runtime)",
-            version = "0.16.1",
-            projectUrl = "https://ai.google.dev/edge/litert",
-            licenseName = "Apache-2.0",
-            category = LicenseCategory.NativeBinary,
-            projectNotice = """LiteRT-LM: On-device Large Language Model inference runtime.
-Copyright The LiteRT-LM Authors.
-This AAR includes bundled native third-party notices (see native notices viewer).""",
-            licenseAssetPath = "licenses/apache-2.0.txt",
-            thirdPartyNoticeAssetPath = "licenses/litertlm_third_party_notice.txt",
-        ),
 
         // === AndroidX & Runtime Libraries ===
         LicenseItem(
@@ -287,16 +274,6 @@ Copyright Eclipse Foundation and individual authors.""",
             licenseName = "Apache-2.0",
             category = LicenseCategory.ModelAsset,
             projectNotice = "Pruned stateless transducer streaming model trained on KsponSpeech Korean dataset.",
-            licenseAssetPath = "licenses/apache-2.0.txt",
-        ),
-        LicenseItem(
-            id = "gemma-model",
-            name = "Gemma 4 E2B-IT On-Device LLM",
-            version = "gemma-4-E2B-it-litert-lm",
-            projectUrl = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm",
-            licenseName = "Apache-2.0",
-            category = LicenseCategory.ModelAsset,
-            projectNotice = "Gemma model weights published under the Apache-2.0 license per official HuggingFace model card.",
             licenseAssetPath = "licenses/apache-2.0.txt",
         ),
         LicenseItem(

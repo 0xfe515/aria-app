@@ -251,62 +251,21 @@ class StartupPolicyTest {
     }
 
     @Test
-    fun languageGemmaPreparing_returnsLoadingLanguagePrepare() {
+    fun startupDoesNotBlockOnObsoleteLanguageStatus_returnsReady() {
         val decision = StartupPolicy.evaluate(
             isVisionRestoreCompleted = true,
             visionModelState = readyVision,
             isVoiceServiceSynced = true,
             voiceState = VoiceState(
                 phase = VoicePhase.Waiting,
-                command = CommandSnapshot(languageStatus = LanguageStatus.Preparing)
+                command = CommandSnapshot(languageStatus = LanguageStatus.Ready)
             ),
             missingRuntimePermissions = emptySet(),
             hasCompletedPermissionCheck = true,
             userAcceptedDegraded = false,
         )
-        assertTrue(decision is StartupDecision.Loading)
-        assertEquals(StartupStage.LanguagePrepare, (decision as StartupDecision.Loading).stage)
-    }
-
-    @Test
-    fun languageGemmaFailed_returnsActionRequiredLanguageFailed() {
-        val decision = StartupPolicy.evaluate(
-            isVisionRestoreCompleted = true,
-            visionModelState = readyVision,
-            isVoiceServiceSynced = true,
-            voiceState = VoiceState(
-                phase = VoicePhase.Waiting,
-                command = CommandSnapshot(languageStatus = LanguageStatus.Failed)
-            ),
-            missingRuntimePermissions = emptySet(),
-            hasCompletedPermissionCheck = true,
-            userAcceptedDegraded = false,
-        )
-        assertTrue(decision is StartupDecision.ActionRequired)
-        val action = decision as StartupDecision.ActionRequired
-        assertEquals(StartupIssue.LanguagePrepareFailed, action.issue)
-        assertTrue(action.canContinueDegraded)
-    }
-
-    @Test
-    fun timedOutLanguagePreparationRequiresActionInsteadOfFakingReady() {
-        val decision = StartupPolicy.evaluate(
-            isVisionRestoreCompleted = true,
-            visionModelState = readyVision,
-            isVoiceServiceSynced = true,
-            voiceState = VoiceState(
-                phase = VoicePhase.Waiting,
-                command = CommandSnapshot(languageStatus = LanguageStatus.Preparing),
-            ),
-            missingRuntimePermissions = emptySet(),
-            hasCompletedPermissionCheck = true,
-            timedOutStage = StartupStage.LanguagePrepare,
-        )
-        val action = decision as StartupDecision.ActionRequired
-        assertEquals(StartupIssue.StartupTimeout, action.issue)
-        assertEquals(StartupStage.LanguagePrepare, action.stage)
-        assertTrue(action.canRetry)
-        assertTrue(action.canContinueDegraded)
+        assertTrue(decision is StartupDecision.Ready)
+        assertFalse((decision as StartupDecision.Ready).isDegraded)
     }
 
     @Test

@@ -152,6 +152,34 @@ class VisionPipelineController(
     private var availabilityCallback: CameraManager.AvailabilityCallback? = null
     private var sessionStartNanos = 0L
 
+    @Volatile
+    private var selectedCameraId: String? = null
+    private val retryAttemptGeneration = AtomicLong(0L)
+
+    internal fun resolveSelectedCameraId(): String {
+        selectedCameraId?.let { return it }
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+        if (manager != null) {
+            try {
+                for (id in manager.cameraIdList) {
+                    val chars = manager.getCameraCharacteristics(id)
+                    val facing = chars.get(CameraCharacteristics.LENS_FACING)
+                    if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                        selectedCameraId = id
+                        return id
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to inspect CameraCharacteristics for lens facing", t)
+            }
+        }
+        return selectedCameraId ?: "0"
+    }
+
+    internal fun setSelectedCameraIdForTesting(id: String?) {
+        selectedCameraId = id
+    }
+
     fun captureSingleFrame(callback: (android.graphics.Bitmap?) -> Unit) {
         if (!running.get()) {
             callback(null)
@@ -352,6 +380,7 @@ class VisionPipelineController(
     }
 
     fun permissionDenied() {
+        cancelScheduledRetry()
         sessionGeneration.incrementAndGet()
         running.set(false)
         activeLifecycleOwner = null
@@ -493,6 +522,7 @@ class VisionPipelineController(
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
             val cameraInfo = provider.getCameraInfo(selector)
             val c2Info = Camera2CameraInfo.from(cameraInfo)
+            selectedCameraId = c2Info.cameraId
             val source = c2Info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
             sensorTimestampSource = when (source) {
                 CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME -> SensorTimestampSource.REALTIME_VERIFIED
@@ -680,27 +710,63 @@ class VisionPipelineController(
         }
         val delayMs = BACKOFF_DELAYS_MS[retryCount.coerceIn(0, BACKOFF_DELAYS_MS.size - 1)]
         retryCount++
-        registerAvailabilityCallback(ticket)
+        val attemptToken = retryAttemptGeneration.incrementAndGet()
+        val retryExecuted = AtomicBoolean(false)
+
+        registerAvailabilityCallback(ticket, attemptToken, retryExecuted)
 
         retryRunnable?.let { mainHandler.removeCallbacks(it) }
         val runnable = Runnable {
             if (!isSessionLive(ticket)) return@Runnable
-            retryCameraSession(ticket)
+            if (retryAttemptGeneration.get() != attemptToken) return@Runnable
+            if (retryExecuted.compareAndSet(false, true)) {
+                retryCameraSession(ticket)
+            }
         }
         retryRunnable = runnable
         mainHandler.postDelayed(runnable, delayMs)
     }
 
-    private fun registerAvailabilityCallback(ticket: Long) {
+    private fun registerAvailabilityCallback(
+        ticket: Long,
+        attemptToken: Long,
+        retryExecuted: AtomicBoolean,
+    ) {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return
         unregisterAvailabilityCallback()
+        val targetCameraId = resolveSelectedCameraId()
+
         val callback = object : CameraManager.AvailabilityCallback() {
+            private var isInitialCallback = true
+            private var sawUnavailable = false
+
+            override fun onCameraUnavailable(cameraId: String) {
+                if (cameraId == targetCameraId) {
+                    sawUnavailable = true
+                    isInitialCallback = false
+                }
+            }
+
             override fun onCameraAvailable(cameraId: String) {
                 if (!isSessionLive(ticket)) return
-                Log.i(TAG, "Camera $cameraId became available, retrying session $ticket")
-                mainHandler.post {
-                    if (isSessionLive(ticket)) {
-                        retryCameraSession(ticket)
+                if (cameraId != targetCameraId) {
+                    // Filter: ignore availability events from other cameras (e.g. front camera)
+                    return
+                }
+
+                if (isInitialCallback) {
+                    // Initial status delivered on registration: do not bypass intended backoff delay
+                    isInitialCallback = false
+                    return
+                }
+
+                // Legitimate transition back to available: execute single retry for this attempt
+                if (retryAttemptGeneration.get() == attemptToken && retryExecuted.compareAndSet(false, true)) {
+                    Log.i(TAG, "Selected camera $cameraId became available, retrying attempt $attemptToken (session $ticket)")
+                    mainHandler.post {
+                        if (isSessionLive(ticket) && retryAttemptGeneration.get() == attemptToken) {
+                            retryCameraSession(ticket)
+                        }
                     }
                 }
             }
@@ -720,6 +786,13 @@ class VisionPipelineController(
         runCatching { manager.unregisterAvailabilityCallback(callback) }
     }
 
+    private fun cancelScheduledRetry() {
+        retryAttemptGeneration.incrementAndGet()
+        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+        retryRunnable = null
+        unregisterAvailabilityCallback()
+    }
+
     private fun retryCameraSession(ticket: Long) {
         if (!isSessionLive(ticket)) return
         retryRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -732,11 +805,7 @@ class VisionPipelineController(
         startCameraInternal(owner, provider, mode, rotation, ticket)
     }
 
-    private fun cancelScheduledRetry() {
-        retryRunnable?.let { mainHandler.removeCallbacks(it) }
-        retryRunnable = null
-        unregisterAvailabilityCallback()
-    }
+
 
     private fun failCameraSession(ticket: Long, detail: String) {
         if (sessionGeneration.get() != ticket || !running.getAndSet(false)) return

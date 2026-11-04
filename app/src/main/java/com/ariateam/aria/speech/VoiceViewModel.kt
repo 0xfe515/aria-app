@@ -153,10 +153,16 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun reportCloudError(id: Long, error: String) { try { remote?.reportCloudError(id, error) } catch (_: RemoteException) { handleDeath() } }
     fun cancelCloudQuestion(id: Long) { try { remote?.cancelCloudQuestion(id) } catch (_: RemoteException) { handleDeath() } }
     fun speakHazardWarning(message: String) { try { remote?.speakHazardWarning(message) } catch (_: RemoteException) { handleDeath() } }
+    fun postHazardAlert(session: Long, sequence: Long, timestampNanos: Long, message: String) {
+        try { remote?.postHazardAlert(session, sequence, timestampNanos, message) } catch (_: RemoteException) { handleDeath() }
+    }
     fun preemptSpeech() { try { remote?.preemptSpeech() } catch (_: RemoteException) { handleDeath() } }
-    fun downloadModel(mobileData: Boolean) { try { remote?.downloadModel(mobileData) } catch (_: RemoteException) { handleDeath() } }
-    fun cancelModelDownload() { try { remote?.cancelModelDownload() } catch (_: RemoteException) { handleDeath() } }
-    fun deleteModel() { try { remote?.deleteModel() } catch (_: RemoteException) { handleDeath() } }
+    @Deprecated("Legacy local conversation model is removed")
+    fun downloadModel(mobileData: Boolean) { /* no-op */ }
+    @Deprecated("Legacy local conversation model is removed")
+    fun cancelModelDownload() { /* no-op */ }
+    @Deprecated("Legacy local conversation model is removed")
+    fun deleteModel() { /* no-op */ }
 
     fun stop() {
         startPending = false

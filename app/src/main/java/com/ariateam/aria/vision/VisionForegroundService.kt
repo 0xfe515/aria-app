@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import androidx.camera.core.Preview
@@ -16,6 +17,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.ariateam.aria.runtime.AriaRuntimeStateBridge
 import com.ariateam.aria.runtime.AriaUnifiedNotificationCoordinator
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,6 +33,8 @@ class VisionForegroundService : Service(), LifecycleOwner {
     private var foreground = false
     private var sessionStarted = false
     private var activeMode = VisionPipelineMode.PREPROCESS_OR_INFERENCE
+    private var currentSessionId: String? = null
+    private val serviceLifetimeToken = Binder()
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
@@ -79,7 +83,9 @@ class VisionForegroundService : Service(), LifecycleOwner {
         }
 
         try {
-            AriaRuntimeStateBridge.setVisionActive(this, true)
+            val sessionToken = "vision_${System.currentTimeMillis()}_${startId}_${UUID.randomUUID().toString().take(8)}"
+            currentSessionId = sessionToken
+            AriaRuntimeStateBridge.setVisionActive(this, true, sessionId = sessionToken, token = serviceLifetimeToken)
             if (!foreground) {
                 val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this)
                 startForeground(
@@ -92,6 +98,12 @@ class VisionForegroundService : Service(), LifecycleOwner {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA,
                 )
                 foreground = true
+                AriaUnifiedNotificationCoordinator.updateUnifiedNotification(
+                    context = this,
+                    voiceActive = voiceActive,
+                    visionActive = true,
+                    force = true,
+                )
             }
             if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                 lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
@@ -129,29 +141,21 @@ class VisionForegroundService : Service(), LifecycleOwner {
                 when (state.cameraStatus) {
                     CameraSessionStatus.CameraUnavailable -> {
                         val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this@VisionForegroundService)
-                        val notif = AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                        AriaUnifiedNotificationCoordinator.updateUnifiedNotification(
                             context = this@VisionForegroundService,
                             voiceActive = voiceActive,
                             visionActive = true,
                             cameraUnavailable = true,
                         )
-                        getSystemService(NotificationManager::class.java)?.notify(
-                            AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
-                            notif,
-                        )
                     }
                     CameraSessionStatus.Running -> {
                         AriaUnifiedNotificationCoordinator.cancelErrorNotification(this@VisionForegroundService)
                         val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this@VisionForegroundService)
-                        val notif = AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                        AriaUnifiedNotificationCoordinator.updateUnifiedNotification(
                             context = this@VisionForegroundService,
                             voiceActive = voiceActive,
                             visionActive = true,
                             cameraUnavailable = false,
-                        )
-                        getSystemService(NotificationManager::class.java)?.notify(
-                            AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
-                            notif,
                         )
                     }
                     CameraSessionStatus.Error, CameraSessionStatus.PermissionDenied -> {
@@ -173,22 +177,23 @@ class VisionForegroundService : Service(), LifecycleOwner {
     }
 
     private fun stopForegroundSession() {
-        AriaRuntimeStateBridge.setVisionActive(this, false)
+        AriaRuntimeStateBridge.setVisionActive(this, false, sessionId = currentSessionId, token = serviceLifetimeToken)
         if (foreground) {
             val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this)
             if (voiceActive) {
                 stopForeground(STOP_FOREGROUND_DETACH)
-                val notif = AriaUnifiedNotificationCoordinator.buildUnifiedNotification(
+                AriaUnifiedNotificationCoordinator.updateUnifiedNotification(
                     context = this,
                     voiceActive = true,
                     visionActive = false,
                 )
-                getSystemService(NotificationManager::class.java)?.notify(
-                    AriaUnifiedNotificationCoordinator.NOTIFICATION_ID,
-                    notif,
-                )
             } else {
                 stopForeground(STOP_FOREGROUND_REMOVE)
+                AriaUnifiedNotificationCoordinator.updateUnifiedNotification(
+                    context = this,
+                    voiceActive = false,
+                    visionActive = false,
+                )
             }
             foreground = false
         }

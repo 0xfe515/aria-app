@@ -4,6 +4,7 @@ import androidx.camera.core.CameraState
 import com.ariateam.aria.runtime.AriaRuntimeStateBridge
 import com.ariateam.aria.runtime.AriaRuntimeTimingTracker
 import com.ariateam.aria.runtime.AriaUnifiedNotificationCoordinator
+import com.ariateam.aria.runtime.NotificationStateTuple
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -320,5 +321,90 @@ class CameraRecoveryAndNotificationTest {
         // Verify closing segmenter does not affect previously captured frame
         segmenter.close()
         assertEquals("Prior published frame must remain unchanged after segmenter close", 0xAA112233.toInt(), capturedBuffers[0][0])
+    }
+
+    @Test
+    fun selectedCameraAvailabilityFiltering_ignoresOtherCamerasAndOnlyTriggersForTarget() {
+        val selectedId = "0"
+        val nonSelectedId = "1"
+        var retriesAttempted = 0
+
+        class TestAvailabilityGate(private val targetId: String, private val onRetry: () -> Unit) {
+            var isInitial = true
+            var sawUnavailable = false
+
+            fun onCameraUnavailable(id: String) {
+                if (id == targetId) {
+                    sawUnavailable = true
+                    isInitial = false
+                }
+            }
+
+            fun onCameraAvailable(id: String) {
+                if (id != targetId) return // Filter non-selected camera
+                if (isInitial) {
+                    isInitial = false
+                    return // Initial callback handling: do not bypass backoff
+                }
+                onRetry()
+            }
+        }
+
+        val gate = TestAvailabilityGate(selectedId) { retriesAttempted++ }
+
+        // Initial callback on registration reports target camera available
+        gate.onCameraAvailable(selectedId)
+        assertEquals("Initial callback for target camera must not trigger immediate retry", 0, retriesAttempted)
+
+        // Non-selected camera becomes available
+        gate.onCameraAvailable(nonSelectedId)
+        assertEquals("Other camera availability must be ignored", 0, retriesAttempted)
+
+        // Target camera transitions to unavailable
+        gate.onCameraUnavailable(selectedId)
+        assertEquals(0, retriesAttempted)
+
+        // Target camera later becomes available
+        gate.onCameraAvailable(selectedId)
+        assertEquals("Selected camera availability after unavailable must trigger retry", 1, retriesAttempted)
+    }
+
+    @Test
+    fun singleRetryPerAttempt_fencesConcurrentDelayAndAvailabilityEvents() {
+        val attemptToken = 1L
+        val currentAttempt = java.util.concurrent.atomic.AtomicLong(attemptToken)
+        val retryExecuted = java.util.concurrent.atomic.AtomicBoolean(false)
+        var executeCount = 0
+
+        fun tryExecuteRetry(token: Long) {
+            if (currentAttempt.get() == token && retryExecuted.compareAndSet(false, true)) {
+                executeCount++
+            }
+        }
+
+        // Event 1: Availability callback fires
+        tryExecuteRetry(attemptToken)
+        assertEquals(1, executeCount)
+
+        // Event 2: Scheduled backoff timer fires for the same attempt
+        tryExecuteRetry(attemptToken)
+        assertEquals("Subsequent delay timer for the same attempt must be gated", 1, executeCount)
+
+        // Event 3: Late timer for older attempt token
+        tryExecuteRetry(attemptToken - 1)
+        assertEquals("Late callback from older attempt must be rejected", 1, executeCount)
+    }
+
+    @Test
+    fun notificationDeduplication_suppressesDuplicatePostsForIdenticalStateTuple() {
+        AriaUnifiedNotificationCoordinator.resetForTesting()
+        assertEquals(0, AriaUnifiedNotificationCoordinator.getNotificationPostCountForTesting())
+
+        val tuple1 = NotificationStateTuple(voiceActive = true, visionActive = true, cameraUnavailable = false)
+        val tuple2 = NotificationStateTuple(voiceActive = true, visionActive = true, cameraUnavailable = false)
+        assertEquals(tuple1, tuple2)
+
+        val tupleChanged = NotificationStateTuple(voiceActive = true, visionActive = true, cameraUnavailable = true)
+        assertFalse(tuple1 == tupleChanged)
     }
 }

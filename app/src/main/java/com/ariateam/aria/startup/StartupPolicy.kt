@@ -125,26 +125,7 @@ object StartupPolicy {
             )
         }
 
-        // 4. Language model (Gemma) readiness if installed
-        if (voiceState.command.languageStatus == LanguageStatus.Preparing) {
-            return pending(
-                StartupStage.LanguagePrepare,
-                "명령 처리 준비 중…",
-                timedOutStage,
-            )
-        }
-        if (voiceState.command.languageStatus == LanguageStatus.Failed) {
-            return StartupDecision.ActionRequired(
-                issue = StartupIssue.LanguagePrepareFailed,
-                title = "명령 처리 기능을 준비하지 못했어요",
-                message = "다시 시도하거나 기본 음성 기능으로 계속 이용할 수 있습니다.",
-                canRetry = true,
-                canContinueDegraded = true,
-                needsSettings = false,
-            )
-        }
-
-        // 5. All systems ready
+        // 4. All systems ready (offline commands ready, conversational fallback ready)
         return StartupDecision.Ready(
             isDegraded = userAcceptedPermissionDegraded && missingRuntimePermissions.isNotEmpty(),
         )

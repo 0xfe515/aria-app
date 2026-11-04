@@ -70,9 +70,9 @@ object LicenseHtmlDocument {
                 .append("</pre></section>")
         }
         if (nativeNotice != null) {
-            append("<details><summary>동봉된 LiteRT-LM 네이티브 타사 고지 전문 보기</summary>")
+            append("<details><summary>동봉된 네이티브 타사 고지 전문 보기</summary>")
             append("<p class=\"project-notice\">")
-                .append("아래 고지는 LiteRT-LM AAR에 포함된 공식 타사 저작권 고지 전문입니다.")
+                .append("아래 고지는 포함된 공식 타사 저작권 고지 전문입니다.")
                 .append("</p><pre class=\"license-text\">")
                 .appendEscaped(nativeNotice)
                 .append("</pre></details>")

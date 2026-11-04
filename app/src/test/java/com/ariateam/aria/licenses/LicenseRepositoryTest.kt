@@ -21,12 +21,12 @@ class LicenseRepositoryTest {
         assertTrue("kaldifst must be present", ids.contains("kaldifst"))
         assertTrue("sentencepiece must be present", ids.contains("sentencepiece"))
         assertTrue("onnxruntime must be present", ids.contains("onnxruntime"))
-        assertTrue("litert-lm must be present", ids.contains("litert-lm"))
+        assertFalse("litert-lm must be removed", ids.contains("litert-lm"))
         assertTrue("litert must be present", ids.contains("litert"))
 
         // Models
         assertTrue("zipformer-model must be present", ids.contains("zipformer-model"))
-        assertTrue("gemma-model must be present", ids.contains("gemma-model"))
+        assertFalse("gemma-model must be removed", ids.contains("gemma-model"))
         assertTrue("team-vision-model must be present", ids.contains("team-vision-model"))
         assertTrue("user-vision-model must be present", ids.contains("user-vision-model"))
 
@@ -93,7 +93,7 @@ class LicenseRepositoryTest {
             jakartaCombinedFile.exists() && jakartaCombinedFile.length() > 10_000)
 
         val nativeNoticeFile = File(assetsDir, "licenses/litertlm_third_party_notice.txt")
-        assertTrue("litertlm_third_party_notice.txt must exist and be ~2MB", nativeNoticeFile.exists() && nativeNoticeFile.length() > 1_500_000)
+        assertFalse("litertlm_third_party_notice.txt must be removed after dependency removal", nativeNoticeFile.exists())
     }
 
     @Test

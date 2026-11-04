@@ -321,8 +321,8 @@ android {
         applicationId = "com.ariateam.aria"
         minSdk = 31
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.0.0-preview.20261104.1"
+        versionCode = 4
+        versionName = "1.0.0-preview.20261104.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         proguardFiles(
@@ -373,7 +373,6 @@ tasks.named("preBuild") {
 
 dependencies {
     implementation(files(provisionSherpaOfflineAar.flatMap { it.outputAarFile }).builtBy(provisionSherpaOfflineAar))
-    implementation(libs.litert.lm)
     implementation(libs.litert)
     implementation(libs.litert.gpu)
     implementation(libs.litert.gpu.api)

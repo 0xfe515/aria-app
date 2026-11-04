@@ -17,4 +17,14 @@
     <string name="settings_cloud_key_change_btn">API 키 변경</string>
     <string name="settings_cloud_key_clear_btn">API 키 삭제</string>
     <string name="settings_cloud_privacy_notice">보안 및 개인정보 안내: API 키는 기기 내 Android Keystore로 암호화되어 앱 내부 저장소에 안전하게 보관되며, 백업이나 로그에 노출되지 않습니다. 사진 질문은 사용자가 요청했을 때만 단일 프레임을 전송하며 지속적인 촬영이나 전송은 수행하지 않습니다.</string>
+    <string name="settings_cloud_fallback_policy_title">음성 명령 및 대화 전환 정책</string>
+    <string name="settings_cloud_fallback_policy_summary">호출어 인식 후 앱 제어 및 길안내 오프라인 명령을 최우선으로 실행합니다. 취소, 부정 또는 불완전한 로컬 의도는 클라우드로 전송하지 않고 기기에서 즉시 거부하며, 명령으로 해석되지 않은 일반 대화 및 질문만 Gemini 클라우드로 자동 전달됩니다.</string>
+    <string name="settings_account_storage_section">저장공간 관리</string>
+    <string name="settings_account_cleanup_title">이전 대화 모델 파일 정리</string>
+    <string name="settings_account_cleanup_summary_present">이전 온디바이스 대화 모델 파일(%1$s)을 삭제하여 저장공간을 확보합니다. API 키 및 온디바이스 음성·비전 모델은 유지됩니다.</string>
+    <string name="settings_account_cleanup_summary_empty">정리할 이전 로컬 모델 파일이 없습니다 (0 MB)</string>
+    <string name="settings_account_cleanup_dialog_title">이전 대화 모델 파일 삭제</string>
+    <string name="settings_account_cleanup_dialog_message">과거 다운로드된 대화 모델 파일을 삭제하시겠습니까? Gemini 클라우드 API 및 온디바이스 음성 인식, 비전 모델은 계속 정상 작동합니다.</string>
+    <string name="settings_account_cleanup_confirm">정리 실행</string>
+    <string name="settings_account_cleanup_success">이전 모델 파일이 삭제되었습니다.</string>
 </resources>

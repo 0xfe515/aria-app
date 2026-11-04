@@ -8,12 +8,37 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Log
 import android.widget.Toast
 import java.util.concurrent.atomic.AtomicLong
 
 /**
+ * Event delivered to registered sinks when a verified hazard alert condition is confirmed.
+ *
+ * @property session Monotonically increasing session generation ticket
+ * @property sequence Monotonically increasing sequence number of alerts fired within this session
+ * @property timestampNanos Elapsed realtime nanoseconds of the frame that triggered the alert
+ * @property message Korean announcement text to speak or display
+ * @property level Hazard severity level
+ */
+data class HazardAlertEvent(
+    val session: Long,
+    val sequence: Long,
+    val timestampNanos: Long,
+    val message: String,
+    val level: HazardLevel = HazardLevel.NEAR_PATH_HAZARD,
+)
+
+/**
+ * Consumer interface for background-safe hazard alert delivery (e.g., speech / TTS / audio cues).
+ */
+fun interface HazardAlertSink {
+    fun onHazardAlert(event: HazardAlertEvent)
+}
+
+/**
  * Android system integration for hazard alerts: manages Vibrator haptics, transient Toasts,
- * and session-generation fencing backed by [HazardAlertPolicy].
+ * external speech/audio event sinks, and session-generation fencing backed by [HazardAlertPolicy].
  */
 class HazardAlertCoordinator(
     private val context: Context? = null,
@@ -28,6 +53,7 @@ class HazardAlertCoordinator(
     private val vibratorDispatcher: ((HazardLevel) -> Unit)? = null,
     private val toastDispatcher: ((String) -> Unit)? = null,
     private val toastPoster: ((Runnable) -> Unit)? = null,
+    private var alertSink: HazardAlertSink? = null,
 ) : AutoCloseable {
 
     private val vibrator: Vibrator? by lazy {
@@ -48,21 +74,32 @@ class HazardAlertCoordinator(
     private val generation = AtomicLong(0L)
     private val lock = Any()
     private var sessionStartElapsedNanos: Long = 0L
+    private var alertSequence: Long = 0L
 
     @Volatile
     var isSessionActive: Boolean = false
         private set
 
+    fun setAlertSink(sink: HazardAlertSink?) {
+        synchronized(lock) {
+            this.alertSink = sink
+        }
+    }
+
     fun start() {
         synchronized(lock) {
             isSessionActive = true
             sessionStartElapsedNanos = clockNanos()
+            alertSequence = 0L
             generation.incrementAndGet()
             policy.reset()
         }
     }
 
     fun processAssessment(assessment: HazardAssessment, captureTimestampNanos: Long = assessment.timestampNanos) {
+        var eventToDispatch: HazardAlertEvent? = null
+        var sinkToDispatch: HazardAlertSink? = null
+
         synchronized(lock) {
             if (!isSessionActive || !isEnabled) {
                 policy.reset()
@@ -78,11 +115,34 @@ class HazardAlertCoordinator(
 
             when (val decision = policy.evaluate(assessment, nowRealtime, nowElapsedNanos)) {
                 is AlertDecision.Fire -> {
-                    fireAlertLocked(decision.assessment, ticket, captureTimestampNanos)
+                    val staleExpiryNanos = policy.staleResultExpiryMs * 1_000_000L
+                    val isFresh = (nowElapsedNanos - captureTimestampNanos) <= staleExpiryNanos
+
+                    if (isFresh && isSessionActive && isEnabled && generation.get() == ticket) {
+                        fireAlertLocked(decision.assessment, ticket, captureTimestampNanos)
+                        val seq = ++alertSequence
+                        eventToDispatch = HazardAlertEvent(
+                            session = ticket,
+                            sequence = seq,
+                            timestampNanos = captureTimestampNanos,
+                            message = decision.assessment.messageKorean,
+                            level = decision.assessment.level,
+                        )
+                        sinkToDispatch = this.alertSink ?: sharedAlertSink
+                    }
                 }
                 is AlertDecision.Suppressed -> {
                     // Suppressed by hysteresis or cooldown
                 }
+            }
+        }
+
+        // Dispatch to external sink safely OUTSIDE the synchronization lock
+        if (eventToDispatch != null && sinkToDispatch != null) {
+            try {
+                sinkToDispatch.onHazardAlert(eventToDispatch)
+            } catch (t: Throwable) {
+                runCatching { Log.e(TAG, "Exception in HazardAlertSink", t) }
             }
         }
     }
@@ -165,6 +225,7 @@ class HazardAlertCoordinator(
         synchronized(lock) {
             isSessionActive = false
             sessionStartElapsedNanos = 0L
+            alertSequence = 0L
             generation.incrementAndGet()
             mainHandler?.removeCallbacksAndMessages(null)
             vibrator?.cancel()
@@ -174,5 +235,21 @@ class HazardAlertCoordinator(
 
     override fun close() {
         stop()
+    }
+
+    companion object {
+        private const val TAG = "HazardAlertCoordinator"
+
+        @Volatile
+        private var sharedAlertSink: HazardAlertSink? = null
+
+        /**
+         * Sets a process-wide shared alert sink accessible by background services without UI dependency.
+         */
+        fun setSharedAlertSink(sink: HazardAlertSink?) {
+            sharedAlertSink = sink
+        }
+
+        fun getSharedAlertSink(): HazardAlertSink? = sharedAlertSink
     }
 }

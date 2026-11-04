@@ -8,13 +8,11 @@ lifecycleRuntimeKtx = "2.6.1"
 activityCompose = "1.13.0"
 kotlin = "2.2.10"
 composeBom = "2026.02.01"
-litertLm = "0.16.1"
 litert = "1.4.2"
 camerax = "1.6.2"
 arcore = "1.57.0"
 
 [libraries]
-litert-lm = { module = "com.google.ai.edge.litertlm:litertlm-android", version.ref = "litertLm" }
 litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 litert-gpu = { group = "com.google.ai.edge.litert", name = "litert-gpu", version.ref = "litert" }
 litert-gpu-api = { group = "com.google.ai.edge.litert", name = "litert-gpu-api", version.ref = "litert" }

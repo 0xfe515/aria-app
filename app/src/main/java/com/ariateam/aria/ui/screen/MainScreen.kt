@@ -212,7 +212,6 @@ fun MainScreen(
         isDialogVisible = showBodyMountProfileDialog,
         hasActionRequiredFailure = permissionLossDetected ||
             state.phase == VoicePhase.Error ||
-            state.command.languageStatus == LanguageStatus.Failed ||
             StartupPermissionInventory.CAMERA in missingRuntimePermissions ||
             visionModelState !is VisionModelState.Ready ||
             visionUiState.cameraStatus in setOf(

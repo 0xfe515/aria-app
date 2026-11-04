@@ -156,4 +156,104 @@ class HazardAlertCoordinatorLifecycleTest {
         lateClockCoordinator.close()
         coordinator.close()
     }
+
+    @Test
+    fun testHazardAlertSink_receivesMonotonicSequenceAndCorrectEvent() {
+        val sinkEvents = mutableListOf<HazardAlertEvent>()
+        coordinator.setAlertSink { event -> sinkEvents.add(event) }
+        coordinator.start()
+
+        // Frame 1 requires confirmation
+        val ts1 = 10_050_000_000L
+        currentRealtimeMs = 10_050L
+        currentElapsedNanos = ts1
+        coordinator.processAssessment(candidateAssessment(ts1), ts1)
+        assertEquals(0, sinkEvents.size)
+
+        // Frame 2 confirms and fires alert #1
+        val ts2 = 10_100_000_000L
+        currentRealtimeMs = 10_100L
+        currentElapsedNanos = ts2
+        coordinator.processAssessment(candidateAssessment(ts2), ts2)
+
+        assertEquals("Sink should receive confirmed alert", 1, sinkEvents.size)
+        val event1 = sinkEvents[0]
+        assertEquals(1L, event1.sequence)
+        assertEquals(ts2, event1.timestampNanos)
+        assertEquals("위험 (진행 경로 차단)", event1.message)
+        assertEquals(HazardLevel.PATH_BLOCKED, event1.level)
+
+        // Advance beyond cooldown (2500ms) to fire alert #2
+        currentRealtimeMs += 3_000L
+        currentElapsedNanos += 3_000_000_000L
+        val ts3 = currentElapsedNanos
+
+        // Since consecutiveRiskCount was already confirmed in frames 1 & 2,
+        // cooldown expiry causes ongoing hazard to fire alert #2 immediately
+        coordinator.processAssessment(candidateAssessment(ts3), ts3)
+        assertEquals("Sink should receive alert #2", 2, sinkEvents.size)
+
+        val event2 = sinkEvents[1]
+        assertEquals(2L, event2.sequence)
+        assertEquals(ts3, event2.timestampNanos)
+        assertEquals(event1.session, event2.session)
+
+        // Additional frame within cooldown is suppressed
+        currentRealtimeMs += 50L
+        currentElapsedNanos += 50_000_000L
+        val ts4 = currentElapsedNanos
+        coordinator.processAssessment(candidateAssessment(ts4), ts4)
+        assertEquals("Frame within cooldown must not fire extra alert", 2, sinkEvents.size)
+
+        coordinator.close()
+    }
+
+    @Test
+    fun testHazardAlertSink_exceptionDoesNotCrashOrCorruptState() {
+        coordinator.setAlertSink { _ ->
+            throw RuntimeException("Simulated external TTS failure")
+        }
+        coordinator.start()
+
+        val ts1 = 10_050_000_000L
+        currentRealtimeMs = 10_050L
+        currentElapsedNanos = ts1
+        coordinator.processAssessment(candidateAssessment(ts1), ts1)
+
+        val ts2 = 10_100_000_000L
+        currentRealtimeMs = 10_100L
+        currentElapsedNanos = ts2
+        // Must not throw when sink fails
+        coordinator.processAssessment(candidateAssessment(ts2), ts2)
+
+        // Haptic and toast still fired
+        assertEquals(1, vibrationLog.size)
+        assertEquals(1, toastLog.size)
+
+        coordinator.close()
+    }
+
+    @Test
+    fun testSharedAlertSink_invokedWhenInstanceSinkIsNull() {
+        val sharedLog = mutableListOf<HazardAlertEvent>()
+        HazardAlertCoordinator.setSharedAlertSink { event -> sharedLog.add(event) }
+        coordinator.setAlertSink(null)
+        coordinator.start()
+
+        val ts1 = 10_050_000_000L
+        currentRealtimeMs = 10_050L
+        currentElapsedNanos = ts1
+        coordinator.processAssessment(candidateAssessment(ts1), ts1)
+
+        val ts2 = 10_100_000_000L
+        currentRealtimeMs = 10_100L
+        currentElapsedNanos = ts2
+        coordinator.processAssessment(candidateAssessment(ts2), ts2)
+
+        assertEquals(1, sharedLog.size)
+        assertEquals(1L, sharedLog[0].sequence)
+
+        HazardAlertCoordinator.setSharedAlertSink(null)
+        coordinator.close()
+    }
 }

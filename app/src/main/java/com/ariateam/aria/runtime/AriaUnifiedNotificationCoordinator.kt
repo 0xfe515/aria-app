@@ -10,6 +10,16 @@ import android.os.Build
 import android.util.Log
 import com.ariateam.aria.MainActivity
 import com.ariateam.aria.R
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * State tuple representing the active foreground state across voice and vision services.
+ */
+data class NotificationStateTuple(
+    val voiceActive: Boolean,
+    val visionActive: Boolean,
+    val cameraUnavailable: Boolean,
+)
 
 /**
  * Coordinates a common persistent notification for Aria's foreground services (Voice + Vision).
@@ -20,6 +30,7 @@ import com.ariateam.aria.R
  * 3. Graceful fallback when one service stops so the remaining service keeps the ongoing notification.
  * 4. Overall Stop action that terminates both VoiceService and VisionForegroundService.
  * 5. Single, truthful error notification (1002) that auto-cancels and never duplicates.
+ * 6. Deduplicated updates: only posts or updates notification when the state tuple changes.
  */
 object AriaUnifiedNotificationCoordinator {
     const val CHANNEL_ID = "aria_foreground_service"
@@ -29,6 +40,10 @@ object AriaUnifiedNotificationCoordinator {
     const val ACTION_UPDATE_NOTIFICATION = "com.ariateam.aria.ACTION_UPDATE_NOTIFICATION"
 
     private const val TAG = "AriaUnifiedNotif"
+
+    @Volatile
+    private var lastPostedTuple: NotificationStateTuple? = null
+    private val notificationPostCount = AtomicInteger(0)
 
     fun ensureChannel(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -117,6 +132,72 @@ object AriaUnifiedNotificationCoordinator {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
+    }
+
+    /**
+     * Updates the persistent ongoing notification only if the state tuple has actually changed,
+     * or if [force] is true. When both services become inactive, cancels the ongoing notification.
+     *
+     * @return true if an update or cancellation occurred, false if deduplicated.
+     */
+    fun updateUnifiedNotification(
+        context: Context?,
+        voiceActive: Boolean,
+        visionActive: Boolean,
+        cameraUnavailable: Boolean? = null,
+        force: Boolean = false,
+    ): Boolean {
+        val resolvedCameraUnavailable = cameraUnavailable ?: if (visionActive) {
+            lastPostedTuple?.cameraUnavailable ?: false
+        } else {
+            false
+        }
+        val nextTuple = NotificationStateTuple(
+            voiceActive = voiceActive,
+            visionActive = visionActive,
+            cameraUnavailable = resolvedCameraUnavailable,
+        )
+
+        if (!force && lastPostedTuple == nextTuple) {
+            // Deduplicated: identical state tuple
+            return false
+        }
+
+        val manager = context?.getSystemService(NotificationManager::class.java)
+        if (manager == null) {
+            // Unit test or null context: record tuple transition without platform notification call
+            lastPostedTuple = nextTuple
+            notificationPostCount.incrementAndGet()
+            return true
+        }
+
+        if (!voiceActive && !visionActive) {
+            // Neither service is active: cancel ongoing notification
+            manager.cancel(NOTIFICATION_ID)
+            lastPostedTuple = nextTuple
+            notificationPostCount.incrementAndGet()
+            return true
+        }
+
+        val notification = buildUnifiedNotification(
+            context = context,
+            voiceActive = voiceActive,
+            visionActive = visionActive,
+            cameraUnavailable = resolvedCameraUnavailable,
+        )
+        manager.notify(NOTIFICATION_ID, notification)
+        lastPostedTuple = nextTuple
+        notificationPostCount.incrementAndGet()
+        return true
+    }
+
+    fun getLastPostedTuple(): NotificationStateTuple? = lastPostedTuple
+
+    fun getNotificationPostCountForTesting(): Int = notificationPostCount.get()
+
+    fun resetForTesting() {
+        lastPostedTuple = null
+        notificationPostCount.set(0)
     }
 
     fun postErrorNotification(context: Context, title: String, detail: String) {

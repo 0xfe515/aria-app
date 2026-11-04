@@ -1,13 +1,14 @@
 # ARiA (Adaptive Realtime Intelligence Assistant)
 
-ARiA는 한국어 오프라인 음성 명령 인식, 온디바이스 언어 모델 해석, 그리고 실시간 카메라 비전 진단을 결합한 차세대 AI 글래스 어시스턴트 안드로이드 애플리케이션입니다.
+ARiA는 한국어 오프라인 음성 명령 인식, Google Gemini 기반 지능형 클라우드 질의응답, 그리고 실시간 카메라 비전 진단을 결합한 차세대 AI 글래스 어시스턴트 안드로이드 애플리케이션입니다.
 
 ## 핵심 기능 (Key Features)
 
 비전 모델 학습 이력: **Cityscapes 최초 학습 → Surface_1 한국 보도 환경 파인튜닝**. [학습 데이터와 모델 변환 이력](docs/VISION_TRAINING_DATA.md)을 참조하세요.
 
 - **오프라인 한국어 음성 인식 (Sherpa-ONNX)**: 기기 내에서 실행되는 스트리밍 Zipformer 모델 기반 음성 인식 및 호출어 감지.
-- **온디바이스 언어 모델 (LiteRT-LM / Gemma)**: 로컬 기기에서 안전하고 신속하게 실행되는 온디바이스 지능형 명령 해석.
+- **오프라인 로컬 명령 & Gemini 클라우드 자동 전환**: 호출어 뒤 기기 제어(홈/설정 이동, 소리/화면 제어, 지도 길안내)는 오프라인 로컬에서 우선 실행되며, 미해석 일반 대화 및 복합 질의는 Gemini 클라우드로 안전하게 자동 전환.
+- **실시간 보행 안전 비전 및 우선순위 위험 음성 경고**: LiteRT 온디바이스 세그멘테이션과 IMU 융합 위험 판단을 기반으로 기존 TTS를 선점하는 즉각적인 음성 경고 지원.
 - **반응형 홈 & 플로팅 캡슐 내비게이션**: 화면 스크롤 없이 컴팩트/가로 화면까지 완벽하게 대응하는 원형 전원 버튼 UI와 투명 외곽의 모던 플로팅 탭 바.
 - **사용자 중심 토스트 피드백**: 명령 수행 결과와 음성 엔진 상태를 화면을 가리지 않는 일관된 안드로이드 토스트로 즉각 전달.
 - **실시간 카메라 및 비전 진단**: CameraX 기반 카메라 프리뷰 및 사용자 정의 비전 모델 인터페이스.
@@ -47,7 +48,6 @@ ARiA에 사용된 외부 오픈소스 소프트웨어, 런타임 의존성, 네�
 | **kaldifst** | `bundled` | [github.com/k2-fsa/kaldifst](https://github.com/k2-fsa/kaldifst) | Apache-2.0 | Sherpa-ONNX 내 포함된 OpenFST 구현체 |
 | **Google SentencePiece** | `bundled` | [github.com/google/sentencepiece](https://github.com/google/sentencepiece) | Apache-2.0 | Sherpa-ONNX 내 포함된 텍스트 토크나이저 |
 | **Microsoft ONNX Runtime** | `1.20.1` | [github.com/microsoft/onnxruntime](https://github.com/microsoft/onnxruntime) | MIT | Sherpa AAR 내 포함된 `libonnxruntime.so` |
-| **Google LiteRT-LM** | `0.16.1` | [github.com/google-ai-edge/litert-lm](https://github.com/google-ai-edge/litert-lm) | Apache-2.0 | 온디바이스 언어 모델 런타임 (AAR 내 공식 THIRD_PARTY_NOTICE 번들) |
 | **Google LiteRT** | `1.4.2` | [ai.google.dev/edge/litert](https://ai.google.dev/edge/litert) | Apache-2.0 | 온디바이스 ML 런타임 (구 TensorFlow Lite, litert-gpu 및 litert-gpu-api 포함) |
 | **AndroidX Jetpack Compose** | `BOM 2026.02.01 / UI 1.10.4` | [developer.android.com/jetpack/compose](https://developer.android.com/jetpack/compose) | Apache-2.0 | UI 컴포저블, 그래픽, 테마, 런타임 |
 | **AndroidX CameraX** | `1.6.2` | [developer.android.com/.../camera](https://developer.android.com/jetpack/androidx/releases/camera) | Apache-2.0 | 카메라 프리뷰 및 이미지 분석 파이프라인 |
@@ -73,7 +73,6 @@ ARiA에 사용된 외부 오픈소스 소프트웨어, 런타임 의존성, 네�
 | 컴포넌트 | 식별자 / 파일 | 출처 및 모델 카드 | 라이선스 | 비고 |
 | :--- | :--- | :--- | :--- | :--- |
 | **Sherpa Zipformer Korean** | `2024-06-16-mobile` | [johnBamma/icefall-asr-ksponspeech](https://huggingface.co/johnBamma/icefall-asr-ksponspeech-pruned-transducer-stateless7-streaming-2024-06-12) | Apache-2.0 | KsponSpeech 학습 한국어 스트리밍 ASR 모델 |
-| **Gemma 4 E2B-IT** | `gemma-4-E2B-it-litert-lm` | [huggingface.co/litert-community/...](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm) | Apache-2.0 | 선택적 다운로드 온디바이스 언어 모델 (공식 모델 카드 기준) |
 | **ARiA Team Vision Model** | `team-vision-v1` | [github.com/tulg580/vision_model](https://github.com/tulg580/vision_model) | **NOT PROVIDED** | ARiA 팀 소스 비전 모델 (참조: docs/VISION_MODEL.md, 외부 라이선스 임의 주장 없음) |
 | **Custom Vision Model** | `User-imported .tflite` | 로컬 파일 탐색기를 통한 사용자 임포트 | **NOT PROVIDED** | 사용자 정의 모델 (앱에서 별도 오픈소스 라이선스 주장하지 않음) |
 | **Audio Feedback Cues** | `voice_start_clear.wav` 등 | `app/src/main/res/raw/` 번들 자산 | **NOT PROVIDED** | 프로젝트 내부 효과음 (외부 저작권 주장 없음) |
