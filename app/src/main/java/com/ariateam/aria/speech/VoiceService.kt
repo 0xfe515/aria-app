@@ -66,7 +66,7 @@ class VoiceService : Service() {
         }
         override fun preemptSpeech() { main.post { if (!destroyed) coordinator.preemptSpeech() } }
         override fun isServiceActive(): Boolean = this@VoiceService.isEffectivelyActive
-        override fun getServiceSessionId(): String = serviceSessionId
+        override fun getServiceSessionId(): String = this@VoiceService.serviceSessionId
     }
 
     override fun onCreate() {

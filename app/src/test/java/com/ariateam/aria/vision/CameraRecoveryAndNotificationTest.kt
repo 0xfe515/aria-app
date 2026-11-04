@@ -407,4 +407,445 @@ class CameraRecoveryAndNotificationTest {
         val tupleChanged = NotificationStateTuple(voiceActive = true, visionActive = true, cameraUnavailable = true)
         assertFalse(tuple1 == tupleChanged)
     }
+
+    @Test
+    fun cameraStabilityGate_blocksUntilStabilityThresholdAndProceeds() {
+        val gate = VisionModelStore.CameraStabilityGate(enabled = true)
+        assertEquals(VisionModelStore.CameraWarmupGateState.WAITING, gate.state)
+        assertFalse(gate.isStable)
+        assertFalse(gate.isCancelled)
+
+        // Production policy helper check: streaming frames and duration below threshold must NOT permit warmup
+        assertFalse(
+            "Below threshold (0 frames, 0ms) must not permit warmup",
+            VisionPipelineController.isWarmupStabilityPermitted(0L, 0L),
+        )
+        assertFalse(
+            "Below threshold (149 frames, 5000ms) must not permit warmup",
+            VisionPipelineController.isWarmupStabilityPermitted(
+                VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_FRAMES - 1L,
+                VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_WINDOW_MS,
+            ),
+        )
+        assertFalse(
+            "Below threshold (150 frames, 4999ms) must not permit warmup",
+            VisionPipelineController.isWarmupStabilityPermitted(
+                VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_FRAMES,
+                VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_WINDOW_MS - 1L,
+            ),
+        )
+
+        val unblocked = java.util.concurrent.CountDownLatch(1)
+        val awaitResult = java.util.concurrent.atomic.AtomicBoolean(false)
+        val thread = Thread {
+            awaitResult.set(gate.await(2000L))
+            unblocked.countDown()
+        }
+        thread.start()
+
+        // Gate must remain blocked while below threshold
+        assertFalse("Gate must remain waiting before stability signal", unblocked.await(50L, java.util.concurrent.TimeUnit.MILLISECONDS))
+
+        // Reaching threshold permits warmup and signals stability
+        assertTrue(
+            "Reaching threshold (150 frames, 5000ms) must permit warmup",
+            VisionPipelineController.isWarmupStabilityPermitted(
+                VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_FRAMES,
+                VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_WINDOW_MS,
+            ),
+        )
+        assertTrue(
+            "Above threshold (200 frames, 6000ms) must permit warmup",
+            VisionPipelineController.isWarmupStabilityPermitted(200L, 6_000L),
+        )
+        assertTrue("Signaling camera stability must succeed", gate.signalCameraStability())
+
+        // Gate unblocks with success
+        assertTrue(unblocked.await(1000L, java.util.concurrent.TimeUnit.MILLISECONDS))
+        assertTrue(awaitResult.get())
+        assertTrue(gate.isStable)
+        assertEquals(VisionModelStore.CameraWarmupGateState.STABLE, gate.state)
+        thread.join(1000L)
+
+        // Reset re-arms gate to WAITING for subsequent sessions
+        assertTrue("Resetting gate must succeed", gate.reset())
+        assertEquals(VisionModelStore.CameraWarmupGateState.WAITING, gate.state)
+        assertFalse(gate.isStable)
+        assertFalse(gate.isCancelled)
+    }
+
+    @Test
+    fun cameraStabilityGate_unblocksSafelyOnCancelWithoutDeadlock() {
+        val gate = VisionModelStore.CameraStabilityGate(enabled = true)
+        val unblocked = java.util.concurrent.CountDownLatch(1)
+        val awaitResult = java.util.concurrent.atomic.AtomicBoolean(true)
+
+        val thread = Thread {
+            awaitResult.set(gate.await(2000L))
+            unblocked.countDown()
+        }
+        thread.start()
+
+        assertFalse(unblocked.await(50L, java.util.concurrent.TimeUnit.MILLISECONDS))
+
+        // Cancelling gate (e.g. on camera error, stop, or permission denied) unblocks without waiting for timeout
+        val cancelled = gate.cancel()
+        assertTrue(cancelled)
+        assertTrue(gate.isCancelled)
+        assertFalse(gate.isStable)
+        assertEquals(VisionModelStore.CameraWarmupGateState.CANCELLED, gate.state)
+
+        assertTrue("Gate must unblock promptly upon cancellation", unblocked.await(500L, java.util.concurrent.TimeUnit.MILLISECONDS))
+        assertFalse("Cancelled gate await must return false", awaitResult.get())
+        thread.join(1000L)
+    }
+
+    @Test
+    fun cameraStabilityGate_sequencingPolicy_bypassesWhenNoCameraGraphActiveAndProtectsWhenActive() {
+        // 1. Natural startup (no camera graph active): policy evaluates PROCEED_IMMEDIATELY, gate must not await
+        val startupAction = com.ariateam.aria.startup.StartupVisionPreparationPolicy.evaluateGatingAction(
+            isCameraGraphActive = false,
+            isCameraPending = false,
+            isCameraRecovering = false,
+            hasCameraPermission = true,
+            isExplicitStopActive = false,
+            isClosed = false,
+        )
+        assertEquals(
+            com.ariateam.aria.startup.StartupVisionPreparationPolicy.GatingAction.PROCEED_IMMEDIATELY,
+            startupAction,
+        )
+        assertFalse(
+            "Must not await camera stability gate during natural startup when no camera graph is active",
+            com.ariateam.aria.startup.StartupVisionPreparationPolicy.shouldAwaitStability(startupAction),
+        )
+
+        // 2. Active camera graph (e.g. model change on Home or Settings): policy evaluates AWAIT_CAMERA_STABILITY
+        val activeAction = com.ariateam.aria.startup.StartupVisionPreparationPolicy.evaluateGatingAction(
+            isCameraGraphActive = true,
+            isCameraPending = false,
+            isCameraRecovering = false,
+            hasCameraPermission = true,
+            isExplicitStopActive = false,
+            isClosed = false,
+        )
+        assertEquals(
+            com.ariateam.aria.startup.StartupVisionPreparationPolicy.GatingAction.AWAIT_CAMERA_STABILITY,
+            activeAction,
+        )
+        assertTrue(
+            "Must await camera stability gate when camera graph is active to prevent GPU/camera contention",
+            com.ariateam.aria.startup.StartupVisionPreparationPolicy.shouldAwaitStability(activeAction),
+        )
+
+        // 3. User explicit stop active while camera is active: policy evaluates CANCEL
+        val stopAction = com.ariateam.aria.startup.StartupVisionPreparationPolicy.evaluateGatingAction(
+            isCameraGraphActive = true,
+            isCameraPending = false,
+            isCameraRecovering = false,
+            hasCameraPermission = true,
+            isExplicitStopActive = true,
+            isClosed = false,
+        )
+        assertEquals(
+            com.ariateam.aria.startup.StartupVisionPreparationPolicy.GatingAction.CANCEL,
+            stopAction,
+        )
+
+        // 4. Cold launch with persisted explicit stop (no camera active): proceeds without misleading error
+        val coldStopAction = com.ariateam.aria.startup.StartupVisionPreparationPolicy.evaluateGatingAction(
+            isCameraGraphActive = false,
+            isCameraPending = false,
+            isCameraRecovering = false,
+            hasCameraPermission = true,
+            isExplicitStopActive = true,
+            isClosed = false,
+        )
+        assertEquals(
+            com.ariateam.aria.startup.StartupVisionPreparationPolicy.GatingAction.PROCEED_IMMEDIATELY,
+            coldStopAction,
+        )
+    }
+
+    @Test
+    fun fatalCameraDeviceError_boundsRecoveryAttemptsToConfiguredLimit() {
+        val maxAttempts = VisionPipelineController.MAX_DEVICE_ERROR_RECOVERY_ATTEMPTS
+        assertEquals("Configured max fatal device recovery attempts must be 1", 1, maxAttempts)
+
+        // Attempt 1: Permitted via production helper
+        assertTrue(
+            "Attempt 1 must be permitted for bounded recovery",
+            VisionPipelineController.canAttemptFatalDeviceRecovery(1),
+        )
+
+        // Attempt 2: Exceeds limit
+        assertFalse(
+            "Attempt 2 must exceed bound and trigger terminal Error",
+            VisionPipelineController.canAttemptFatalDeviceRecovery(2),
+        )
+    }
+
+    @Test
+    fun invocationReadyGuard_preventsStaleReadyWithoutActiveSession() {
+        val mockMetadata = VisionModelMetadata(
+            displayName = "test.tflite",
+            sizeBytes = 1000L,
+            sha256 = "abc",
+            importedAtMillis = 100L,
+        )
+        val readyState: VisionModelState = VisionModelState.Ready(mockMetadata)
+        val loadingState: VisionModelState = VisionModelState.Loading("test.tflite")
+
+        // When segmenter is not invocation ready, effective state must be Loading
+        val unwarmedEffectiveState = VisionPipelineController.resolveEffectiveModelStateName(
+            state = readyState,
+            isInvocationReady = false,
+        )
+        assertEquals("Unwarmed session must report Loading instead of Ready", "Loading", unwarmedEffectiveState)
+
+        // When warmed and invocation ready, effective state is Ready
+        val warmedEffectiveState = VisionPipelineController.resolveEffectiveModelStateName(
+            state = readyState,
+            isInvocationReady = true,
+        )
+        assertEquals("Warmed session reports Ready", "Ready", warmedEffectiveState)
+
+        // Loading state remains Loading regardless
+        assertEquals(
+            "Loading state must report Loading",
+            "Loading",
+            VisionPipelineController.resolveEffectiveModelStateName(loadingState, isInvocationReady = false),
+        )
+    }
+
+    @Test
+    fun recoverySequencingPolicy_enforcesCloseThenAvailabilityThenSingleRebind() {
+        var rebindCount = 0
+        var closeTimeoutState: String? = null
+        var availabilityTimeoutCalled = false
+
+        val coordinator = RecoverySequencingCoordinator(
+            onRebind = { rebindCount++ },
+            onPriorCloseTimeout = { closeTimeoutState = it },
+            onAvailabilityTimeout = { availabilityTimeoutCalled = true },
+        )
+
+        assertFalse("Initial coordinator must not have prior closed", coordinator.isPriorClosed)
+        assertFalse("Initial coordinator must not have camera available", coordinator.isCameraAvailable)
+        assertFalse(
+            "Initial coordinator must not satisfy rebind",
+            CameraRecoverySequencingPolicy.canRebind(coordinator.isPriorClosed, coordinator.isCameraAvailable),
+        )
+
+        // 1. Prior graph closes first, but camera is not yet available
+        val triggeredOnClose = coordinator.markPriorClosed()
+        assertFalse("Closing prior graph without camera availability must not trigger rebind", triggeredOnClose)
+        assertEquals(0, rebindCount)
+        assertTrue(coordinator.isPriorClosed)
+        assertFalse(coordinator.isCameraAvailable)
+
+        // 2. CameraManager reports camera available -> rebind triggers immediately
+        val triggeredOnAvail = coordinator.markCameraAvailable()
+        assertTrue("Reporting camera available when prior closed must trigger rebind", triggeredOnAvail)
+        assertEquals(1, rebindCount)
+        assertTrue(CameraRecoverySequencingPolicy.canRebind(coordinator.isPriorClosed, coordinator.isCameraAvailable))
+
+        // 3. Repeated callbacks must never trigger duplicate rebinds
+        assertFalse("Duplicate close must not retrigger", coordinator.markPriorClosed())
+        assertFalse("Duplicate availability must not retrigger", coordinator.markCameraAvailable())
+        assertEquals("Rebind count must remain strictly 1", 1, rebindCount)
+        assertNull(closeTimeoutState)
+        assertFalse(availabilityTimeoutCalled)
+    }
+
+    @Test
+    fun recoverySequencingPolicy_whenCameraAvailableFirst_waitsForCloseBeforeRebind() {
+        var rebindCount = 0
+        val coordinator = RecoverySequencingCoordinator(
+            onRebind = { rebindCount++ },
+            onPriorCloseTimeout = {},
+            onAvailabilityTimeout = {},
+        )
+
+        // Camera becomes available before prior graph finishes closing
+        val triggeredOnAvail = coordinator.markCameraAvailable()
+        assertFalse("Camera available before prior close must not trigger rebind", triggeredOnAvail)
+        assertEquals(0, rebindCount)
+        assertFalse(coordinator.isPriorClosed)
+        assertTrue(coordinator.isCameraAvailable)
+
+        // Prior graph finishes closing -> rebind triggers
+        val triggeredOnClose = coordinator.markPriorClosed()
+        assertTrue("Prior graph close when camera available must trigger rebind", triggeredOnClose)
+        assertEquals(1, rebindCount)
+    }
+
+    @Test
+    fun recoverySequencingPolicy_priorCloseTimeout_triggersActionableCloseFailure() {
+        var rebindCount = 0
+        var reportedState: String? = null
+        val coordinator = RecoverySequencingCoordinator(
+            onRebind = { rebindCount++ },
+            onPriorCloseTimeout = { reportedState = it },
+            onAvailabilityTimeout = {},
+        )
+
+        coordinator.handlePriorCloseTimeout("OPENING")
+        assertEquals("Prior close timeout must report current prior state", "OPENING", reportedState)
+        assertEquals("Rebind must not be triggered on close timeout", 0, rebindCount)
+    }
+
+    @Test
+    fun recoverySequencingPolicy_availabilityTimeout_triggersActionableAvailabilityFailure() {
+        var rebindCount = 0
+        var availTimeoutFired = false
+        val coordinator = RecoverySequencingCoordinator(
+            onRebind = { rebindCount++ },
+            onPriorCloseTimeout = {},
+            onAvailabilityTimeout = { availTimeoutFired = true },
+        )
+
+        coordinator.markPriorClosed()
+        coordinator.handleAvailabilityTimeout()
+        assertTrue("Availability timeout must fire when camera remains unavailable after close", availTimeoutFired)
+        assertEquals("Rebind must not be triggered on availability timeout", 0, rebindCount)
+    }
+
+    @Test
+    fun recoverySequencingPolicy_availabilityDeadline_isBoundedAndExceedsObservedGpuCompletion() {
+        val deadlineMs = VisionPipelineController.REBIND_AVAILABILITY_DEADLINE_MS
+        assertEquals("Configured availability deadline must be 10000ms", 10_000L, deadlineMs)
+
+        // Must safely exceed observed GPU kernel completion (3400ms) and HAL drain (6400ms)
+        assertTrue(
+            "Availability deadline must exceed observed post-close GPU completion (3400ms)",
+            CameraRecoverySequencingPolicy.isAvailabilityDeadlineSufficient(
+                deadlineMs,
+                CameraRecoverySequencingPolicy.OBSERVED_POST_CLOSE_GPU_COMPLETION_MS,
+            ),
+        )
+        assertTrue(
+            "Availability deadline must exceed observed post-close HAL drain (6400ms)",
+            CameraRecoverySequencingPolicy.isAvailabilityDeadlineSufficient(
+                deadlineMs,
+                CameraRecoverySequencingPolicy.OBSERVED_POST_CLOSE_HAL_DRAIN_MS,
+            ),
+        )
+
+        // Sub-threshold deadlines (e.g. former 2000ms) fail sufficiency check
+        assertFalse(
+            "2000ms deadline is insufficient for 3400ms GPU kernel completion",
+            CameraRecoverySequencingPolicy.isAvailabilityDeadlineSufficient(2_000L, 3_400L),
+        )
+    }
+
+    @Test
+    fun cameraStabilityGate_timeoutIsConsistentWithStartupAndWarmupWindows() {
+        val gateTimeoutMs = VisionModelStore.CAMERA_STABILITY_GATE_TIMEOUT_MS
+        assertEquals("Configured stability gate timeout must be 35000ms", 35_000L, gateTimeoutMs)
+
+        // Must safely accommodate 20s test initial frame arrival deadline + 5s sustained warmup window
+        val maxInitialStartupMs = 20_000L
+        val sustainedWarmupMs = VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_WINDOW_MS
+        val minRequiredGateTimeoutMs = maxInitialStartupMs + sustainedWarmupMs
+        assertTrue(
+            "Gate timeout ($gateTimeoutMs) must exceed min required ($minRequiredGateTimeoutMs) with positive headroom",
+            gateTimeoutMs > minRequiredGateTimeoutMs,
+        )
+        val headroomMs = gateTimeoutMs - minRequiredGateTimeoutMs
+        assertTrue("Headroom must be at least 10s", headroomMs >= 10_000L)
+    }
+
+    @Test
+    fun recoverySequencingPolicy_healthyStreamRecoverySustained_requiresBothFramesAndDuration() {
+        val requiredFrames = VisionPipelineController.SUSTAINED_HEALTHY_FRAMES
+        val requiredDurationMs = VisionPipelineController.SUSTAINED_HEALTHY_WINDOW_MS
+        assertEquals(60L, requiredFrames)
+        assertEquals(10_000L, requiredDurationMs)
+
+        // Sub-threshold cases: neither, frames only, duration only
+        assertFalse(
+            "Zero frames and zero duration must not be sustained",
+            VisionPipelineController.isHealthyStreamRecoverySustained(0L, 0L),
+        )
+        assertFalse(
+            "Sub-threshold frames (59/60) must not be sustained even if duration met",
+            VisionPipelineController.isHealthyStreamRecoverySustained(59L, 10_000L),
+        )
+        assertFalse(
+            "Sub-threshold duration (9999/10000ms) must not be sustained even if frames met",
+            VisionPipelineController.isHealthyStreamRecoverySustained(60L, 9_999L),
+        )
+
+        // Threshold met exactly
+        assertTrue(
+            "Exactly 60 frames and 10000ms must satisfy sustained recovery",
+            VisionPipelineController.isHealthyStreamRecoverySustained(60L, 10_000L),
+        )
+
+        // Above threshold
+        assertTrue(
+            "120 frames and 15000ms must satisfy sustained recovery",
+            VisionPipelineController.isHealthyStreamRecoverySustained(120L, 15_000L),
+        )
+
+        // Direct policy call with custom thresholds
+        assertTrue(
+            "Custom thresholds honored",
+            CameraRecoverySequencingPolicy.isHealthyStreamRecoverySustained(
+                healthyFrames = 10L,
+                healthyDurationMs = 2_000L,
+                requiredFrames = 10L,
+                requiredDurationMs = 2_000L,
+            ),
+        )
+        assertFalse(
+            "Custom duration sub-threshold honored",
+            CameraRecoverySequencingPolicy.isHealthyStreamRecoverySustained(
+                healthyFrames = 10L,
+                healthyDurationMs = 1_999L,
+                requiredFrames = 10L,
+                requiredDurationMs = 2_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun recoverySequencingPolicy_stallRecoveryBounds_enforcesFiniteRetries() {
+        assertEquals(3, VisionPipelineController.MAX_STALL_RECOVERY_ATTEMPTS)
+
+        // In-bounds attempts (0, 1, 2)
+        assertTrue(
+            "Initial stall attempt (0) must be allowed",
+            VisionPipelineController.canAttemptStallRecovery(0),
+        )
+        assertTrue(
+            "First retry attempt (1) must be allowed",
+            VisionPipelineController.canAttemptStallRecovery(1),
+        )
+        assertTrue(
+            "Second retry attempt (2) must be allowed",
+            VisionPipelineController.canAttemptStallRecovery(2),
+        )
+
+        // Terminal bound (>= 3)
+        assertFalse(
+            "Third retry attempt (3) exceeds max stall recovery attempts and must be rejected",
+            VisionPipelineController.canAttemptStallRecovery(3),
+        )
+        assertFalse(
+            "Subsequent retry attempt (4) must be rejected",
+            VisionPipelineController.canAttemptStallRecovery(4),
+        )
+
+        // Direct policy call with custom limit
+        assertTrue(
+            "Custom attempt limit honored",
+            CameraRecoverySequencingPolicy.canAttemptStallRecovery(currentAttempts = 1, maxAttempts = 2),
+        )
+        assertFalse(
+            "Custom attempt limit reached",
+            CameraRecoverySequencingPolicy.canAttemptStallRecovery(currentAttempts = 2, maxAttempts = 2),
+        )
+    }
 }

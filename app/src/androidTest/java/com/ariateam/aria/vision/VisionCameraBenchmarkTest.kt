@@ -63,7 +63,13 @@ class VisionCameraBenchmarkTest {
         viewModel.stopCamera()
         assertFalse("stopCamera on uninitialized VisionViewModel must not initialize it", viewModel.isInitialized)
 
-        val store = VisionModelStore(context, restoreOnInit = false)
+        val isolatedDir = File(context.cacheDir, "vision_store_test_isolated_${System.nanoTime()}").apply { mkdirs() }
+        val isolatedContext = IsolatedVisionTestContext(
+            base = context,
+            isolatedDir = isolatedDir,
+            isolatedPrefsName = "test_aria_vision_model_store_prefs_1",
+        )
+        val store = VisionModelStore(isolatedContext, restoreOnInit = false)
         try {
             store.clearModelSync()
             assertEquals(VisionModelState.Missing, store.state.value)
@@ -87,7 +93,7 @@ class VisionCameraBenchmarkTest {
             assertFalse(store.activeModelFile.exists())
 
             // 3. Fresh store after rejected import starts in Missing state.
-            val freshStore = VisionModelStore(context, restoreOnInit = false)
+            val freshStore = VisionModelStore(isolatedContext, restoreOnInit = false)
             try {
                 val restored = freshStore.restorePersistedModelSync()
                 assertEquals(VisionModelState.Missing, restored)
@@ -98,6 +104,11 @@ class VisionCameraBenchmarkTest {
             store.clearModelSync()
             store.close()
             viewModel.close()
+            runCatching { isolatedDir.deleteRecursively() }
+            runCatching {
+                context.getSharedPreferences("test_aria_vision_model_store_prefs_1", Context.MODE_PRIVATE)
+                    .edit().clear().commit()
+            }
         }
     }
 
@@ -134,12 +145,19 @@ class VisionCameraBenchmarkTest {
         val owner = requireNotNull(lifecycleOwnerRef.get()) { "LifecycleOwner not captured" }
         val previewView = requireNotNull(previewViewRef.get()) { "PreviewView not captured" }
 
-        val store = VisionModelStore(context, restoreOnInit = false)
-        store.clearModelSync()
-        assertEquals(VisionModelState.Missing, store.state.value)
-        val controller = VisionPipelineController(context, modelStore = store)
+        val isolatedDir = File(context.cacheDir, "vision_bench_isolated_${System.nanoTime()}").apply { mkdirs() }
+        val isolatedContext = IsolatedVisionTestContext(
+            base = context,
+            isolatedDir = isolatedDir,
+            isolatedPrefsName = "test_aria_vision_model_store_prefs_2",
+        )
+        val store = VisionModelStore(isolatedContext, restoreOnInit = false)
         try {
-            var surfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
+            store.clearModelSync()
+            assertEquals(VisionModelState.Missing, store.state.value)
+            val controller = VisionPipelineController(context, modelStore = store)
+            try {
+                var surfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
             var displayRotation = Surface.ROTATION_0
             composeRule.runOnUiThread {
                 surfaceProvider = previewView.surfaceProvider
@@ -304,8 +322,16 @@ class VisionCameraBenchmarkTest {
             assertTrue(previewOnlySnap.warmupCompleted)
             assertTrue("Expected previewOnly sensorSteadyFrames >= 50", previewOnlySnap.sensorSteadyFrames >= 50)
             assertEquals(0, previewOnlySnap.steadyFrames)
+            } finally {
+                controller.close()
+            }
         } finally {
-            controller.close()
+            store.close()
+            runCatching { isolatedDir.deleteRecursively() }
+            runCatching {
+                context.getSharedPreferences("test_aria_vision_model_store_prefs_2", Context.MODE_PRIVATE)
+                    .edit().clear().commit()
+            }
         }
     }
 
@@ -313,5 +339,16 @@ class VisionCameraBenchmarkTest {
         is Activity -> context
         is ContextWrapper -> findActivity(context.baseContext)
         else -> null
+    }
+
+    private class IsolatedVisionTestContext(
+        base: Context,
+        private val isolatedDir: File,
+        private val isolatedPrefsName: String,
+    ) : ContextWrapper(base) {
+        override fun getNoBackupFilesDir(): File = File(isolatedDir, "no_backup").apply { mkdirs() }
+        override fun getSharedPreferences(name: String, mode: Int): android.content.SharedPreferences {
+            return super.getSharedPreferences(isolatedPrefsName, mode)
+        }
     }
 }

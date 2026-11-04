@@ -1168,7 +1168,7 @@ class VisionPipelineUnitTest {
             }
             val failingEnv = object : GpuEnvironment() {
                 override fun isGpuSupported(): Boolean = true
-                override fun createDelegate(precisionLossAllowed: Boolean): org.tensorflow.lite.gpu.GpuDelegate {
+                override fun createDelegate(precisionLossAllowed: Boolean): AutoCloseable? {
                     throw RuntimeException("Simulated GPU shader compilation failure")
                 }
             }
@@ -1328,5 +1328,116 @@ class VisionPipelineUnitTest {
             importedAtMillis = 1000L,
         )
         assertTrue(metadata.backendDescription.contains("LiteRT GPU FP32"))
+    }
+
+    @Test
+    fun pipelineDecoupling_cameraAnalyzerThreadRunsConcurrentlyWithInferenceThread() {
+        val supportedEnv = object : GpuEnvironment() {
+            override fun isGpuSupported(): Boolean = true
+        }
+        val tempFile = File.createTempFile("dummy_model", ".tflite")
+        tempFile.writeBytes(ByteArray(64))
+        try {
+            val mapped = java.io.RandomAccessFile(tempFile, "r").use { raf ->
+                raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0L, raf.length())
+            }
+            val inferenceExecutionThreadRef = java.util.concurrent.atomic.AtomicReference<String>()
+            val segmenter = LiteRtVisionSegmenter(
+                gpuEnvironment = supportedEnv,
+                sessionBuilderForTesting = { buffer, backend, threads, _ ->
+                    LiteRtVisionSegmenter.InferenceSession(
+                        interpreter = null,
+                        gpuDelegate = null,
+                        mappedBuffer = buffer,
+                        backendType = backend,
+                        cpuThreads = threads,
+                        backendDescription = "Test ${backend.label}",
+                        runInferenceForTesting = { _, _ ->
+                            inferenceExecutionThreadRef.set(Thread.currentThread().name)
+                        },
+                    )
+                },
+                monotonicClockNanos = { System.nanoTime() },
+            )
+            try {
+                segmenter.activatePreparedSession(LiteRtVisionSegmenter.PreparedModelSession(mapped))
+                assertTrue(segmenter.isReady)
+
+                val inferenceExecutor = segmenter.pipelineExecutor
+                val inferenceThreadName = segmenter.executionThread?.name
+                assertEquals("AriaInferenceThread", inferenceThreadName)
+
+                // Dedicated analyzer executor
+                var analyzerThreadName: String? = null
+                val analyzerExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+                    Thread(runnable, "AriaCameraAnalyzerThread").also { t ->
+                        t.isDaemon = true
+                        analyzerThreadName = t.name
+                    }
+                }
+                try {
+                    val blockLatch = java.util.concurrent.CountDownLatch(1)
+                    val inferenceStarted = java.util.concurrent.CountDownLatch(1)
+
+                    // Block inference executor (simulating native GPU model restore)
+                    inferenceExecutor.execute {
+                        inferenceStarted.countDown()
+                        blockLatch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                    }
+
+                    assertTrue(inferenceStarted.await(2, java.util.concurrent.TimeUnit.SECONDS))
+
+                    // Verify analyzer executor can run tasks concurrently while inference executor is blocked
+                    val analyzerTasksCompleted = java.util.concurrent.atomic.AtomicInteger(0)
+                    val analyzerLatch = java.util.concurrent.CountDownLatch(3)
+                    for (i in 0 until 3) {
+                        analyzerExecutor.execute {
+                            analyzerTasksCompleted.incrementAndGet()
+                            analyzerLatch.countDown()
+                        }
+                    }
+
+                    val completedPromptly = analyzerLatch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+                    assertTrue("Analyzer executor must not be blocked by inference executor", completedPromptly)
+                    assertEquals(3, analyzerTasksCompleted.get())
+                    assertEquals("AriaCameraAnalyzerThread", analyzerThreadName)
+
+                    // Unblock inference executor
+                    blockLatch.countDown()
+
+                    // Verify runIfLoaded executed from analyzer executor runs on AriaInferenceThread
+                    val callerThreadRef = java.util.concurrent.atomic.AtomicReference<String>()
+                    val testBuffer = ByteBuffer.allocateDirect(VisionContract.INPUT_BYTES)
+                    val asyncFailureRef = java.util.concurrent.atomic.AtomicReference<Throwable>()
+                    val runLatch = java.util.concurrent.CountDownLatch(1)
+                    val future = analyzerExecutor.submit {
+                        try {
+                            callerThreadRef.set(Thread.currentThread().name)
+                            segmenter.runIfLoaded(testBuffer, produceOverlayBitmap = false)
+                        } catch (t: Throwable) {
+                            asyncFailureRef.set(t)
+                            throw t
+                        } finally {
+                            runLatch.countDown()
+                        }
+                    }
+                    val completed = runLatch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                    val asyncFailure = asyncFailureRef.get()
+                    if (asyncFailure != null) {
+                        throw AssertionError("runIfLoaded failed asynchronously on analyzer executor", asyncFailure)
+                    }
+                    assertTrue("Analyzer task executing runIfLoaded must complete within bounded wait", completed)
+                    future.get(5, java.util.concurrent.TimeUnit.SECONDS)
+                    assertEquals("AriaCameraAnalyzerThread", callerThreadRef.get())
+                    assertEquals("AriaInferenceThread", inferenceExecutionThreadRef.get())
+                } finally {
+                    analyzerExecutor.shutdown()
+                }
+            } finally {
+                segmenter.close()
+            }
+        } finally {
+            tempFile.delete()
+        }
     }
 }

@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlin.coroutines.CoroutineContext
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -24,12 +25,34 @@ class CloudQuestionDeviceTest {
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        keyStorage = AndroidKeyStoreAriaKeyStorage(context)
+        keyStorage = AndroidKeyStoreAriaKeyStorage(
+            context = context,
+            prefsName = TEST_PREFS_NAME,
+            keyAlias = TEST_KEY_ALIAS,
+        )
+        // Ensure isolated test alias and test prefs start clean without touching production
         keyStorage.clearApiKey()
+    }
+
+    @After
+    fun tearDown() {
+        if (::keyStorage.isInitialized) {
+            // Clean up ONLY the test alias and test prefs; never touches real credentials
+            keyStorage.clearApiKey()
+        }
     }
 
     @Test
     fun androidKeyStoreEncryptsAndDecryptsApiKey() {
+        assertTrue(
+            "Test alias must never equal production alias",
+            TEST_KEY_ALIAS != AndroidKeyStoreAriaKeyStorage.KEY_ALIAS,
+        )
+        assertTrue(
+            "Test prefs must never equal production prefs",
+            TEST_PREFS_NAME != AndroidKeyStoreAriaKeyStorage.PREFS_NAME,
+        )
+
         assertFalse(keyStorage.hasApiKey())
         assertNull(keyStorage.getApiKey())
         assertNull(keyStorage.getMaskedApiKey())
@@ -388,5 +411,10 @@ class CloudQuestionDeviceTest {
             queue.clear()
             for (r in list) r.run()
         }
+    }
+
+    companion object {
+        private const val TEST_PREFS_NAME = "aria_cloud_secure_prefs_device_test"
+        private const val TEST_KEY_ALIAS = "aria_gemini_api_key_device_test_v1"
     }
 }

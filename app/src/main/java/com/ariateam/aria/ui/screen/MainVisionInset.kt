@@ -380,7 +380,6 @@ fun MainVisionInset(
     LaunchedEffect(
         isHomeVisible,
         hasCameraPermission,
-        visionModelState,
         displayRotation,
     ) {
         if (isHomeVisible && hasCameraPermission) {

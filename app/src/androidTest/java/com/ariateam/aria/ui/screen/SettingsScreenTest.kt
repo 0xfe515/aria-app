@@ -103,14 +103,22 @@ class SettingsScreenTest {
         compose.onNodeWithTag("gemini_change_key_btn").assertIsDisplayed()
         compose.onNodeWithTag("gemini_clear_key_btn").assertIsDisplayed()
 
-        // Retained on-device local models (ASR and Vision) are displayed
-        compose.onNodeWithText(context.getString(R.string.settings_account_local_asr_title)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.settings_account_local_vision_title)).assertIsDisplayed()
+        // Retained on-device local models (ASR and Vision) are displayed below fold; scroll before asserting
+        compose.onNodeWithText(context.getString(R.string.settings_account_local_asr_title))
+            .performScrollTo()
+            .assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_account_local_vision_title))
+            .performScrollTo()
+            .assertIsDisplayed()
 
-        // Clear key
-        compose.onNodeWithTag("gemini_clear_key_btn").performClick()
+        // Clear key: scroll back up to clear button before clicking
+        compose.onNodeWithTag("gemini_clear_key_btn")
+            .performScrollTo()
+            .performClick()
         compose.onNodeWithText(context.getString(R.string.settings_cloud_key_delete_confirm)).performClick()
-        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_empty)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_empty))
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     @Test fun feedbackSwitchUpdatesTheSelectedMode() {

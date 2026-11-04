@@ -1,6 +1,7 @@
 package com.ariateam.aria.speech
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ariateam.aria.hazard.HazardAlertCoordinator
@@ -20,6 +21,15 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
+/**
+ * Instrumented integration tests verifying HazardAlertCoordinator -> HazardSpeechBridge event flow.
+ *
+ * NOTE: These tests use in-memory fake-service wiring (IVoiceService.Stub provider) to isolate and
+ * deterministically verify speech bridge event translation, clock domain handling, and temporal
+ * hysteresis without starting the multi-process :wakeword VoiceService or recording real audio.
+ * For actual IPC binding, stop semantics, and provider reconciliation across process boundaries,
+ * see [com.ariateam.aria.runtime.UnifiedStopDeviceTest].
+ */
 @RunWith(AndroidJUnit4::class)
 class HazardSpeechIntegrationDeviceTest {
 
@@ -45,6 +55,8 @@ class HazardSpeechIntegrationDeviceTest {
         val deliveredEvents = CopyOnWriteArrayList<HazardAlertEvent>()
         val latch = CountDownLatch(1)
 
+        // In-memory fake-service wiring: provides an IVoiceService.Stub directly to HazardSpeechBridge
+        // for deterministic verification of bridge callback routing.
         val bridge = HazardSpeechBridge(
             context = context,
             voiceServiceProvider = {
@@ -76,37 +88,57 @@ class HazardSpeechIntegrationDeviceTest {
                 }
             },
         )
-        bridge.start()
-        HazardAlertCoordinator.setSharedAlertSink(bridge)
 
-        val coordinator = HazardAlertCoordinator(
-            context = context,
-            toastDispatcher = {},
-            vibratorDispatcher = {},
-        )
-        coordinator.start()
+        var coordinator: HazardAlertCoordinator? = null
+        try {
+            bridge.start()
+            HazardAlertCoordinator.setSharedAlertSink(bridge)
 
-        // Feed two path blocked assessments to exceed hysteresis requirement (confirmationFramesRequired = 2)
-        val now = System.nanoTime()
-        val assessment = HazardAssessment(
-            level = HazardLevel.PATH_BLOCKED,
-            motionConfidence = 0.95f,
-            messageKorean = "전방 경로 막힘",
-            timestampNanos = now,
-            isAlertCandidate = true,
-        )
+            val coord = HazardAlertCoordinator(
+                context = context,
+                toastDispatcher = {},
+                vibratorDispatcher = {},
+            )
+            coordinator = coord
+            coord.start()
 
-        coordinator.processAssessment(assessment, now)
-        coordinator.processAssessment(assessment, now + 1_000_000L)
+            // Clock domain alignment: HazardAlertCoordinator tracks session start and evaluates
+            // staleness using SystemClock.elapsedRealtimeNanos(). Using System.nanoTime() is prone
+            // to cross-domain mismatch across device sleep (CLOCK_MONOTONIC vs CLOCK_BOOTTIME).
+            val t0 = SystemClock.elapsedRealtimeNanos()
+            val firstAssessment = HazardAssessment(
+                level = HazardLevel.PATH_BLOCKED,
+                motionConfidence = 0.95f,
+                messageKorean = "전방 경로 막힘",
+                timestampNanos = t0,
+                isAlertCandidate = true,
+            )
 
-        val received = latch.await(2, TimeUnit.SECONDS)
-        assertTrue("Hazard alert should be dispatched to registered bridge", received)
-        assertEquals(1, deliveredEvents.size)
-        assertEquals("전방 경로 막힘", deliveredEvents[0].message)
+            // Feed frame 1: Policy requires confirmationFramesRequired = 2.
+            // A single frame must NOT trigger an alert; verify hysteresis suppression.
+            coord.processAssessment(firstAssessment, t0)
+            assertEquals("Single frame must be suppressed by confirmationFramesRequired = 2 hysteresis", 0, deliveredEvents.size)
+            assertEquals("Latch must not count down on single frame", 1L, latch.count)
 
-        coordinator.stop()
-        coordinator.close()
-        bridge.close()
+            // Feed frame 2: Distinct, monotonically increasing timestamp in the same elapsedRealtimeNanos clock domain.
+            val t1 = t0 + 33_000_000L // +33ms later (~30fps camera cadence)
+            val secondAssessment = firstAssessment.copy(timestampNanos = t1)
+            coord.processAssessment(secondAssessment, t1)
+
+            val received = latch.await(2, TimeUnit.SECONDS)
+            assertTrue("Hazard alert should be dispatched to registered bridge after 2 confirmation frames", received)
+            assertEquals(1, deliveredEvents.size)
+            assertEquals("전방 경로 막힘", deliveredEvents[0].message)
+            assertEquals(t1, deliveredEvents[0].timestampNanos)
+            assertTrue("AIDL session ticket must be assigned", deliveredEvents[0].session > 0L)
+            assertEquals("AIDL sequence must be 1 for first alert", 1L, deliveredEvents[0].sequence)
+        } finally {
+            coordinator?.stop()
+            coordinator?.close()
+            bridge.close()
+            HazardAlertCoordinator.setSharedAlertSink(null)
+            AriaRuntimeStateBridge.resetForTesting()
+        }
         assertNull(HazardAlertCoordinator.getSharedAlertSink())
     }
 
@@ -115,6 +147,8 @@ class HazardSpeechIntegrationDeviceTest {
         AriaRuntimeStateBridge.setVoiceActiveLocal(false)
 
         val deliveredEvents = CopyOnWriteArrayList<HazardAlertEvent>()
+        // In-memory fake-service wiring: tests that bridge drops alerts when voice service is stopped
+        // without attempting to restart or bind to VoiceService.
         val bridge = HazardSpeechBridge(
             context = context,
             voiceServiceProvider = {
@@ -144,16 +178,20 @@ class HazardSpeechIntegrationDeviceTest {
             },
         )
 
-        bridge.onHazardAlert(
-            HazardAlertEvent(
-                session = 1L,
-                sequence = 1L,
-                timestampNanos = System.nanoTime(),
-                message = "주의",
+        try {
+            bridge.onHazardAlert(
+                HazardAlertEvent(
+                    session = 1L,
+                    sequence = 1L,
+                    timestampNanos = SystemClock.elapsedRealtimeNanos(),
+                    message = "주의",
+                )
             )
-        )
 
-        assertEquals("When voice service is stopped, alerts must be dropped without revival", 0, deliveredEvents.size)
-        bridge.close()
+            assertEquals("When voice service is stopped, alerts must be dropped without revival", 0, deliveredEvents.size)
+        } finally {
+            bridge.close()
+            AriaRuntimeStateBridge.resetForTesting()
+        }
     }
 }

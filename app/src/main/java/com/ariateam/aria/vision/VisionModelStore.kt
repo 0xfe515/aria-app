@@ -1,8 +1,12 @@
 package com.ariateam.aria.vision
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.content.ContextCompat
+import com.ariateam.aria.startup.StartupVisionPreparationPolicy
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,7 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class VisionModelStore(
     private val context: Context,
-    val segmenter: LiteRtVisionSegmenter = LiteRtVisionSegmenter(),
+    val segmenter: LiteRtVisionSegmenter = LiteRtVisionSegmenter(context = context),
     restoreOnInit: Boolean = true,
     private val mutableState: MutableStateFlow<VisionModelState> = MutableStateFlow(VisionModelState.Missing),
     private val mutableInitialRestoreCompleted: MutableStateFlow<Boolean> = MutableStateFlow(!restoreOnInit),
@@ -41,6 +45,58 @@ class VisionModelStore(
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "aria-vision-model-store").apply { isDaemon = true }
+    }
+
+    val cameraStabilityGate: CameraStabilityGate = CameraStabilityGate(enabled = restoreOnInit)
+
+    @Volatile
+    var cameraStabilityDecider: (() -> StartupVisionPreparationPolicy.GatingAction)? = null
+
+    fun signalCameraStability() {
+        cameraStabilityGate.signalCameraStability()
+    }
+
+    fun cancelCameraStabilityGate() {
+        cameraStabilityGate.cancel()
+    }
+
+    fun resetCameraStabilityGate(): Boolean {
+        return cameraStabilityGate.reset()
+    }
+
+    internal fun awaitCameraStabilityGate(timeoutMs: Long = CAMERA_STABILITY_GATE_TIMEOUT_MS): Boolean {
+        if (!cameraStabilityGate.enabled) return true
+        val action = cameraStabilityDecider?.invoke() ?: evaluateDefaultGatingAction()
+        return when (action) {
+            StartupVisionPreparationPolicy.GatingAction.PROCEED_IMMEDIATELY -> true
+            StartupVisionPreparationPolicy.GatingAction.CANCEL -> {
+                cancelCameraStabilityGate()
+                false
+            }
+            StartupVisionPreparationPolicy.GatingAction.AWAIT_CAMERA_STABILITY -> {
+                cameraStabilityGate.await(timeoutMs)
+            }
+        }
+    }
+
+    private fun evaluateDefaultGatingAction(): StartupVisionPreparationPolicy.GatingAction {
+        val isClosed = closed.get()
+        val isExplicitStop = VisionSession.requiresExplicitRestart(context)
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA,
+        ) == PackageManager.PERMISSION_GRANTED
+        val sessionUiStatus = VisionSession.uiState.value.cameraStatus
+        val isGraphActive = VisionSession.isInitialized &&
+            (sessionUiStatus == CameraSessionStatus.Starting || sessionUiStatus == CameraSessionStatus.Running)
+        return StartupVisionPreparationPolicy.evaluateGatingAction(
+            isCameraGraphActive = isGraphActive,
+            isCameraPending = false,
+            isCameraRecovering = false,
+            hasCameraPermission = hasPermission,
+            isExplicitStopActive = isExplicitStop,
+            isClosed = isClosed,
+        )
     }
     internal val visionDir: File
         get() = File(context.noBackupFilesDir, "vision").apply { mkdirs() }
@@ -74,6 +130,7 @@ class VisionModelStore(
     fun restorePersistedModelAsync() {
         synchronized(stateLock) {
             if (closed.get()) return
+            cameraStabilityGate.reset()
             mutableInitialRestoreCompleted.value = false
             mutableState.value = VisionModelState.Loading(
                 prefs.getString(KEY_DISPLAY_NAME, VisionContract.DEFAULT_MODEL_FILENAME)
@@ -101,8 +158,8 @@ class VisionModelStore(
     fun getPreferredBackend(): VisionBackendType {
         if (!segmenter.inferencePolicy.allowCpuReferenceForTesting) {
             val saved = prefs.getString(KEY_PREFERRED_BACKEND, null)
-            if (saved != null && saved != VisionBackendType.GPU.name) {
-                prefs.edit().putString(KEY_PREFERRED_BACKEND, VisionBackendType.GPU.name).apply()
+            if (saved == VisionBackendType.NPU.name && segmenter.npuEnvironment.isNpuSupported()) {
+                return VisionBackendType.NPU
             }
             return VisionBackendType.GPU
         }
@@ -210,9 +267,24 @@ class VisionModelStore(
 
             return when (val outcome = segmenter.prepareModelSession(file)) {
                 is LiteRtVisionSegmenter.PrepareOutcome.Valid -> {
+                    val stable = awaitCameraStabilityGate()
                     if (closed.get()) {
                         outcome.session.close()
                         return VisionModelState.Missing
+                    }
+                    if (!stable) {
+                        outcome.session.close()
+                        val (reason, detail) = if (cameraStabilityGate.isCancelled) {
+                            "카메라 리소스 오류 또는 중지로 인해 모델 GPU 초기화가 취소되었습니다." to "camera_stability_cancelled"
+                        } else {
+                            "카메라 스트림 안정화 대기 시간 초과로 비전 모델 GPU 초기화가 중단되었습니다." to "camera_stability_timeout"
+                        }
+                        val err = VisionModelState.Error(
+                            reason = reason,
+                            detail = detail,
+                        )
+                        mutableState.value = err
+                        return err
                     }
                     try {
                         segmenter.activatePreparedSession(outcome.session, preferredBackend, preferredThreads)
@@ -237,8 +309,14 @@ class VisionModelStore(
                     savePersistedPrefs(file.name, metadata)
                     activeMetadata = metadata
                     val ready = VisionModelState.Ready(metadata)
-                    mutableState.value = ready
-                    ready
+                    if (!closed.get() && segmenter.isInvocationReady) {
+                        mutableState.value = ready
+                        ready
+                    } else {
+                        val fallback = if (closed.get()) VisionModelState.Missing else VisionModelState.Loading(displayName)
+                        mutableState.value = fallback
+                        fallback
+                    }
                 }
                 is LiteRtVisionSegmenter.PrepareOutcome.Invalid -> {
                     val err = VisionModelState.Error(
@@ -381,7 +459,7 @@ class VisionModelStore(
             if (previousMetadata != null) {
                 runCatching { savePersistedPrefs(previousSlot.name, previousMetadata) }
             } else {
-                clearPersistedPrefs()
+                clearPersistedPrefs(preserveClearedFlag = false)
             }
             return handleImportFailure(
                 reason = "모델 메타데이터 저장에 실패했습니다.",
@@ -399,7 +477,7 @@ class VisionModelStore(
             if (previousMetadata != null) {
                 runCatching { savePersistedPrefs(previousSlot.name, previousMetadata) }
             } else {
-                clearPersistedPrefs()
+                clearPersistedPrefs(preserveClearedFlag = false)
             }
             val (reason, detail) = activationFailure(t)
             return handleImportFailure(
@@ -604,6 +682,24 @@ class VisionModelStore(
         val effectiveBackend = targetBackend ?: getPreferredBackend()
         val effectiveThreads = targetCpuThreads ?: getPreferredCpuThreads()
 
+        val stable = awaitCameraStabilityGate()
+        if (closed.get()) {
+            preparedSession.close()
+            return VisionModelState.Missing
+        }
+        if (!stable) {
+            preparedSession.close()
+            val (reason, detail) = if (cameraStabilityGate.isCancelled) {
+                "카메라 리소스 오류 또는 중지로 인해 기본 모델 GPU 초기화가 취소되었습니다." to "camera_stability_cancelled"
+            } else {
+                "카메라 스트림 안정화 대기 시간 초과로 기본 모델 GPU 초기화가 중단되었습니다." to "camera_stability_timeout"
+            }
+            return handleImportFailure(
+                reason = reason,
+                detail = detail,
+            )
+        }
+
         val oldSessionCloseable: AutoCloseable? = try {
             segmenter.activatePreparedSession(preparedSession, effectiveBackend, effectiveThreads)
             null
@@ -629,21 +725,31 @@ class VisionModelStore(
             runCatching { previousSlot.delete() }
         }
         val ready = VisionModelState.Ready(activatedMetadata)
-        mutableState.value = ready
-        return ready
+        return if (!closed.get() && segmenter.isInvocationReady) {
+            mutableState.value = ready
+            ready
+        } else {
+            val fallback = if (closed.get()) VisionModelState.Missing else VisionModelState.Loading(safeName)
+            mutableState.value = fallback
+            fallback
+        }
     }
 
     private fun activationFailure(error: Throwable): Pair<String, String> = when (error) {
         is LiteRtVisionSegmenter.CpuFallbackException -> {
-            "GPU 초기화 실패 후 저성능 CPU 대체 초기화에도 실패했습니다." to
+            "GPU/NPU 초기화 실패 후 저성능 CPU 대체 초기화에도 실패했습니다." to
                 "GPU failure: ${error.gpuFailure.javaClass.simpleName}: ${error.gpuFailure.message.orEmpty().take(160)}; " +
                 "CPU failure: ${error.cpuFailure.javaClass.simpleName}: ${error.cpuFailure.message.orEmpty().take(160)}"
+        }
+        is LiteRtVisionSegmenter.NpuInitializationException -> {
+            "NPU 가속 세그멘테이션 초기화에 실패했습니다." to
+                "NPU failure: ${error.javaClass.simpleName}: ${error.message.orEmpty().take(160)}"
         }
         is LiteRtVisionSegmenter.ModelValidationException -> {
             "모델 텐서 규격 검증에 실패했습니다." to "model_validation_failed: ${error.message.orEmpty().take(160)}"
         }
         else -> {
-            "GPU 가속 세그멘테이션 초기화에 실패했습니다 (${error.javaClass.simpleName})." to
+            "가속 세그멘테이션 초기화에 실패했습니다 (${error.javaClass.simpleName})." to
                 "activation_failed: ${error.javaClass.simpleName}: ${error.message.orEmpty().take(160)}"
         }
     }
@@ -764,6 +870,9 @@ class VisionModelStore(
     override fun close() {
         synchronized(stateLock) {
             if (!closed.compareAndSet(false, true)) return
+            cancelCameraStabilityGate()
+            mutableState.value = VisionModelState.Missing
+            mutableInitialRestoreCompleted.value = false
             val scheduled = runCatching {
                 executor.execute {
                     segmenter.close()
@@ -777,12 +886,73 @@ class VisionModelStore(
         }
     }
 
+    enum class CameraWarmupGateState {
+        WAITING,
+        STABLE,
+        CANCELLED,
+    }
+
+    class CameraStabilityGate(val enabled: Boolean) {
+        @Volatile
+        private var latch: java.util.concurrent.CountDownLatch? =
+            if (enabled) java.util.concurrent.CountDownLatch(1) else null
+        @Volatile
+        var state: CameraWarmupGateState = if (enabled) CameraWarmupGateState.WAITING else CameraWarmupGateState.STABLE
+            private set
+
+        val isStable: Boolean
+            get() = state == CameraWarmupGateState.STABLE
+
+        val isCancelled: Boolean
+            get() = state == CameraWarmupGateState.CANCELLED
+
+        fun signalCameraStability(): Boolean {
+            if (!enabled) return true
+            if (state == CameraWarmupGateState.WAITING) {
+                state = CameraWarmupGateState.STABLE
+                latch?.countDown()
+                return true
+            }
+            return false
+        }
+
+        fun cancel(): Boolean {
+            if (!enabled) return false
+            if (state == CameraWarmupGateState.WAITING) {
+                state = CameraWarmupGateState.CANCELLED
+                latch?.countDown()
+                return true
+            }
+            return false
+        }
+
+        fun reset(): Boolean {
+            if (!enabled) return false
+            state = CameraWarmupGateState.WAITING
+            latch = java.util.concurrent.CountDownLatch(1)
+            return true
+        }
+
+        fun await(timeoutMs: Long): Boolean {
+            if (!enabled) return true
+            val l = latch ?: return true
+            return try {
+                val signaled = l.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                signaled && state == CameraWarmupGateState.STABLE
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                false
+            }
+        }
+    }
+
     internal sealed interface BoundedCopyOutcome {
         data class Success(val bytesWritten: Long, val sha256Hex: String) : BoundedCopyOutcome
         data class Failure(val code: String, val koreanMessage: String) : BoundedCopyOutcome
     }
 
     companion object {
+        internal const val CAMERA_STABILITY_GATE_TIMEOUT_MS = 35_000L
         private const val PREFS_NAME = "vision_model_store"
         private const val KEY_ACTIVE_SLOT_FILE = "active_slot_file"
         private const val KEY_DISPLAY_NAME = "display_name"

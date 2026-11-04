@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
+import com.ariateam.aria.startup.StartupVisionPreparationPolicy
 import android.graphics.Bitmap
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -18,6 +19,7 @@ import android.util.Log
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.OptIn
+import androidx.annotation.VisibleForTesting
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
@@ -54,8 +56,10 @@ import com.ariateam.aria.distance.GroundContactDistance
 import com.ariateam.aria.distance.GroundContactDistanceEstimator
 import com.ariateam.aria.distance.GroundContactMotionTracker
 import com.ariateam.aria.hazard.EffectiveFov
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 enum class CameraSessionStatus {
@@ -103,6 +107,25 @@ data class VisionPipelineDiagnosticSnapshot(
     val motionSensorCallbacks: Long,
     val previewBound: Boolean,
     val analysisBound: Boolean,
+    val isRunning: Boolean = false,
+    val isClosed: Boolean = false,
+    val sessionGeneration: Long = 0L,
+    val boundTicket: Long = 0L,
+    val requiresExplicitRestart: Boolean = false,
+    val controllerIdentity: String = "",
+    val activeSurfaceProviderSet: Boolean = false,
+    val pipelineExecutorActive: Boolean = true,
+    val pipelineThreadName: String? = null,
+    val analyzerExecutorActive: Boolean = true,
+    val analyzerThreadName: String? = null,
+    val isBindingInFlight: Boolean = false,
+    val isFrameStalled: Boolean = false,
+    val lastFrameArrivalElapsedMs: Long = 0L,
+    val isFrameInFlight: Boolean = false,
+    val stallRecoveryAttempts: Int = 0,
+    val isInvocationReady: Boolean = false,
+    val isRebindInProgress: Boolean = false,
+    val deviceErrorRecoveryAttempts: Int = 0,
 )
 
 /**
@@ -126,7 +149,17 @@ class VisionPipelineController(
     val groundContactMotionTracker: GroundContactMotionTracker = GroundContactMotionTracker(context),
     val groundContactDistanceEstimator: GroundContactDistanceEstimator = GroundContactDistanceEstimator(),
     private val mutableUiState: MutableStateFlow<VisionUiState> = MutableStateFlow(VisionUiState()),
+    analyzerExecutorOverride: ExecutorService? = null,
 ) : AutoCloseable {
+    @Volatile
+    private var analyzerThread: Thread? = null
+
+    val analyzerExecutor: ExecutorService = analyzerExecutorOverride ?: Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "AriaCameraAnalyzerThread").also { t ->
+            t.isDaemon = true
+            analyzerThread = t
+        }
+    }
     private val running = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
     private val sessionGeneration = AtomicLong(0L)
@@ -139,6 +172,47 @@ class VisionPipelineController(
     private val imageProxyCloses = AtomicLong(0L)
     private val cameraCaptureCallbacks = AtomicLong(0L)
     private val pendingFrameSnapshot = java.util.concurrent.atomic.AtomicReference<((android.graphics.Bitmap?) -> Unit)?>()
+    private val lastBoundTicket = AtomicLong(0L)
+    private val isBindingInFlight = AtomicBoolean(false)
+    private val isRebindInProgress = AtomicBoolean(false)
+    private val lastFrameArrivalNanos = AtomicLong(0L)
+    private val lastFrameCompletionNanos = AtomicLong(0L)
+    private val frameProcessingStartNanos = AtomicLong(0L)
+    private val isFrameInFlight = AtomicBoolean(false)
+    private val isFrameStalled = AtomicBoolean(false)
+    private val continuousHealthyFrames = AtomicLong(0L)
+    private val healthyStreamingStartNanos = AtomicLong(0L)
+    private var streamingWatchdogRunnable: Runnable? = null
+    private val stallRecoveryAttempts = AtomicInteger(0)
+    private val deviceErrorRecoveryAttempts = AtomicInteger(0)
+
+    init {
+        modelStore.cameraStabilityDecider = {
+            val isLiveBinding = isBindingInFlight.get()
+            val isLiveRebind = isRebindInProgress.get()
+            val isRunningLive = running.get()
+            val status = mutableUiState.value.cameraStatus
+            val isGraphActive = isRunningLive && (
+                isLiveBinding ||
+                isLiveRebind ||
+                status == CameraSessionStatus.Starting ||
+                status == CameraSessionStatus.Running ||
+                activeLifecycleOwner != null
+            )
+            val isRecovering = retryRunnable != null || isLiveRebind || (isRunningLive && isLiveBinding)
+            StartupVisionPreparationPolicy.evaluateGatingAction(
+                isCameraGraphActive = isGraphActive,
+                isCameraPending = false,
+                isCameraRecovering = isRecovering,
+                hasCameraPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA,
+                ) == PackageManager.PERMISSION_GRANTED,
+                isExplicitStopActive = VisionSession.requiresExplicitRestart(context),
+                isClosed = closed.get(),
+            )
+        }
+    }
 
     val isClosed: Boolean
         get() = closed.get()
@@ -146,14 +220,23 @@ class VisionPipelineController(
     val isRunning: Boolean
         get() = running.get()
 
+    val currentSessionTicket: Long
+        get() = sessionGeneration.get()
+
+    val activeOwner: LifecycleOwner?
+        get() = activeLifecycleOwner
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private var retryRunnable: Runnable? = null
+    private var startupWatchdogRunnable: Runnable? = null
     private var retryCount = 0
     private var availabilityCallback: CameraManager.AvailabilityCallback? = null
     private var sessionStartNanos = 0L
 
     @Volatile
     private var selectedCameraId: String? = null
+    @Volatile
+    private var isTargetCameraAvailable = true
     private val retryAttemptGeneration = AtomicLong(0L)
 
     internal fun resolveSelectedCameraId(): String {
@@ -210,6 +293,21 @@ class VisionPipelineController(
     private var cameraStateObserver: Observer<CameraState>? = null
 
     @Volatile
+    private var rebindPriorState: androidx.lifecycle.LiveData<CameraState>? = null
+
+    @Volatile
+    private var rebindTempObserver: Observer<CameraState>? = null
+
+    @Volatile
+    private var rebindCloseDeadlineRunnable: Runnable? = null
+
+    @Volatile
+    private var rebindAvailabilityDeadlineRunnable: Runnable? = null
+
+    @Volatile
+    private var activeRebindCoordinator: RecoverySequencingCoordinator? = null
+
+    @Volatile
     private var activeTargetRotation: Int = Surface.ROTATION_0
 
     @Volatile
@@ -248,14 +346,31 @@ class VisionPipelineController(
     fun diagnosticSnapshot(): VisionPipelineDiagnosticSnapshot {
         val owner = activeLifecycleOwner
         val cameraState = observedCameraState?.value
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        val lastArrival = lastFrameArrivalNanos.get()
+        val elapsedMs = if (lastArrival > 0L) (nowNanos - lastArrival) / 1_000_000L else 0L
+        val inFlight = isFrameInFlight.get()
+        val inFlightStart = frameProcessingStartNanos.get()
+        val inFlightMs = if (inFlight && inFlightStart > 0L) (nowNanos - inFlightStart) / 1_000_000L else 0L
+        val lastActive = maxOf(lastArrival, lastFrameCompletionNanos.get())
+        val silentIdleMs = if (!inFlight && lastActive > 0L) (nowNanos - lastActive) / 1_000_000L else 0L
+        val stalled = isFrameStalled.get() || (running.get() && (
+            (inFlight && inFlightMs >= IN_FLIGHT_PROCESSING_TIMEOUT_MS) ||
+            (!inFlight && lastArrival > 0L && silentIdleMs >= STREAMING_STALL_TIMEOUT_MS)
+        ))
+        val rawModelState = modelStore.state.value
+        val isInvocationReady = modelStore.segmenter.isInvocationReady
+        val effectiveModelName = resolveEffectiveModelStateName(rawModelState, isInvocationReady)
+        val isRestoreComplete = modelStore.isInitialRestoreCompleted.value &&
+            (rawModelState !is VisionModelState.Ready || isInvocationReady)
         return VisionPipelineDiagnosticSnapshot(
             lifecycleOwner = owner?.javaClass?.simpleName,
             lifecycleState = owner?.lifecycle?.currentState?.name ?: "NONE",
             cameraState = cameraState?.toString(),
             cameraStateType = cameraState?.type?.toString(),
             cameraError = cameraState?.error?.toString(),
-            modelRestoreComplete = modelStore.isInitialRestoreCompleted.value,
-            modelState = modelStore.state.value::class.java.simpleName,
+            modelRestoreComplete = isRestoreComplete,
+            modelState = effectiveModelName,
             analyzerEntries = analyzerEntries.get(),
             pipelineInputs = pipelineInputs.get(),
             inferenceCallEntries = inferenceCallEntries.get(),
@@ -266,6 +381,25 @@ class VisionPipelineController(
             motionSensorCallbacks = motionTracker.sensorCallbackCount,
             previewBound = boundPreview != null,
             analysisBound = boundAnalysis != null,
+            isRunning = running.get(),
+            isClosed = closed.get(),
+            sessionGeneration = sessionGeneration.get(),
+            boundTicket = lastBoundTicket.get(),
+            requiresExplicitRestart = VisionSession.requiresExplicitRestart(context),
+            controllerIdentity = Integer.toHexString(System.identityHashCode(this)),
+            activeSurfaceProviderSet = activeSurfaceProvider != null,
+            pipelineExecutorActive = !modelStore.segmenter.pipelineExecutor.isShutdown,
+            pipelineThreadName = modelStore.segmenter.executionThread?.name,
+            analyzerExecutorActive = !analyzerExecutor.isShutdown,
+            analyzerThreadName = analyzerThread?.name,
+            isBindingInFlight = isBindingInFlight.get(),
+            isFrameStalled = stalled,
+            lastFrameArrivalElapsedMs = elapsedMs,
+            isFrameInFlight = inFlight,
+            stallRecoveryAttempts = stallRecoveryAttempts.get(),
+            isInvocationReady = isInvocationReady,
+            isRebindInProgress = isRebindInProgress.get(),
+            deviceErrorRecoveryAttempts = deviceErrorRecoveryAttempts.get(),
         )
     }
 
@@ -380,7 +514,23 @@ class VisionPipelineController(
     }
 
     fun permissionDenied() {
+        isBindingInFlight.set(false)
+        isRebindInProgress.set(false)
+        cancelStartupWatchdog()
+        cancelStreamingWatchdog()
         cancelScheduledRetry()
+        retryCount = 0
+        stallRecoveryAttempts.set(0)
+        deviceErrorRecoveryAttempts.set(0)
+        continuousHealthyFrames.set(0L)
+        healthyStreamingStartNanos.set(0L)
+        lastFrameArrivalNanos.set(0L)
+        lastFrameCompletionNanos.set(0L)
+        frameProcessingStartNanos.set(0L)
+        isFrameInFlight.set(false)
+        isFrameStalled.set(false)
+        isTargetCameraAvailable = true
+        modelStore.cancelCameraStabilityGate()
         sessionGeneration.incrementAndGet()
         running.set(false)
         activeLifecycleOwner = null
@@ -389,6 +539,7 @@ class VisionPipelineController(
         alertCoordinator.stop()
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
+        modelStore.cancelCameraStabilityGate()
         unbindUseCasesOnMain()
         mutableUiState.update {
             it.copy(
@@ -419,9 +570,25 @@ class VisionPipelineController(
         mode: VisionPipelineMode = currentMode,
         targetRotation: Int = Surface.ROTATION_0,
     ) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { startCamera(lifecycleOwner, surfaceProvider, mode, targetRotation) }
+            return
+        }
         if (closed.get()) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             permissionDenied()
+            return
+        }
+
+        val currentTicket = sessionGeneration.get()
+        val isSameSession = running.get() &&
+            activeLifecycleOwner === lifecycleOwner &&
+            currentMode == mode &&
+            isSessionLive(currentTicket)
+
+        if (isSameSession) {
+            Log.i(TAG, "startCamera: active session matches owner and mode; coalescing update (ticket=$currentTicket)")
+            updateSurfaceProvider(surfaceProvider, targetRotation)
             return
         }
 
@@ -429,6 +596,15 @@ class VisionPipelineController(
         val ticket = sessionGeneration.incrementAndGet()
         sessionStartNanos = SystemClock.elapsedRealtimeNanos()
         retryCount = 0
+        stallRecoveryAttempts.set(0)
+        deviceErrorRecoveryAttempts.set(0)
+        continuousHealthyFrames.set(0L)
+        healthyStreamingStartNanos.set(0L)
+        lastFrameArrivalNanos.set(0L)
+        lastFrameCompletionNanos.set(0L)
+        frameProcessingStartNanos.set(0L)
+        isFrameInFlight.set(false)
+        isFrameStalled.set(false)
         analyzerEntries.set(0L)
         pipelineInputs.set(0L)
         inferenceCallEntries.set(0L)
@@ -441,6 +617,8 @@ class VisionPipelineController(
         activeSurfaceProvider = surfaceProvider
         activeTargetRotation = targetRotation
         running.set(true)
+        isBindingInFlight.set(true)
+        isRebindInProgress.set(false)
         timingTracker.reset()
         AriaRuntimeTimingTracker.reset()
         lastPublishedNanos.set(0L)
@@ -469,32 +647,41 @@ class VisionPipelineController(
             )
         }
 
-        startCameraInternal(lifecycleOwner, surfaceProvider, mode, targetRotation, ticket)
+        scheduleStartupWatchdog(ticket)
+        scheduleStreamingWatchdog(ticket)
+        startCameraInternal(lifecycleOwner, ticket)
     }
 
     private fun startCameraInternal(
         lifecycleOwner: LifecycleOwner,
-        surfaceProvider: Preview.SurfaceProvider?,
-        mode: VisionPipelineMode,
-        targetRotation: Int,
         ticket: Long,
     ) {
-        if (!isSessionLive(ticket)) return
+        if (!isSessionLive(ticket)) {
+            isBindingInFlight.set(false)
+            return
+        }
         val existing = cameraProvider
         if (existing != null) {
-            bindUseCases(existing, lifecycleOwner, surfaceProvider, mode, targetRotation, ticket)
+            bindUseCases(existing, lifecycleOwner, ticket)
             return
         }
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener(
             {
-                if (!isSessionLive(ticket)) return@addListener
+                if (!isSessionLive(ticket)) {
+                    isBindingInFlight.set(false)
+                    return@addListener
+                }
                 try {
                     val provider = future.get()
-                    if (!isSessionLive(ticket)) return@addListener
+                    if (!isSessionLive(ticket)) {
+                        isBindingInFlight.set(false)
+                        return@addListener
+                    }
                     cameraProvider = provider
-                    bindUseCases(provider, lifecycleOwner, surfaceProvider, mode, targetRotation, ticket)
+                    bindUseCases(provider, lifecycleOwner, ticket)
                 } catch (t: Throwable) {
+                    isBindingInFlight.set(false)
                     if (!isSessionLive(ticket)) return@addListener
                     val classified = CameraErrorClassifier.classifyException(t)
                     handleCameraFailure(ticket, classified)
@@ -511,12 +698,18 @@ class VisionPipelineController(
     private fun bindUseCases(
         provider: ProcessCameraProvider,
         lifecycleOwner: LifecycleOwner,
-        surfaceProvider: Preview.SurfaceProvider?,
-        mode: VisionPipelineMode,
-        targetRotation: Int,
         ticket: Long,
     ) {
+        if (!isSessionLive(ticket)) {
+            isBindingInFlight.set(false)
+            return
+        }
+        val surfaceProvider = activeSurfaceProvider
         try {
+            lastBoundTicket.set(ticket)
+            val mode = currentMode
+            val targetRotation = activeTargetRotation
+            Log.i(TAG, "bindUseCases: ticket=$ticket, owner=${lifecycleOwner.javaClass.simpleName}, preview=${surfaceProvider != null}, mode=$mode")
             unbindBoundUseCases(provider)
 
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
@@ -577,8 +770,30 @@ class VisionPipelineController(
                     cameraCaptureCallbacks.incrementAndGet()
                     timingTracker.recordSensorCapture(nowNanos)
                     if (currentMode == VisionPipelineMode.PREVIEW_ONLY) {
+                        cancelStartupWatchdog()
+                        lastFrameArrivalNanos.set(nowNanos)
+                        lastFrameCompletionNanos.set(nowNanos)
+                        isFrameStalled.set(false)
+                        val healthyCount = continuousHealthyFrames.incrementAndGet()
+                        if (healthyStreamingStartNanos.get() == 0L) {
+                            healthyStreamingStartNanos.set(nowNanos)
+                        }
+                        val healthyDurationMs = (nowNanos - healthyStreamingStartNanos.get()) / 1_000_000L
+                        if (isWarmupStabilityPermitted(healthyCount, healthyDurationMs)) {
+                            modelStore.signalCameraStability()
+                        }
+                        if (isHealthyStreamRecoverySustained(healthyCount, healthyDurationMs)) {
+                            if (retryCount > 0 || stallRecoveryAttempts.get() > 0 || deviceErrorRecoveryAttempts.get() > 0) {
+                                Log.i(
+                                    TAG,
+                                    "Camera preview stream sustained healthy for ${healthyDurationMs}ms ($healthyCount frames); resetting recovery counters (retryCount=$retryCount, stallRecoveryAttempts=${stallRecoveryAttempts.get()}, deviceErrorRecoveryAttempts=${deviceErrorRecoveryAttempts.get()})",
+                                )
+                                retryCount = 0
+                                stallRecoveryAttempts.set(0)
+                                deviceErrorRecoveryAttempts.set(0)
+                            }
+                        }
                         if (mutableUiState.value.cameraStatus != CameraSessionStatus.Running && isSessionLive(ticket)) {
-                            retryCount = 0
                             val startLatency = if (sessionStartNanos > 0L) (nowNanos - sessionStartNanos).coerceAtLeast(0L) else 0L
                             timingTracker.recordCameraStart(startLatency)
                             AriaRuntimeTimingTracker.recordStart(startLatency / 1_000_000.0)
@@ -622,9 +837,14 @@ class VisionPipelineController(
             if (mode == VisionPipelineMode.PREVIEW_ONLY) {
                 analysis.clearAnalyzer()
             } else {
-                analysis.setAnalyzer(modelStore.segmenter.pipelineExecutor) { imageProxy ->
-                    analyzerEntries.incrementAndGet()
-                    analyzeFrame(imageProxy, ticket)
+                analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
+                    try {
+                        analyzerEntries.incrementAndGet()
+                        analyzeFrame(imageProxy, ticket)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Unexpected exception in image analyzer callback", t)
+                        runCatching { imageProxy.close() }
+                    }
                 }
             }
 
@@ -632,11 +852,44 @@ class VisionPipelineController(
             preview?.let(useCases::add)
             useCases.add(analysis)
             val camera = provider.bindToLifecycle(lifecycleOwner, selector, *useCases.toTypedArray())
+            var observedOpeningForThisBinding = false
+            var observedOpenForThisBinding = false
             val stateObserver = Observer<CameraState> { cameraState ->
-                val cameraError = cameraState.error ?: return@Observer
-                if (isSessionLive(ticket)) {
-                    val classified = CameraErrorClassifier.classifyStateError(cameraError)
-                    handleCameraFailure(ticket, classified)
+                val cameraError = cameraState.error
+                if (cameraError != null) {
+                    if (isSessionLive(ticket)) {
+                        val classified = CameraErrorClassifier.classifyStateError(cameraError)
+                        handleCameraFailure(ticket, classified)
+                    }
+                } else {
+                    when (cameraState.type) {
+                        CameraState.Type.PENDING_OPEN,
+                        CameraState.Type.OPENING -> {
+                            observedOpeningForThisBinding = true
+                        }
+                        CameraState.Type.OPEN -> {
+                            if (observedOpeningForThisBinding) {
+                                observedOpenForThisBinding = true
+                            } else {
+                                Log.i(TAG, "Ignoring initial cached OPEN state before OPENING transition for ticket $ticket")
+                            }
+                        }
+                        CameraState.Type.CLOSED -> {
+                            if (observedOpenForThisBinding && isSessionLive(ticket) && !isBindingInFlight.get() && !isRebindInProgress.get()) {
+                                Log.w(TAG, "Camera transitioned to CLOSED after being verified OPEN without error; treating as transient disconnection")
+                                handleCameraFailure(
+                                    ticket,
+                                    CameraFailureKind.TransientInUse(
+                                        CameraState.ERROR_CAMERA_IN_USE,
+                                        "카메라 연결이 비정상적으로 종료되었습니다.",
+                                    ),
+                                )
+                            } else {
+                                Log.i(TAG, "Ignoring expected CLOSED state (observedOpen=$observedOpenForThisBinding, bindingInFlight=${isBindingInFlight.get()}, rebindInProgress=${isRebindInProgress.get()}) for ticket $ticket")
+                            }
+                        }
+                        else -> {}
+                    }
                 }
             }
             observedCameraState = camera.cameraInfo.cameraState
@@ -662,9 +915,14 @@ class VisionPipelineController(
             if (isSessionLive(ticket)) {
                 val now = SystemClock.elapsedRealtimeNanos()
                 val modelLoaded = modelStore.segmenter.isReady
-                mutableUiState.update {
-                    it.copy(
-                        cameraStatus = CameraSessionStatus.Starting, // Avoid false Running until fresh frame arrives!
+                mutableUiState.update { current ->
+                    val status = if (current.cameraStatus == CameraSessionStatus.Running) {
+                        CameraSessionStatus.Running
+                    } else {
+                        CameraSessionStatus.Starting
+                    }
+                    current.copy(
+                        cameraStatus = status,
                         cameraErrorDetail = null,
                         timing = timingTracker.snapshot(
                             mode = mode,
@@ -682,6 +940,24 @@ class VisionPipelineController(
         } catch (t: Throwable) {
             val classified = CameraErrorClassifier.classifyException(t)
             handleCameraFailure(ticket, classified)
+        } finally {
+            isBindingInFlight.set(false)
+        }
+
+        if (isSessionLive(ticket)) {
+            val latestProvider = activeSurfaceProvider
+            val isPreviewBound = boundPreview != null
+            val shouldPreviewBeBound = latestProvider != null
+            if (isPreviewBound != shouldPreviewBeBound) {
+                Log.i(TAG, "activeSurfaceProvider changed while binding (bound=$isPreviewBound, target=$shouldPreviewBeBound); coalescing rebind")
+                mainHandler.post {
+                    if (isSessionLive(ticket) && !isRebindInProgress.get() && isBindingInFlight.compareAndSet(false, true)) {
+                        unbindAndRebindUseCases(provider, lifecycleOwner, ticket)
+                    }
+                }
+            } else if (isPreviewBound && latestProvider != null && latestProvider !== surfaceProvider) {
+                boundPreview?.setSurfaceProvider(latestProvider)
+            }
         }
     }
 
@@ -698,12 +974,64 @@ class VisionPipelineController(
                 }
                 scheduleTransientRetry(ticket, failure.description)
             }
-            is CameraFailureKind.Fatal -> failCameraSession(ticket, failure.description)
+            is CameraFailureKind.Fatal -> {
+                if (failure.code == CameraState.ERROR_CAMERA_FATAL_ERROR) {
+                    val attempt = deviceErrorRecoveryAttempts.incrementAndGet()
+                    if (!VisionPipelineController.canAttemptFatalDeviceRecovery(attempt)) {
+                        Log.e(
+                            TAG,
+                            "Camera device fatal error recovery limit exceeded (attempt $attempt/$MAX_DEVICE_ERROR_RECOVERY_ATTEMPTS) for ticket $ticket",
+                        )
+                        modelStore.cancelCameraStabilityGate()
+                        failCameraSession(
+                            ticket,
+                            "카메라 기기 치명적 오류 복구 한도를 초과했습니다 (${failure.description}). 앱 화면에서 다시 시작해 주세요.",
+                        )
+                    } else {
+                        Log.w(
+                            TAG,
+                            "Camera device fatal error (ERROR_CAMERA_DEVICE) detected (attempt $attempt/$MAX_DEVICE_ERROR_RECOVERY_ATTEMPTS) for ticket $ticket; scheduling bounded recovery after confirmed close",
+                        )
+                        mutableUiState.update {
+                            it.copy(
+                                cameraStatus = CameraSessionStatus.CameraUnavailable,
+                                cameraErrorDetail = "카메라 하드웨어 오류 감지 (기기 재설정 복구 시도 $attempt/$MAX_DEVICE_ERROR_RECOVERY_ATTEMPTS)...",
+                            )
+                        }
+                        scheduleDeviceErrorRetry(ticket, failure.description)
+                    }
+                } else {
+                    modelStore.cancelCameraStabilityGate()
+                    failCameraSession(ticket, failure.description)
+                }
+            }
         }
+    }
+
+    private fun scheduleDeviceErrorRetry(ticket: Long, detail: String) {
+        if (!isSessionLive(ticket)) return
+        cancelStreamingWatchdog()
+        cancelStartupWatchdog()
+        val attemptToken = retryAttemptGeneration.incrementAndGet()
+        val retryExecuted = AtomicBoolean(false)
+
+        ensureAvailabilityCallbackRegistered()
+
+        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            if (!isSessionLive(ticket)) return@Runnable
+            if (retryAttemptGeneration.get() != attemptToken) return@Runnable
+            if (retryExecuted.compareAndSet(false, true)) {
+                retryCameraSession(ticket)
+            }
+        }
+        retryRunnable = runnable
+        mainHandler.postDelayed(runnable, DEVICE_ERROR_RETRY_DELAY_MS)
     }
 
     private fun scheduleTransientRetry(ticket: Long, detail: String) {
         if (!isSessionLive(ticket)) return
+        cancelStreamingWatchdog()
         if (retryCount >= MAX_RETRY_COUNT) {
             failCameraSession(ticket, "카메라 연결 재시도 횟수를 초과했습니다 (${detail}). 앱 화면에서 다시 시작해 주세요.")
             return
@@ -713,7 +1041,7 @@ class VisionPipelineController(
         val attemptToken = retryAttemptGeneration.incrementAndGet()
         val retryExecuted = AtomicBoolean(false)
 
-        registerAvailabilityCallback(ticket, attemptToken, retryExecuted)
+        ensureAvailabilityCallbackRegistered()
 
         retryRunnable?.let { mainHandler.removeCallbacks(it) }
         val runnable = Runnable {
@@ -727,47 +1055,23 @@ class VisionPipelineController(
         mainHandler.postDelayed(runnable, delayMs)
     }
 
-    private fun registerAvailabilityCallback(
-        ticket: Long,
-        attemptToken: Long,
-        retryExecuted: AtomicBoolean,
-    ) {
+    private fun ensureAvailabilityCallbackRegistered() {
+        if (availabilityCallback != null) return
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return
-        unregisterAvailabilityCallback()
         val targetCameraId = resolveSelectedCameraId()
 
         val callback = object : CameraManager.AvailabilityCallback() {
-            private var isInitialCallback = true
-            private var sawUnavailable = false
-
             override fun onCameraUnavailable(cameraId: String) {
                 if (cameraId == targetCameraId) {
-                    sawUnavailable = true
-                    isInitialCallback = false
+                    isTargetCameraAvailable = false
+                    activeRebindCoordinator?.markCameraUnavailable()
                 }
             }
 
             override fun onCameraAvailable(cameraId: String) {
-                if (!isSessionLive(ticket)) return
-                if (cameraId != targetCameraId) {
-                    // Filter: ignore availability events from other cameras (e.g. front camera)
-                    return
-                }
-
-                if (isInitialCallback) {
-                    // Initial status delivered on registration: do not bypass intended backoff delay
-                    isInitialCallback = false
-                    return
-                }
-
-                // Legitimate transition back to available: execute single retry for this attempt
-                if (retryAttemptGeneration.get() == attemptToken && retryExecuted.compareAndSet(false, true)) {
-                    Log.i(TAG, "Selected camera $cameraId became available, retrying attempt $attemptToken (session $ticket)")
-                    mainHandler.post {
-                        if (isSessionLive(ticket) && retryAttemptGeneration.get() == attemptToken) {
-                            retryCameraSession(ticket)
-                        }
-                    }
+                if (cameraId == targetCameraId) {
+                    isTargetCameraAvailable = true
+                    activeRebindCoordinator?.markCameraAvailable()
                 }
             }
         }
@@ -787,29 +1091,191 @@ class VisionPipelineController(
     }
 
     private fun cancelScheduledRetry() {
+        cancelStartupWatchdog()
+        cancelStreamingWatchdog()
         retryAttemptGeneration.incrementAndGet()
         retryRunnable?.let { mainHandler.removeCallbacks(it) }
         retryRunnable = null
         unregisterAvailabilityCallback()
     }
 
-    private fun retryCameraSession(ticket: Long) {
+    private fun scheduleStartupWatchdog(ticket: Long) {
         if (!isSessionLive(ticket)) return
-        retryRunnable?.let { mainHandler.removeCallbacks(it) }
-        retryRunnable = null
-        unregisterAvailabilityCallback()
-        val owner = activeLifecycleOwner ?: return
-        val provider = activeSurfaceProvider
-        val mode = currentMode
-        val rotation = activeTargetRotation
-        startCameraInternal(owner, provider, mode, rotation, ticket)
+        if (isRebindInProgress.get()) {
+            Log.i(TAG, "scheduleStartupWatchdog: rebind in progress for ticket $ticket; skipping duplicate scheduling")
+            return
+        }
+        cancelStartupWatchdog()
+        val runnable = Runnable {
+            executeStartupWatchdogTimeout(ticket)
+        }
+        startupWatchdogRunnable = runnable
+        mainHandler.postDelayed(runnable, STARTUP_TIMEOUT_MS)
     }
 
+    private fun executeStartupWatchdogTimeout(ticket: Long) {
+        if (!isSessionLive(ticket)) return
+        val status = mutableUiState.value.cameraStatus
+        if (status == CameraSessionStatus.Starting || status == CameraSessionStatus.CameraUnavailable) {
+            val stallAttempts = stallRecoveryAttempts.get()
+            Log.w(
+                TAG,
+                "Camera startup watchdog expired after ${STARTUP_TIMEOUT_MS}ms without frames (session $ticket, stallRecoveryAttempts=$stallAttempts, retryCount=$retryCount)",
+            )
+            if (stallAttempts > 0) {
+                val nextAttempt = stallRecoveryAttempts.incrementAndGet()
+                if (!canAttemptStallRecovery(nextAttempt)) {
+                    Log.e(
+                        TAG,
+                        "Stall recovery failed: retries stuck in OPENING without frames after $nextAttempt attempts (session $ticket)",
+                    )
+                    failCameraSession(
+                        ticket,
+                        "카메라 프레임 스트림 복구 재시도 한도를 초과했습니다 (재바인딩 후 초기 프레임 미수신 ${nextAttempt}/$MAX_STALL_RECOVERY_ATTEMPTS). 앱 화면에서 다시 시작해 주세요.",
+                    )
+                    return
+                }
+            }
+            handleCameraFailure(
+                ticket,
+                CameraFailureKind.TransientInUse(
+                    CameraState.ERROR_OTHER_RECOVERABLE_ERROR,
+                    if (stallAttempts > 0) {
+                        "카메라 복구 재시도 후 초기 프레임 수신 대기 시간이 초과되었습니다 (시도 ${stallAttempts}/$MAX_STALL_RECOVERY_ATTEMPTS)."
+                    } else {
+                        "카메라 초기 프레임 수신 대기 시간이 초과되었습니다."
+                    },
+                ),
+            )
+        }
+    }
 
+    private fun cancelStartupWatchdog() {
+        startupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+        startupWatchdogRunnable = null
+    }
+
+    private fun scheduleStreamingWatchdog(ticket: Long) {
+        cancelStreamingWatchdog()
+        if (!isSessionLive(ticket)) return
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isSessionLive(ticket)) return
+                checkStreamingLiveness(ticket)
+                if (isSessionLive(ticket) && running.get()) {
+                    mainHandler.postDelayed(this, STREAMING_WATCHDOG_INTERVAL_MS)
+                }
+            }
+        }
+        streamingWatchdogRunnable = runnable
+        mainHandler.postDelayed(runnable, STREAMING_WATCHDOG_INTERVAL_MS)
+    }
+
+    private fun cancelStreamingWatchdog() {
+        streamingWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+        streamingWatchdogRunnable = null
+    }
+
+    private fun checkStreamingLiveness(ticket: Long) {
+        if (!isSessionLive(ticket)) return
+        if (isBindingInFlight.get()) return
+        if (mutableUiState.value.cameraStatus != CameraSessionStatus.Running) return
+
+        val lastArrival = lastFrameArrivalNanos.get()
+        if (lastArrival <= 0L) {
+            // Still waiting for initial frame after start or retry; startupWatchdog handles this phase
+            return
+        }
+        val now = SystemClock.elapsedRealtimeNanos()
+        val inFlight = isFrameInFlight.get()
+        if (inFlight) {
+            val inFlightStart = frameProcessingStartNanos.get()
+            val inFlightElapsedMs = if (inFlightStart > 0L) (now - inFlightStart) / 1_000_000L else (now - lastArrival) / 1_000_000L
+            if (inFlightElapsedMs >= IN_FLIGHT_PROCESSING_TIMEOUT_MS) {
+                if (!isFrameStalled.compareAndSet(false, true)) {
+                    return
+                }
+                cancelStreamingWatchdog()
+                Log.e(TAG, "Camera frame processing hung in flight for ${inFlightElapsedMs}ms (session $ticket)")
+                failCameraSession(
+                    ticket,
+                    "카메라 프레임 분석 또는 추론 처리가 완료되지 않고 지연되었습니다 (${inFlightElapsedMs}ms).",
+                )
+            }
+        } else {
+            val lastActive = maxOf(lastArrival, lastFrameCompletionNanos.get())
+            val starvationElapsedMs = (now - lastActive) / 1_000_000L
+            if (starvationElapsedMs >= STREAMING_STALL_TIMEOUT_MS) {
+                if (!isFrameStalled.compareAndSet(false, true)) {
+                    return
+                }
+                cancelStreamingWatchdog()
+                val attempts = stallRecoveryAttempts.get()
+                Log.w(
+                    TAG,
+                    "Camera streaming stall detected: no frames received for ${starvationElapsedMs}ms while Running (session $ticket, attempts=$attempts)",
+                )
+                continuousHealthyFrames.set(0L)
+                healthyStreamingStartNanos.set(0L)
+
+                if (!canAttemptStallRecovery(attempts)) {
+                    failCameraSession(
+                        ticket,
+                        "카메라 프레임 스트림 복구 재시도 한도를 초과했습니다 (${MAX_STALL_RECOVERY_ATTEMPTS}회 정체). 앱 화면에서 다시 시작해 주세요.",
+                    )
+                    return
+                }
+                val nextAttempt = stallRecoveryAttempts.incrementAndGet()
+                handleCameraFailure(
+                    ticket,
+                    CameraFailureKind.TransientInUse(
+                        CameraState.ERROR_OTHER_RECOVERABLE_ERROR,
+                        "카메라 프레임 스트림 수신이 정체되었습니다 (${starvationElapsedMs}ms 미수신, 복구 시도 $nextAttempt/$MAX_STALL_RECOVERY_ATTEMPTS).",
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun retryCameraSession(ticket: Long) {
+        if (!isSessionLive(ticket)) return
+        if (isRebindInProgress.get()) {
+            Log.i(TAG, "retryCameraSession: rebind already in progress for ticket $ticket; skipping duplicate")
+            return
+        }
+        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+        retryRunnable = null
+        val owner = activeLifecycleOwner ?: return
+        val provider = cameraProvider
+        isBindingInFlight.set(true)
+        lastFrameArrivalNanos.set(0L)
+        isFrameInFlight.set(false)
+        isFrameStalled.set(false)
+        scheduleStartupWatchdog(ticket)
+        scheduleStreamingWatchdog(ticket)
+        if (provider != null) {
+            unbindAndRebindUseCases(provider, owner, ticket)
+        } else {
+            startCameraInternal(owner, ticket)
+        }
+    }
 
     private fun failCameraSession(ticket: Long, detail: String) {
         if (sessionGeneration.get() != ticket || !running.getAndSet(false)) return
+        isBindingInFlight.set(false)
+        isRebindInProgress.set(false)
+        cancelStartupWatchdog()
+        cancelStreamingWatchdog()
         cancelScheduledRetry()
+        cancelPendingRebindWait()
+        retryCount = 0
+        continuousHealthyFrames.set(0L)
+        healthyStreamingStartNanos.set(0L)
+        lastFrameArrivalNanos.set(0L)
+        lastFrameCompletionNanos.set(0L)
+        frameProcessingStartNanos.set(0L)
+        isFrameInFlight.set(false)
+        isFrameStalled.set(false)
         sessionGeneration.incrementAndGet()
         activeLifecycleOwner = null
         activeSurfaceProvider = null
@@ -817,6 +1283,8 @@ class VisionPipelineController(
         alertCoordinator.stop()
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
+        isTargetCameraAvailable = true
+        modelStore.cancelCameraStabilityGate()
         unbindUseCasesOnMain()
         mutableUiState.update {
             it.copy(
@@ -832,11 +1300,35 @@ class VisionPipelineController(
     }
 
     private fun analyzeFrame(imageProxy: ImageProxy, ticket: Long) {
+        cancelStartupWatchdog()
         val analyzerStartNanos = SystemClock.elapsedRealtimeNanos()
+        lastFrameArrivalNanos.set(analyzerStartNanos)
+        frameProcessingStartNanos.set(analyzerStartNanos)
+        isFrameStalled.set(false)
+        isFrameInFlight.set(true)
+
+        val healthyCount = continuousHealthyFrames.incrementAndGet()
+        if (healthyStreamingStartNanos.get() == 0L) {
+            healthyStreamingStartNanos.set(analyzerStartNanos)
+        }
+        val healthyDurationMs = (analyzerStartNanos - healthyStreamingStartNanos.get()) / 1_000_000L
+        if (isWarmupStabilityPermitted(healthyCount, healthyDurationMs)) {
+            modelStore.signalCameraStability()
+        }
+        if (isHealthyStreamRecoverySustained(healthyCount, healthyDurationMs)) {
+            if (retryCount > 0 || stallRecoveryAttempts.get() > 0 || deviceErrorRecoveryAttempts.get() > 0) {
+                Log.i(
+                    TAG,
+                    "Camera stream sustained healthy for ${healthyDurationMs}ms ($healthyCount frames); resetting recovery counters (retryCount=$retryCount, stallRecoveryAttempts=${stallRecoveryAttempts.get()}, deviceErrorRecoveryAttempts=${deviceErrorRecoveryAttempts.get()})",
+                )
+                retryCount = 0
+                stallRecoveryAttempts.set(0)
+                deviceErrorRecoveryAttempts.set(0)
+            }
+        }
         try {
             if (!isSessionLive(ticket)) return
             if (mutableUiState.value.cameraStatus != CameraSessionStatus.Running) {
-                retryCount = 0
                 val nowNanos = SystemClock.elapsedRealtimeNanos()
                 val startLatency = if (sessionStartNanos > 0L) (nowNanos - sessionStartNanos).coerceAtLeast(0L) else 0L
                 timingTracker.recordCameraStart(startLatency)
@@ -940,16 +1432,24 @@ class VisionPipelineController(
             }
 
             val shouldPublishUi = shouldPublishNow(SystemClock.elapsedRealtimeNanos())
-            val modelRestorePending = !modelStore.isInitialRestoreCompleted.value
+            val isModelReady = (modelStore.state.value is VisionModelState.Ready) && modelStore.segmenter.isReady
+            val modelRestorePending = !modelStore.isInitialRestoreCompleted.value && !isModelReady
             val inferenceOutput = if (modelRestorePending) {
                 null
             } else {
                 inferenceCallEntries.incrementAndGet()
-                modelStore.segmenter.runIfLoaded(
-                    inputByteBuffer = preprocessor.inputByteBuffer,
-                    produceOverlayBitmap = shouldPublishUi,
-                    transform = cropRect,
-                ).also { inferenceReturns.incrementAndGet() }
+                val output = try {
+                    modelStore.segmenter.runIfLoaded(
+                        inputByteBuffer = preprocessor.inputByteBuffer,
+                        produceOverlayBitmap = shouldPublishUi,
+                        transform = cropRect,
+                    )
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Inference execution error on frame", t)
+                    throw t
+                }
+                inferenceReturns.incrementAndGet()
+                output
             }
             val analyzerEndNanos = SystemClock.elapsedRealtimeNanos()
             if (!isSessionLive(ticket)) return
@@ -1115,6 +1615,9 @@ class VisionPipelineController(
             }
         } catch (t: Throwable) {
             if (!isSessionLive(ticket)) return
+            cancelStartupWatchdog()
+            cancelStreamingWatchdog()
+            cancelScheduledRetry()
             sessionGeneration.incrementAndGet()
             running.set(false)
             motionTracker.stop()
@@ -1130,6 +1633,9 @@ class VisionPipelineController(
                 )
             }
         } finally {
+            lastFrameCompletionNanos.set(SystemClock.elapsedRealtimeNanos())
+            frameProcessingStartNanos.set(0L)
+            isFrameInFlight.set(false)
             imageProxyCloses.incrementAndGet()
             imageProxy.close()
         }
@@ -1170,7 +1676,11 @@ class VisionPipelineController(
     }
 
     fun updateSurfaceProvider(surfaceProvider: Preview.SurfaceProvider?, targetRotation: Int = activeTargetRotation) {
-        val previewAvailabilityChanged = (activeSurfaceProvider == null) != (surfaceProvider == null)
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { updateSurfaceProvider(surfaceProvider, targetRotation) }
+            return
+        }
+        val previousProvider = activeSurfaceProvider
         val lifecycleOwner = activeLifecycleOwner
         activeSurfaceProvider = surfaceProvider
         if (activeTargetRotation != targetRotation) {
@@ -1190,18 +1700,58 @@ class VisionPipelineController(
             boundPreview?.targetRotation = targetRotation
             boundAnalysis?.targetRotation = targetRotation
         }
-        if (previewAvailabilityChanged && running.get() && lifecycleOwner != null) {
-            startCamera(lifecycleOwner, surfaceProvider, currentMode, targetRotation)
+
+        if (closed.get() || !running.get() || lifecycleOwner == null) {
             return
         }
-        ContextCompat.getMainExecutor(context).execute {
-            boundPreview?.setSurfaceProvider(surfaceProvider)
+
+        val ticket = sessionGeneration.get()
+        if (!isSessionLive(ticket)) return
+
+        if (isBindingInFlight.get() || isRebindInProgress.get()) {
+            Log.i(TAG, "updateSurfaceProvider: binding/rebind is in flight; coalesced target (desiredPreview=${surfaceProvider != null})")
+            return
+        }
+
+        val isPreviewBound = boundPreview != null
+        val shouldPreviewBeBound = surfaceProvider != null
+
+        if (isPreviewBound == shouldPreviewBeBound) {
+            if (isPreviewBound && previousProvider !== surfaceProvider) {
+                boundPreview?.setSurfaceProvider(surfaceProvider)
+            }
+            return
+        }
+
+        Log.i(TAG, "updateSurfaceProvider: rebinding for preview change (wasBound=$isPreviewBound, nowNeeds=$shouldPreviewBeBound)")
+        val provider = cameraProvider
+        if (provider != null) {
+            isBindingInFlight.set(true)
+            unbindAndRebindUseCases(provider, lifecycleOwner, ticket)
+        } else {
+            isBindingInFlight.set(true)
+            scheduleStartupWatchdog(ticket)
+            startCameraInternal(lifecycleOwner, ticket)
         }
     }
 
     fun stopCamera() {
+        isBindingInFlight.set(false)
+        isRebindInProgress.set(false)
+        cancelStartupWatchdog()
+        cancelStreamingWatchdog()
         cancelScheduledRetry()
+        cancelPendingRebindWait()
         retryCount = 0
+        stallRecoveryAttempts.set(0)
+        deviceErrorRecoveryAttempts.set(0)
+        continuousHealthyFrames.set(0L)
+        healthyStreamingStartNanos.set(0L)
+        lastFrameArrivalNanos.set(0L)
+        lastFrameCompletionNanos.set(0L)
+        frameProcessingStartNanos.set(0L)
+        isFrameInFlight.set(false)
+        isFrameStalled.set(false)
         pendingFrameSnapshot.getAndSet(null)?.invoke(null)
         sessionGeneration.incrementAndGet()
         running.set(false)
@@ -1211,6 +1761,8 @@ class VisionPipelineController(
         alertCoordinator.stop()
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
+        isTargetCameraAvailable = true
+        modelStore.cancelCameraStabilityGate()
         unbindUseCasesOnMain()
         val now = SystemClock.elapsedRealtimeNanos()
         val modelLoaded = modelStore.segmenter.isReady
@@ -1237,6 +1789,7 @@ class VisionPipelineController(
     }
 
     private fun unbindUseCasesOnMain() {
+        cancelStartupWatchdog()
         val provider = cameraProvider
         val preview = boundPreview
         val analysis = boundAnalysis
@@ -1252,7 +1805,7 @@ class VisionPipelineController(
             runCatching { preview?.setSurfaceProvider(null) }
             val useCases = listOfNotNull(preview, analysis)
             if (provider != null && useCases.isNotEmpty()) {
-                runCatching { provider.unbind(*useCases.toTypedArray()) }
+                runCatching { provider.unbindAll() }
             }
         }
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
@@ -1272,10 +1825,205 @@ class VisionPipelineController(
         val analysis = boundAnalysis
         boundPreview = null
         boundAnalysis = null
-        analysis?.clearAnalyzer()
-        preview?.setSurfaceProvider(null)
+        runCatching { analysis?.clearAnalyzer() }
+        runCatching { preview?.setSurfaceProvider(null) }
         val useCases = listOfNotNull(preview, analysis)
-        if (useCases.isNotEmpty()) provider.unbind(*useCases.toTypedArray())
+        if (useCases.isNotEmpty()) {
+            runCatching { provider.unbindAll() }
+        }
+    }
+
+    private fun cancelPendingRebindWait(retainRebindFlag: Boolean = false) {
+        rebindCloseDeadlineRunnable?.let { mainHandler.removeCallbacks(it) }
+        rebindCloseDeadlineRunnable = null
+        rebindAvailabilityDeadlineRunnable?.let { mainHandler.removeCallbacks(it) }
+        rebindAvailabilityDeadlineRunnable = null
+        val observer = rebindTempObserver
+        val state = rebindPriorState
+        if (state != null && observer != null) {
+            state.removeObserver(observer)
+        }
+        rebindTempObserver = null
+        rebindPriorState = null
+        activeRebindCoordinator = null
+        if (!retainRebindFlag) {
+            isRebindInProgress.set(false)
+        }
+    }
+
+    private fun unbindAndRebindUseCases(
+        provider: ProcessCameraProvider,
+        lifecycleOwner: LifecycleOwner,
+        ticket: Long,
+    ) {
+        if (!isSessionLive(ticket)) {
+            isBindingInFlight.set(false)
+            isRebindInProgress.set(false)
+            return
+        }
+        if (!isRebindInProgress.compareAndSet(false, true)) {
+            Log.i(TAG, "unbindAndRebindUseCases: rebind already in progress for ticket $ticket; skipping duplicate")
+            return
+        }
+
+        cancelPendingRebindWait()
+        isRebindInProgress.set(true)
+        ensureAvailabilityCallbackRegistered()
+
+        val priorState = observedCameraState
+        val priorObserver = cameraStateObserver
+        if (priorState != null && priorObserver != null) {
+            priorState.removeObserver(priorObserver)
+        }
+        observedCameraState = null
+        cameraStateObserver = null
+
+        val preview = boundPreview
+        val analysis = boundAnalysis
+        boundPreview = null
+        boundAnalysis = null
+        runCatching { analysis?.clearAnalyzer() }
+        runCatching { preview?.setSurfaceProvider(null) }
+
+        try {
+            provider.unbindAll()
+        } catch (t: Throwable) {
+            Log.w(TAG, "provider.unbindAll failed during rebind teardown", t)
+        }
+
+        val priorStateType = priorState?.value?.type
+        val isPriorAlreadyClosed = priorState == null || priorStateType == CameraState.Type.CLOSED
+
+        val coordinator = RecoverySequencingCoordinator(
+            onRebind = {
+                mainHandler.post {
+                    if (!isSessionLive(ticket)) {
+                        isBindingInFlight.set(false)
+                        cancelPendingRebindWait()
+                        return@post
+                    }
+                    Log.i(TAG, "Recovery gate satisfied (prior closed & camera available); rebinding for ticket $ticket")
+                    cancelPendingRebindWait(retainRebindFlag = true)
+                    try {
+                        bindUseCases(provider, lifecycleOwner, ticket)
+                    } finally {
+                        isRebindInProgress.set(false)
+                    }
+                }
+            },
+            onPriorCloseTimeout = { failedState ->
+                mainHandler.post {
+                    if (!isSessionLive(ticket)) {
+                        isBindingInFlight.set(false)
+                        cancelPendingRebindWait()
+                        return@post
+                    }
+                    Log.e(
+                        TAG,
+                        "Prior camera graph failed to close within bounded deadline (state=$failedState) for ticket $ticket; aborting rebind",
+                    )
+                    isBindingInFlight.set(false)
+                    cancelPendingRebindWait()
+                    failCameraSession(
+                        ticket,
+                        "이전 카메라 리소스 해제 확인 대기 시간이 초과되었습니다 (상태: $failedState). 앱 화면에서 다시 시작해 주세요.",
+                    )
+                }
+            },
+            onAvailabilityTimeout = {
+                mainHandler.post {
+                    if (!isSessionLive(ticket)) {
+                        isBindingInFlight.set(false)
+                        cancelPendingRebindWait()
+                        return@post
+                    }
+                    Log.e(
+                        TAG,
+                        "Camera resource availability did not recover within bounded deadline after graph close for ticket $ticket; aborting rebind into dead HAL",
+                    )
+                    isBindingInFlight.set(false)
+                    cancelPendingRebindWait()
+                    failCameraSession(
+                        ticket,
+                        "카메라 리소스 사용 가능 상태 복구 대기 시간이 초과되었습니다. 앱 화면에서 다시 시작해 주세요.",
+                    )
+                }
+            },
+        )
+        activeRebindCoordinator = coordinator
+
+        fun armAvailabilityDeadlineIfNeeded() {
+            if (!coordinator.isCameraAvailable && rebindAvailabilityDeadlineRunnable == null) {
+                val availDeadline = Runnable {
+                    coordinator.handleAvailabilityTimeout()
+                }
+                rebindAvailabilityDeadlineRunnable = availDeadline
+                mainHandler.postDelayed(availDeadline, REBIND_AVAILABILITY_DEADLINE_MS)
+            }
+        }
+
+        if (isTargetCameraAvailable) {
+            coordinator.markCameraAvailable()
+        }
+
+        if (isPriorAlreadyClosed) {
+            Log.i(TAG, "Prior camera graph already closed for ticket $ticket")
+            val rebindFired = coordinator.markPriorClosed()
+            if (!rebindFired) {
+                armAvailabilityDeadlineIfNeeded()
+            }
+        } else {
+            Log.i(TAG, "Waiting for prior camera graph ($priorStateType) to close before rebinding for ticket $ticket")
+            val tempObserver = Observer<CameraState> { state ->
+                if (state?.type == CameraState.Type.CLOSED) {
+                    rebindCloseDeadlineRunnable?.let { mainHandler.removeCallbacks(it) }
+                    rebindCloseDeadlineRunnable = null
+                    Log.i(TAG, "Prior camera graph CLOSED observed for ticket $ticket")
+                    val rebindFired = coordinator.markPriorClosed()
+                    if (!rebindFired) {
+                        armAvailabilityDeadlineIfNeeded()
+                    }
+                }
+            }
+            rebindTempObserver = tempObserver
+            rebindPriorState = priorState
+            priorState.observeForever(tempObserver)
+
+            val closeDeadline = Runnable {
+                val currentState = priorState.value?.type?.name
+                coordinator.handlePriorCloseTimeout(currentState)
+            }
+            rebindCloseDeadlineRunnable = closeDeadline
+            mainHandler.postDelayed(closeDeadline, REBIND_CLOSE_DEADLINE_MS)
+        }
+    }
+
+    @VisibleForTesting
+    internal fun triggerStartupWatchdogForTesting(ticket: Long = sessionGeneration.get()) {
+        if (ticket != sessionGeneration.get() || !isSessionLive(ticket)) return
+        cancelStartupWatchdog()
+        cancelStreamingWatchdog()
+        boundAnalysis?.clearAnalyzer()
+        stallRecoveryAttempts.set(MAX_STALL_RECOVERY_ATTEMPTS - 1)
+        mutableUiState.update {
+            it.copy(
+                cameraStatus = CameraSessionStatus.Starting,
+                cameraErrorDetail = null,
+            )
+        }
+        executeStartupWatchdogTimeout(ticket)
+    }
+
+    @VisibleForTesting
+    internal fun triggerStallCheckForTesting(ticket: Long = sessionGeneration.get()) {
+        if (ticket != sessionGeneration.get() || !isSessionLive(ticket)) return
+        checkStreamingLiveness(ticket)
+    }
+
+    @VisibleForTesting
+    internal fun handleCameraFailureForTesting(ticket: Long = sessionGeneration.get(), failure: CameraFailureKind) {
+        if (ticket != sessionGeneration.get() || !isSessionLive(ticket)) return
+        handleCameraFailure(ticket, failure)
     }
 
     fun snapshotNow(): VisionTimingSnapshot {
@@ -1301,6 +2049,10 @@ class VisionPipelineController(
         if (!closed.compareAndSet(false, true)) return
         val terminalStatus = mutableUiState.value.cameraStatus
         val terminalDetail = mutableUiState.value.cameraErrorDetail
+        cancelStartupWatchdog()
+        cancelStreamingWatchdog()
+        cancelScheduledRetry()
+        cancelPendingRebindWait()
         stopCamera()
         motionTracker.close()
         alertCoordinator.close()
@@ -1313,13 +2065,147 @@ class VisionPipelineController(
                 it.copy(cameraStatus = terminalStatus, cameraErrorDetail = terminalDetail)
             }
         }
+        if (!analyzerExecutor.isShutdown) {
+            analyzerExecutor.shutdown()
+        }
     }
 
     companion object {
         private const val METRICS_PUBLISH_INTERVAL_NANOS = 250_000_000L
+        internal const val STARTUP_TIMEOUT_MS = 10_000L
+        internal const val STREAMING_STALL_TIMEOUT_MS = 5_000L
+        internal const val IN_FLIGHT_PROCESSING_TIMEOUT_MS = 15_000L
+        internal const val STREAMING_WATCHDOG_INTERVAL_MS = 1_000L
+        internal const val MAX_STALL_RECOVERY_ATTEMPTS = 3
+        internal const val MAX_DEVICE_ERROR_RECOVERY_ATTEMPTS = 1
+        internal const val DEVICE_ERROR_RETRY_DELAY_MS = 1_000L
+        internal const val SUSTAINED_HEALTHY_WINDOW_MS = 10_000L
+        internal const val SUSTAINED_HEALTHY_FRAMES = 60L
+        internal const val SUSTAINED_WARMUP_HEALTHY_FRAMES = 150L
+        internal const val SUSTAINED_WARMUP_HEALTHY_WINDOW_MS = 5_000L
+        internal const val REBIND_CLOSE_DEADLINE_MS = 1_000L
+        internal const val REBIND_AVAILABILITY_DEADLINE_MS = 10_000L
         internal const val MAX_RETRY_COUNT = 5
         internal val BACKOFF_DELAYS_MS = longArrayOf(500L, 1000L, 2000L, 4000L, 8000L)
         private const val TAG = "AriaVisionPipeline"
+
+        internal fun canAttemptFatalDeviceRecovery(attempts: Int): Boolean =
+            attempts <= MAX_DEVICE_ERROR_RECOVERY_ATTEMPTS
+
+        internal fun canAttemptStallRecovery(
+            currentAttempts: Int,
+        ): Boolean = CameraRecoverySequencingPolicy.canAttemptStallRecovery(currentAttempts)
+
+        internal fun isHealthyStreamRecoverySustained(
+            healthyFrames: Long,
+            healthyDurationMs: Long,
+        ): Boolean = CameraRecoverySequencingPolicy.isHealthyStreamRecoverySustained(healthyFrames, healthyDurationMs)
+
+        internal fun isWarmupStabilityPermitted(
+            healthyFrames: Long,
+            healthyDurationMs: Long,
+        ): Boolean = CameraRecoverySequencingPolicy.isWarmupStabilityPermitted(healthyFrames, healthyDurationMs)
+
+        internal fun resolveEffectiveModelStateName(state: VisionModelState, isInvocationReady: Boolean): String {
+            return if (state is VisionModelState.Ready && !isInvocationReady) {
+                "Loading"
+            } else {
+                state.javaClass.simpleName
+            }
+        }
+    }
+}
+
+internal class RecoverySequencingCoordinator(
+    private val onRebind: () -> Unit,
+    private val onPriorCloseTimeout: (state: String?) -> Unit,
+    private val onAvailabilityTimeout: () -> Unit,
+) {
+    @Volatile
+    var isPriorClosed: Boolean = false
+        private set
+
+    @Volatile
+    var isCameraAvailable: Boolean = false
+        private set
+
+    private val rebindFired = AtomicBoolean(false)
+
+    fun markPriorClosed(): Boolean {
+        isPriorClosed = true
+        return checkAndTrigger()
+    }
+
+    fun markCameraAvailable(): Boolean {
+        isCameraAvailable = true
+        return checkAndTrigger()
+    }
+
+    fun markCameraUnavailable() {
+        isCameraAvailable = false
+    }
+
+    fun checkAndTrigger(): Boolean {
+        if (isPriorClosed && isCameraAvailable) {
+            if (rebindFired.compareAndSet(false, true)) {
+                onRebind()
+                return true
+            }
+        }
+        return false
+    }
+
+    fun handlePriorCloseTimeout(currentState: String?) {
+        if (!isPriorClosed && !rebindFired.get()) {
+            onPriorCloseTimeout(currentState)
+        }
+    }
+
+    fun handleAvailabilityTimeout() {
+        if (!isCameraAvailable && !rebindFired.get()) {
+            onAvailabilityTimeout()
+        }
+    }
+}
+
+internal object CameraRecoverySequencingPolicy {
+    internal const val OBSERVED_POST_CLOSE_GPU_COMPLETION_MS = 3_400L
+    internal const val OBSERVED_POST_CLOSE_HAL_DRAIN_MS = 6_400L
+
+    fun canRebind(isPriorClosed: Boolean, isCameraAvailable: Boolean): Boolean {
+        return isPriorClosed && isCameraAvailable
+    }
+
+    fun isWarmupStabilityPermitted(
+        healthyFrames: Long,
+        healthyDurationMs: Long,
+        requiredFrames: Long = VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_FRAMES,
+        requiredDurationMs: Long = VisionPipelineController.SUSTAINED_WARMUP_HEALTHY_WINDOW_MS,
+    ): Boolean {
+        return healthyFrames >= requiredFrames && healthyDurationMs >= requiredDurationMs
+    }
+
+    fun isHealthyStreamRecoverySustained(
+        healthyFrames: Long,
+        healthyDurationMs: Long,
+        requiredFrames: Long = VisionPipelineController.SUSTAINED_HEALTHY_FRAMES,
+        requiredDurationMs: Long = VisionPipelineController.SUSTAINED_HEALTHY_WINDOW_MS,
+    ): Boolean {
+        return healthyFrames >= requiredFrames && healthyDurationMs >= requiredDurationMs
+    }
+
+    fun canAttemptStallRecovery(
+        currentAttempts: Int,
+        maxAttempts: Int = VisionPipelineController.MAX_STALL_RECOVERY_ATTEMPTS,
+    ): Boolean {
+        return currentAttempts < maxAttempts
+    }
+
+    fun isAvailabilityDeadlineSufficient(
+        deadlineMs: Long = VisionPipelineController.REBIND_AVAILABILITY_DEADLINE_MS,
+        minRequiredMs: Long = OBSERVED_POST_CLOSE_GPU_COMPLETION_MS,
+    ): Boolean {
+        return deadlineMs > minRequiredMs
     }
 }
 

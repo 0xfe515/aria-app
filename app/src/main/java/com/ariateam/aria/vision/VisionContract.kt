@@ -121,14 +121,16 @@ object VisionContract {
                 koreanMessage = "출력 텐서 개수 불일치: 1개 필요 (감지됨: ${outputTensorCount}개)",
             )
         }
-        if (!inputDataType.equals(EXPECTED_DATA_TYPE, ignoreCase = true)) {
+        val isInputFloat = inputDataType.equals(EXPECTED_DATA_TYPE, ignoreCase = true) || inputDataType.equals("FLOAT", ignoreCase = true)
+        if (!isInputFloat) {
             return SpecValidationResult.Invalid(
                 code = "input_dtype",
                 detail = "Expected input dtype $EXPECTED_DATA_TYPE, got $inputDataType",
                 koreanMessage = "입력 텐서 타입 불일치: FLOAT32 필요 (감지됨: $inputDataType)",
             )
         }
-        if (!outputDataType.equals(EXPECTED_DATA_TYPE, ignoreCase = true)) {
+        val isOutputFloat = outputDataType.equals(EXPECTED_DATA_TYPE, ignoreCase = true) || outputDataType.equals("FLOAT", ignoreCase = true)
+        if (!isOutputFloat) {
             return SpecValidationResult.Invalid(
                 code = "output_dtype",
                 detail = "Expected output dtype $EXPECTED_DATA_TYPE, got $outputDataType",

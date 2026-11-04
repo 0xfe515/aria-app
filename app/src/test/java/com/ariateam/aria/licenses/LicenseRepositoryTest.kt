@@ -53,6 +53,7 @@ class LicenseRepositoryTest {
         assertTrue("google-errorprone must be present", ids.contains("google-errorprone"))
         assertTrue("google-autovalue must be present", ids.contains("google-autovalue"))
         assertTrue("google-j2objc must be present", ids.contains("google-j2objc"))
+        assertTrue("google-flatbuffers must be present", ids.contains("google-flatbuffers"))
 
         // Assets
         assertTrue("audio-cues must be present", ids.contains("audio-cues"))

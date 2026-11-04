@@ -321,8 +321,8 @@ android {
         applicationId = "com.ariateam.aria"
         minSdk = 31
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.0.0-preview.20261104.2"
+        versionCode = 5
+        versionName = "1.0.0-preview.20261104.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         proguardFiles(
@@ -349,6 +349,11 @@ android {
     androidResources {
         noCompress += listOf("onnx", "wav", "model", "tflite")
     }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 androidComponents {
@@ -374,8 +379,12 @@ tasks.named("preBuild") {
 dependencies {
     implementation(files(provisionSherpaOfflineAar.flatMap { it.outputAarFile }).builtBy(provisionSherpaOfflineAar))
     implementation(libs.litert)
+    implementation(libs.litert.api)
+    implementation(libs.litert.metadata)
     implementation(libs.litert.gpu)
-    implementation(libs.litert.gpu.api)
+    implementation(libs.litert.npu.google.tensor)
+    implementation(libs.litert.npu.qualcomm)
+    implementation(libs.litert.npu.mediatek)
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
@@ -390,12 +399,16 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.fragment.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     testImplementation(libs.junit)
+    testImplementation(libs.litert.gpu.api)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.tensorflow.lite.gpu)
+    androidTestImplementation(libs.litert.gpu.api)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

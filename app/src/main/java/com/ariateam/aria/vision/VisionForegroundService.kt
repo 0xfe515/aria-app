@@ -32,6 +32,7 @@ class VisionForegroundService : Service(), LifecycleOwner {
     private var sessionWatchJob: Job? = null
     private var foreground = false
     private var sessionStarted = false
+    private var boundController: VisionPipelineController? = null
     private var activeMode = VisionPipelineMode.PREPROCESS_OR_INFERENCE
     private var currentSessionId: String? = null
     private val serviceLifetimeToken = Binder()
@@ -51,8 +52,10 @@ class VisionForegroundService : Service(), LifecycleOwner {
         when (intent?.action) {
             ACTION_START -> startSession(startId)
             ACTION_STOP -> {
+                sessionStarted = false
                 VisionSession.markExplicitStop(this)
                 VisionSession.cancelPendingStartRequest()
+                boundController?.stopCamera()
                 stopForegroundSession()
                 stopSelf(startId)
             }
@@ -110,10 +113,18 @@ class VisionForegroundService : Service(), LifecycleOwner {
             }
 
             val controller = VisionSession.ensureController(applicationContext)
-            if (sessionStarted) {
+            val isCurrentControllerRunning = controller === boundController && controller.isRunning && controller.activeOwner === this
+            if (sessionStarted && isCurrentControllerRunning) {
+                Log.i(TAG, "startSession: updating existing active controller (id=${Integer.toHexString(System.identityHashCode(controller))})")
                 controller.updateSurfaceProvider(request.surfaceProvider, request.targetRotation)
                 if (activeMode != request.mode) controller.setPipelineMode(request.mode)
             } else {
+                Log.i(TAG, "startSession: starting camera on controller (id=${Integer.toHexString(System.identityHashCode(controller))}, prevStarted=$sessionStarted)")
+                val previous = boundController
+                if (previous != null && previous !== controller) {
+                    VisionSession.closeExpectedController(previous)
+                }
+                boundController = controller
                 controller.startCamera(
                     lifecycleOwner = this,
                     surfaceProvider = request.surfaceProvider,
@@ -177,6 +188,7 @@ class VisionForegroundService : Service(), LifecycleOwner {
     }
 
     private fun stopForegroundSession() {
+        sessionStarted = false
         AriaRuntimeStateBridge.setVisionActive(this, false, sessionId = currentSessionId, token = serviceLifetimeToken)
         if (foreground) {
             val voiceActive = AriaRuntimeStateBridge.isVoiceActive(this)
@@ -202,12 +214,15 @@ class VisionForegroundService : Service(), LifecycleOwner {
     override fun onDestroy() {
         sessionWatchJob?.cancel()
         serviceScope.cancel()
+        val c = boundController
+        boundController = null
+        sessionStarted = false
         stopForegroundSession()
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
             lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         }
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-        VisionSession.closeController()
+        VisionSession.closeExpectedController(c)
         super.onDestroy()
     }
 

@@ -79,6 +79,8 @@ internal object VisionSession {
         synchronized(lock) {
             if (controller?.isClosed == true) {
                 controller = null
+                mutableModelState.value = VisionModelState.Missing
+                mutableInitialRestoreCompleted.value = false
             }
             if (mutableUiState.value.cameraStatus == CameraSessionStatus.Error) {
                 mutableUiState.value = mutableUiState.value.copy(
@@ -99,6 +101,8 @@ internal object VisionSession {
             if (lockedCurrent != null && !lockedCurrent.isClosed) {
                 lockedCurrent
             } else {
+                mutableModelState.value = VisionModelState.Missing
+                mutableInitialRestoreCompleted.value = false
                 createController(context.applicationContext).also { controller = it }
             }
         }
@@ -128,6 +132,30 @@ internal object VisionSession {
             mutableModelState.value = VisionModelState.Missing
             mutableInitialRestoreCompleted.value = false
         }
+    }
+
+    fun closeExpectedController(expected: VisionPipelineController?): Boolean {
+        if (expected == null) return false
+        synchronized(lock) {
+            val current = controller
+            return if (current === expected) {
+                current.close()
+                controller = null
+                mutableModelState.value = VisionModelState.Missing
+                mutableInitialRestoreCompleted.value = false
+                true
+            } else {
+                if (!expected.isClosed) {
+                    expected.close()
+                }
+                false
+            }
+        }
+    }
+
+    fun diagnosticSummary(context: Context): String {
+        val ctrl = controller
+        return "VisionSession(hasController=${ctrl != null}, controllerId=${if (ctrl != null) Integer.toHexString(System.identityHashCode(ctrl)) else "null"}, isRunning=${ctrl?.isRunning}, isClosed=${ctrl?.isClosed}, userStopLatch=${requiresExplicitRestart(context)}, pendingRequest=${pendingStartRequest != null})"
     }
 
     private fun createController(context: Context): VisionPipelineController {

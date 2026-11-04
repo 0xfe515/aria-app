@@ -21,9 +21,11 @@ interface AriaKeyStorage {
 
 class AndroidKeyStoreAriaKeyStorage(
     private val context: Context,
+    private val prefsName: String = PREFS_NAME,
+    private val keyAlias: String = KEY_ALIAS,
 ) : AriaKeyStorage {
 
-    private val preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val preferences = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
 
     override fun saveApiKey(key: String): Boolean {
         val trimmed = key.trim()
@@ -75,8 +77,8 @@ class AndroidKeyStoreAriaKeyStorage(
         return try {
             preferences.edit().remove(KEY_IV).remove(KEY_CIPHERTEXT).commit()
             val keyStore = loadKeyStore()
-            if (keyStore?.containsAlias(KEY_ALIAS) == true) {
-                keyStore.deleteEntry(KEY_ALIAS)
+            if (keyStore?.containsAlias(keyAlias) == true) {
+                keyStore.deleteEntry(keyAlias)
             }
             true
         } catch (t: Throwable) {
@@ -106,14 +108,14 @@ class AndroidKeyStoreAriaKeyStorage(
         val keyStore = loadKeyStore()
             ?: throw IllegalStateException("AndroidKeyStore unavailable")
 
-        if (keyStore.containsAlias(KEY_ALIAS)) {
-            val entry = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+        if (keyStore.containsAlias(keyAlias)) {
+            val entry = keyStore.getEntry(keyAlias, null) as? KeyStore.SecretKeyEntry
             if (entry != null) return entry.secretKey
         }
 
         val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEY_STORE)
         val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
+            keyAlias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -126,13 +128,13 @@ class AndroidKeyStoreAriaKeyStorage(
 
     private fun getKey(): SecretKey? {
         val keyStore = loadKeyStore() ?: return null
-        val entry = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+        val entry = keyStore.getEntry(keyAlias, null) as? KeyStore.SecretKeyEntry
         return entry?.secretKey
     }
 
     companion object {
         const val PREFS_NAME = "aria_cloud_secure_prefs"
-        private const val KEY_ALIAS = "aria_gemini_api_key_v1"
+        const val KEY_ALIAS = "aria_gemini_api_key_v1"
         private const val ANDROID_KEY_STORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_LENGTH_BITS = 128
