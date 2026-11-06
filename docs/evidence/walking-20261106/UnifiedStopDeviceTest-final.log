@@ -1,0 +1,37 @@
+INSTRUMENTATION_STATUS: class=com.ariateam.aria.runtime.UnifiedStopDeviceTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=2
+INSTRUMENTATION_STATUS: stream=
+com.ariateam.aria.runtime.UnifiedStopDeviceTest:
+INSTRUMENTATION_STATUS: test=voiceService_stopViaUnifiedStopReceiver_exercisesRealBoundIpcAndCleanup
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.ariateam.aria.runtime.UnifiedStopDeviceTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=2
+INSTRUMENTATION_STATUS: stream=.
+INSTRUMENTATION_STATUS: test=voiceService_stopViaUnifiedStopReceiver_exercisesRealBoundIpcAndCleanup
+INSTRUMENTATION_STATUS_CODE: 0
+INSTRUMENTATION_STATUS: class=com.ariateam.aria.runtime.UnifiedStopDeviceTest
+INSTRUMENTATION_STATUS: current=2
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=2
+INSTRUMENTATION_STATUS: stream=
+INSTRUMENTATION_STATUS: test=unboundVoiceService_requestVoiceStop_doesNotReviveServiceAndCleansUpImmediately
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.ariateam.aria.runtime.UnifiedStopDeviceTest
+INSTRUMENTATION_STATUS: current=2
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=2
+INSTRUMENTATION_STATUS: stream=.
+INSTRUMENTATION_STATUS: test=unboundVoiceService_requestVoiceStop_doesNotReviveServiceAndCleansUpImmediately
+INSTRUMENTATION_STATUS_CODE: 0
+INSTRUMENTATION_RESULT: stream=
+
+Time: 4.753
+
+OK (2 tests)
+
+
+INSTRUMENTATION_CODE: -1

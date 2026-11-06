@@ -4,7 +4,7 @@ import com.ariateam.aria.navigation.NavigationCommandParser
 import com.ariateam.aria.navigation.NavigationProvider
 
 /** Platform-independent interpretation; only the coordinator may execute these values. */
-enum class AppCommand { Home, Settings, SoundOn, SoundOff, HideScreen, ShowScreen, Status, Help, Cancel, Stop }
+enum class AppCommand { Home, Settings, SoundOn, SoundOff, HideScreen, ShowScreen, Status, WalkingStatus, ForwardCalibration, Help, Cancel, Stop }
 
 sealed interface Interpretation {
     data class Execute(val command: AppCommand) : Interpretation
@@ -49,6 +49,8 @@ class RuleCommandInterpreter : CommandInterpreter {
         if (value in setOf("홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동")) candidates += AppCommand.Home
         if (value in setOf("설정", "설정열어", "설정열어줘", "설정으로가", "설정으로가줘", "설정으로이동", "설정화면열어")) candidates += AppCommand.Settings
         if (value in setOf("현재상태", "현재상태알려줘", "상태알려줘", "지금상태", "상태")) candidates += AppCommand.Status
+        if (value in setOf("보행상태", "보행상태알려줘", "걷기상태", "걷기상태알려줘")) candidates += AppCommand.WalkingStatus
+        if (value in setOf("정면보정", "정면보정해", "정면보정해줘", "앞방향보정", "방향보정")) candidates += AppCommand.ForwardCalibration
         if (value in setOf("도움말", "도움말알려줘", "뭐할수있어", "사용법", "사용법알려줘")) candidates += AppCommand.Help
         if (value in setOf("화면숨겨", "화면숨겨줘", "화면숨겨주세요", "화면꺼", "화면꺼줘", "화면끄기")) {
             candidates += AppCommand.HideScreen

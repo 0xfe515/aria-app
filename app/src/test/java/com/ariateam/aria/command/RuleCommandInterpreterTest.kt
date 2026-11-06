@@ -17,6 +17,7 @@ class RuleCommandInterpreterTest {
             "화면 숨겨" to AppCommand.HideScreen, "화면 꺼" to AppCommand.HideScreen,
             "화면 보여줘" to AppCommand.ShowScreen, "화면 켜" to AppCommand.ShowScreen,
             "조용히 해" to AppCommand.SoundOff, "현재 상태 알려줘" to AppCommand.Status,
+            "보행 상태" to AppCommand.WalkingStatus, "정면 보정" to AppCommand.ForwardCalibration,
             "뭐 할 수 있어?" to AppCommand.Help, "아니요" to AppCommand.Cancel,
             "그만 들어" to AppCommand.Stop,
         ).forEach { (text, command) -> assertEquals(text, Interpretation.Execute(command), parse(text)) }

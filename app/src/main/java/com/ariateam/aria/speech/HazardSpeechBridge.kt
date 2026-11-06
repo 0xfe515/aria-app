@@ -3,6 +3,7 @@ package com.ariateam.aria.speech
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.RemoteException
@@ -201,6 +202,48 @@ class HazardSpeechBridge(
             }
         } catch (t: Throwable) {
             Log.w(TAG, "Unexpected error delivering hazard alert", t)
+        }
+    }
+
+    /** Publishes a payload-free assist status to VoiceService; only state transitions request speech. */
+    fun updateWalkingAssistState(session: Long, sequence: Long, status: String, announce: Boolean, stopped: Boolean) {
+        if (session <= 0L || sequence <= 0L || status.isBlank()) return
+        val service = synchronized(lock) {
+            if (closed || !isVoiceActive()) return
+            if (currentConnection == null && voiceServiceProvider == null) startLocked()
+            remoteService ?: voiceServiceProvider?.invoke()
+        } ?: return
+        try {
+            service.updateWalkingAssistState(
+                session,
+                sequence,
+                SystemClock.elapsedRealtimeNanos(),
+                status,
+                announce,
+                stopped,
+            )
+        } catch (e: RemoteException) {
+            Log.w(TAG, "RemoteException delivering walking assist status", e)
+            synchronized(lock) { if (remoteService === service) remoteService = null }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Unexpected error delivering walking assist status", t)
+        }
+    }
+
+    fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {
+        if (requestId <= 0L) return
+        val service = synchronized(lock) {
+            if (closed || !isVoiceActive()) return
+            if (currentConnection == null && voiceServiceProvider == null) startLocked()
+            remoteService ?: voiceServiceProvider?.invoke()
+        } ?: return
+        try {
+            service.reportForwardCalibrationResult(requestId, successful)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "RemoteException reporting forward calibration result", e)
+            synchronized(lock) { if (remoteService === service) remoteService = null }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Unexpected error reporting forward calibration result", t)
         }
     }
 

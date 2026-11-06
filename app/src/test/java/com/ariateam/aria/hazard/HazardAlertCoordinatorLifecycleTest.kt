@@ -188,14 +188,19 @@ class HazardAlertCoordinatorLifecycleTest {
         currentElapsedNanos += 3_000_000_000L
         val ts3 = currentElapsedNanos
 
-        // Since consecutiveRiskCount was already confirmed in frames 1 & 2,
-        // cooldown expiry causes ongoing hazard to fire alert #2 immediately
+        // A long capture gap resets two-frame confirmation; first fresh frame is pending.
         coordinator.processAssessment(candidateAssessment(ts3), ts3)
+        assertEquals("A long capture gap needs fresh confirmation", 1, sinkEvents.size)
+
+        currentRealtimeMs += 50L
+        currentElapsedNanos += 50_000_000L
+        val ts3Confirmed = currentElapsedNanos
+        coordinator.processAssessment(candidateAssessment(ts3Confirmed), ts3Confirmed)
         assertEquals("Sink should receive alert #2", 2, sinkEvents.size)
 
         val event2 = sinkEvents[1]
         assertEquals(2L, event2.sequence)
-        assertEquals(ts3, event2.timestampNanos)
+        assertEquals(ts3Confirmed, event2.timestampNanos)
         assertEquals(event1.session, event2.session)
 
         // Additional frame within cooldown is suppressed

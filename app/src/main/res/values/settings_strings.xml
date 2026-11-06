@@ -26,6 +26,7 @@
     <string name="settings_diagnostics_group">개발자 점검 도구</string>
     <string name="settings_diagnostics_summary">카메라·비전 및 음성 진단, 권한 관리</string>
     <string name="settings_vision_diagnostics_summary">카메라 및 비전 상태 확인</string>
+    <string name="settings_camera_permission_recovery_summary">카메라 권한 복구 및 앱 설정 관리</string>
     <string name="settings_voice_diagnostics_summary">음성 인식 상태 확인</string>
 
     <!-- Demo (데모) -->

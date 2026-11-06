@@ -139,6 +139,7 @@ fun MainScreen(
     var showLicenses by rememberSaveable { mutableStateOf(false) }
     var isDistanceModeForeground by rememberSaveable { mutableStateOf(false) }
     var showBodyMountProfileDialog by rememberSaveable { mutableStateOf(false) }
+    var hasAttemptedStartupVoiceStart by rememberSaveable { mutableStateOf(false) }
     val pendingCameraGate = remember { PendingCameraStartGate() }
 
     val isVisionRestoreCompleted by visionModel.isInitialRestoreCompleted.collectAsStateWithLifecycle()
@@ -564,10 +565,19 @@ fun MainScreen(
     }
 
     // Start wake-word listening only after the microphone is granted, independently of optional permissions.
-    LaunchedEffect(startupModel.hasBeenAdmitted, hasMicPermission, isServiceSynced) {
-        if (!startupModel.hasBeenAdmitted && hasMicPermission && isServiceSynced &&
-            !state.isActive && state.phase != VoicePhase.Initializing
+    LaunchedEffect(startupModel.hasBeenAdmitted, hasMicPermission, isServiceSynced, state.phase, state.isActive) {
+        if (StartupPolicy.shouldLatchStartupVoiceHandled(state.isActive, state.phase)) {
+            hasAttemptedStartupVoiceStart = true
+        }
+        if (isServiceSynced && StartupPolicy.shouldStartVoiceDuringStartup(
+                hasBeenAdmitted = startupModel.hasBeenAdmitted,
+                hasMicPermission = hasMicPermission,
+                voicePhase = state.phase,
+                isVoiceActive = state.isActive,
+                hasAttemptedStartupVoiceStart = hasAttemptedStartupVoiceStart,
+            )
         ) {
+            hasAttemptedStartupVoiceStart = true
             model.startWaiting()
         }
     }

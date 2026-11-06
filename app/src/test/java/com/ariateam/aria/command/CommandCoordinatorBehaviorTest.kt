@@ -1,7 +1,6 @@
 package com.ariateam.aria.command
 
 import android.content.SharedPreferences
-import android.os.SystemClock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -40,6 +39,7 @@ class CommandCoordinatorBehaviorTest {
     private val emittedSnapshots = mutableListOf<CommandSnapshot>()
     private var vibrationCount = 0
     private var suppressionState = false
+    private val testNowMs = 10_000L
 
     @Before
     fun setUp() {
@@ -62,6 +62,8 @@ class CommandCoordinatorBehaviorTest {
             vibrate = { vibrationCount++ },
             preferencesOverride = fakePrefs,
             notificationManagerOverride = null,
+            clockRealtimeMs = { testNowMs },
+            clockElapsedNanos = { testNowMs * 1_000_000L },
         )
     }
 
@@ -72,7 +74,7 @@ class CommandCoordinatorBehaviorTest {
         emittedSnapshots.clear()
         vibrationCount = 0
 
-        val nowNanos = try { SystemClock.elapsedRealtimeNanos() } catch (_: Throwable) { System.nanoTime() }
+        val nowNanos = testNowMs * 1_000_000L
         val staleTimestamp = nowNanos - 3_000_000_000L // 3 seconds ago (stale > 2.0s)
 
         coordinator.postHazardAlert(
@@ -87,13 +89,34 @@ class CommandCoordinatorBehaviorTest {
     }
 
     @Test
+    fun walkingStatusCommandReadsFreshLimitationWithoutClaimingSafety() {
+        val coordinator = createCoordinator(audible = false)
+        coordinator.started()
+        val nowNanos = testNowMs * 1_000_000L
+        coordinator.updateWalkingAssistState(
+            session = 3L,
+            sequence = 1L,
+            timestampNanos = nowNanos,
+            status = "보행 보조 제한: 새 분석 결과가 없습니다.",
+            shouldAnnounce = false,
+            stopped = false,
+        )
+
+        coordinator.finalized("보행 상태")
+
+        assertTrue(emittedSnapshots.last().message.contains("보행 보조 제한"))
+        assertFalse(emittedSnapshots.last().message.contains("안전합니다"))
+        coordinator.close()
+    }
+
+    @Test
     fun postHazardAlert_acceptsFreshAlertAndVibratesAndEmits() {
         val coordinator = createCoordinator(audible = true)
         coordinator.started()
         emittedSnapshots.clear()
         vibrationCount = 0
 
-        val nowNanos = try { SystemClock.elapsedRealtimeNanos() } catch (_: Throwable) { System.nanoTime() }
+        val nowNanos = testNowMs * 1_000_000L
         val freshTimestamp = nowNanos - 100_000_000L // 100ms ago (fresh)
 
         coordinator.postHazardAlert(
@@ -115,7 +138,7 @@ class CommandCoordinatorBehaviorTest {
         emittedSnapshots.clear()
         vibrationCount = 0
 
-        val nowNanos = try { SystemClock.elapsedRealtimeNanos() } catch (_: Throwable) { System.nanoTime() }
+        val nowNanos = testNowMs * 1_000_000L
 
         // First alert
         coordinator.postHazardAlert(
@@ -144,7 +167,7 @@ class CommandCoordinatorBehaviorTest {
         emittedSnapshots.clear()
         vibrationCount = 0
 
-        val nowNanos = try { SystemClock.elapsedRealtimeNanos() } catch (_: Throwable) { System.nanoTime() }
+        val nowNanos = testNowMs * 1_000_000L
 
         coordinator.postHazardAlert(
             session = 1L,

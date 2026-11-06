@@ -130,6 +130,7 @@ fun SettingsScreen(
                 onStartWaiting = onStartWaiting,
                 onStop = onStop,
                 onNotificationSettings = onNotificationSettings,
+                onOpenAppSettings = onOpenAppSettings,
                 profile = profile,
                 onOpenProfileSetup = {
                     onOpenProfileSetup()
@@ -351,6 +352,7 @@ private fun GeneralSettings(
     onStartWaiting: () -> Unit,
     onStop: () -> Unit,
     onNotificationSettings: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     profile: BodyMountProfile?,
     onOpenProfileSetup: () -> Unit,
     onBack: () -> Unit,
@@ -401,6 +403,11 @@ private fun GeneralSettings(
         title = stringResource(R.string.command_notification_settings),
         summary = stringResource(R.string.settings_notification_summary),
         onClick = onNotificationSettings,
+    )
+    SettingsNavigationRow(
+        title = stringResource(R.string.open_app_settings),
+        summary = stringResource(R.string.settings_camera_permission_recovery_summary),
+        onClick = onOpenAppSettings,
     )
 
     // 신체 장착 기준 (키·착용 위치)

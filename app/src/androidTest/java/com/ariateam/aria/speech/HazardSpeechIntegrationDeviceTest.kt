@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.ariateam.aria.R
 import com.ariateam.aria.hazard.HazardAlertCoordinator
 import com.ariateam.aria.hazard.HazardAlertEvent
 import com.ariateam.aria.hazard.HazardAssessment
@@ -76,6 +77,8 @@ class HazardSpeechIntegrationDeviceTest {
                     override fun reportCloudError(id: Long, e: String?) {}
                     override fun cancelCloudQuestion(id: Long) {}
                     override fun speakHazardWarning(m: String?) {}
+                    override fun updateWalkingAssistState(session: Long, seq: Long, ts: Long, status: String?, announce: Boolean, stopped: Boolean) {}
+                    override fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {}
                     override fun postHazardAlert(session: Long, seq: Long, ts: Long, message: String?) {
                         deliveredEvents.add(
                             HazardAlertEvent(session, seq, ts, message.orEmpty())
@@ -128,7 +131,7 @@ class HazardSpeechIntegrationDeviceTest {
             val received = latch.await(2, TimeUnit.SECONDS)
             assertTrue("Hazard alert should be dispatched to registered bridge after 2 confirmation frames", received)
             assertEquals(1, deliveredEvents.size)
-            assertEquals("전방 경로 막힘", deliveredEvents[0].message)
+            assertEquals(context.getString(R.string.walking_hazard_blocked), deliveredEvents[0].message)
             assertEquals(t1, deliveredEvents[0].timestampNanos)
             assertTrue("AIDL session ticket must be assigned", deliveredEvents[0].session > 0L)
             assertEquals("AIDL sequence must be 1 for first alert", 1L, deliveredEvents[0].sequence)
@@ -168,6 +171,8 @@ class HazardSpeechIntegrationDeviceTest {
                     override fun reportCloudError(id: Long, e: String?) {}
                     override fun cancelCloudQuestion(id: Long) {}
                     override fun speakHazardWarning(m: String?) {}
+                    override fun updateWalkingAssistState(session: Long, seq: Long, ts: Long, status: String?, announce: Boolean, stopped: Boolean) {}
+                    override fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {}
                     override fun postHazardAlert(session: Long, seq: Long, ts: Long, message: String?) {
                         deliveredEvents.add(HazardAlertEvent(session, seq, ts, message.orEmpty()))
                     }

@@ -2,7 +2,10 @@ package com.ariateam.aria.vision
 
 import android.Manifest
 import android.app.Application
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import com.ariateam.aria.startup.StartupVisionPreparationPolicy
 import android.graphics.Bitmap
@@ -37,7 +40,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
+import com.ariateam.aria.R
+import com.ariateam.aria.command.CommandCoordinator
 import com.ariateam.aria.hazard.CorridorDirection
+import com.ariateam.aria.hazard.AlertDecision
+import com.ariateam.aria.hazard.AlertSuppressionReason
 import com.ariateam.aria.hazard.HazardAlertCoordinator
 import com.ariateam.aria.hazard.HazardAssessment
 import com.ariateam.aria.hazard.HazardDetector
@@ -46,6 +53,19 @@ import com.ariateam.aria.hazard.MotionDegradedReason
 import com.ariateam.aria.hazard.MotionState
 import com.ariateam.aria.hazard.MotionTracker
 import com.ariateam.aria.runtime.AriaRuntimeTimingTracker
+import com.ariateam.aria.speech.HazardSpeechBridge
+import com.ariateam.aria.walking.WalkingAssistAction
+import com.ariateam.aria.walking.WalkingAssistAnnouncement
+import com.ariateam.aria.walking.WalkingAssistCause
+import com.ariateam.aria.walking.WalkingAssistCopy
+import com.ariateam.aria.walking.WalkingAssistDiagnosticEvent
+import com.ariateam.aria.walking.WalkingAssistDiagnostics
+import com.ariateam.aria.walking.WalkingAssistInput
+import com.ariateam.aria.walking.WalkingAssistPhase
+import com.ariateam.aria.walking.WalkingAssistState
+import com.ariateam.aria.walking.WalkingAssistStateMachine
+import com.ariateam.aria.walking.WalkingAssistTransition
+import com.ariateam.aria.walking.WalkingDiagnosticReason
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -87,6 +107,13 @@ data class VisionUiState(
     val activeBackendType: VisionBackendType? = null,
     val activeBackendDescription: String = "N/A (모델 미적용)",
     val groundContactDistance: GroundContactDistance = GroundContactDistance(),
+    val computeTelemetry: VisionComputeTelemetry = VisionComputeTelemetry.INACTIVE,
+    val walkingAssistState: WalkingAssistState = WalkingAssistState(
+        phase = WalkingAssistPhase.PREPARING,
+        cause = WalkingAssistCause.SESSION_STARTING,
+        action = WalkingAssistAction.NONE,
+    ),
+    val walkingDiagnosticEvents: List<WalkingAssistDiagnosticEvent> = emptyList(),
 )
 
 data class VisionPipelineDiagnosticSnapshot(
@@ -163,6 +190,41 @@ class VisionPipelineController(
     private val running = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
     private val sessionGeneration = AtomicLong(0L)
+    private val walkingAssistStateMachine = WalkingAssistStateMachine()
+    private val walkingAssistDiagnostics = WalkingAssistDiagnostics()
+    private val walkingStatusSequence = AtomicLong(0L)
+    private val hazardSpeechBridge = HazardSpeechBridge(context.applicationContext)
+    private val lastWalkingFrameSequence = AtomicLong(0L)
+    private val latestWalkingResultCaptureNanos = AtomicLong(0L)
+    private val walkingAnnouncementFrameSequences = LinkedHashMap<Long, Long>()
+    @Volatile
+    private var walkingAssistTicket = -1L
+    @Volatile
+    private var walkingCameraTicket = -1L
+    private var walkingAssistTickRunnable: Runnable? = null
+    private var calibrationReceiverRegistered = false
+    private val calibrationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(receiverContext: Context?, intent: Intent?) {
+            if (closed.get()) return
+            when (intent?.action) {
+                CommandCoordinator.ACTION_FORWARD_CALIBRATION -> {
+                    val requestId = intent.getLongExtra(CommandCoordinator.EXTRA_CALIBRATION_REQUEST_ID, 0L)
+                    if (requestId > 0L) {
+                        val calibrated = walkingCameraTicket >= 0L && running.get() && calibrateForward()
+                        hazardSpeechBridge.reportForwardCalibrationResult(requestId, calibrated)
+                    }
+                }
+                CommandCoordinator.ACTION_WALKING_SPEECH_STARTED -> recordWalkingSpeechStart(
+                    session = intent.getLongExtra(CommandCoordinator.EXTRA_WALKING_SESSION, -1L),
+                    sequence = intent.getLongExtra(CommandCoordinator.EXTRA_WALKING_SEQUENCE, -1L),
+                    elapsedRealtimeNanos = intent.getLongExtra(
+                        CommandCoordinator.EXTRA_WALKING_SPEECH_STARTED_NANOS,
+                        0L,
+                    ),
+                )
+            }
+        }
+    }
     private val lastPublishedNanos = AtomicLong(0L)
     private val analyzerEntries = AtomicLong(0L)
     private val pipelineInputs = AtomicLong(0L)
@@ -187,6 +249,21 @@ class VisionPipelineController(
     private val deviceErrorRecoveryAttempts = AtomicInteger(0)
 
     init {
+        alertCoordinator.setAlertSink(hazardSpeechBridge)
+        try {
+            ContextCompat.registerReceiver(
+                context.applicationContext,
+                calibrationReceiver,
+                IntentFilter().apply {
+                    addAction(CommandCoordinator.ACTION_FORWARD_CALIBRATION)
+                    addAction(CommandCoordinator.ACTION_WALKING_SPEECH_STARTED)
+                },
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            calibrationReceiverRegistered = true
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not register local forward calibration receiver", t)
+        }
         modelStore.cameraStabilityDecider = {
             val isLiveBinding = isBindingInFlight.get()
             val isLiveRebind = isRebindInProgress.get()
@@ -463,11 +540,250 @@ class VisionPipelineController(
         }
     }
 
-    fun calibrateForward() {
-        motionTracker.calibrateForward()
+    fun calibrateForward(): Boolean {
+        val calibrated = motionTracker.calibrateForward()
         val nowNanos = SystemClock.elapsedRealtimeNanos()
         val motion = motionTracker.stateAt(nowNanos)
         mutableUiState.update { it.copy(motionState = motion) }
+        val ticket = walkingCameraTicket
+        if (ticket >= 0L) updateWalkingAssist(ticket)
+        return calibrated
+    }
+
+    private fun startWalkingAssistSession(ticket: Long, nowNanos: Long = SystemClock.elapsedRealtimeNanos()) {
+        cancelWalkingAssistTick()
+        walkingCameraTicket = ticket
+        val assistGeneration = VisionSession.nextWalkingAssistGeneration()
+        walkingAssistTicket = assistGeneration
+        walkingStatusSequence.set(0L)
+        lastWalkingFrameSequence.set(0L)
+        latestWalkingResultCaptureNanos.set(0L)
+        synchronized(walkingAnnouncementFrameSequences) {
+            walkingAnnouncementFrameSequences.clear()
+        }
+        walkingAssistDiagnostics.startSession(
+            generation = assistGeneration,
+            elapsedRealtimeNanos = nowNanos,
+            backend = modelStore.segmenter.activeBackendDescription,
+            model = modelIdentifier(),
+        )
+        val nowMs = SystemClock.elapsedRealtime()
+        val transition = walkingAssistStateMachine.startSession(assistGeneration, nowMs, nowNanos)
+        mutableUiState.update {
+            it.copy(
+                computeTelemetry = VisionComputeTelemetry.INACTIVE,
+                walkingAssistState = transition.current,
+                walkingDiagnosticEvents = walkingAssistDiagnostics.snapshot(),
+            )
+        }
+        hazardSpeechBridge.start()
+        val statusSequence = walkingStatusSequence.incrementAndGet()
+        val frameSequence = lastWalkingFrameSequence.get()
+        synchronized(walkingAnnouncementFrameSequences) {
+            walkingAnnouncementFrameSequences[statusSequence] = frameSequence
+            while (walkingAnnouncementFrameSequences.size > 64) {
+                walkingAnnouncementFrameSequences.remove(walkingAnnouncementFrameSequences.keys.first())
+            }
+        }
+        hazardSpeechBridge.updateWalkingAssistState(
+            assistGeneration,
+            statusSequence,
+            context.getString(WalkingAssistCopy.status(transition.current)),
+            announce = false,
+            stopped = transition.current.phase == WalkingAssistPhase.STOPPED,
+        )
+        scheduleWalkingAssistTick(ticket)
+    }
+
+    private fun updateWalkingAssist(
+        ticket: Long,
+        resultCaptureTimestampNanos: Long? = null,
+        transientFault: WalkingAssistCause? = null,
+    ) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { updateWalkingAssist(ticket, resultCaptureTimestampNanos, transientFault) }
+            return
+        }
+        if (ticket != walkingCameraTicket) return
+        val assistGeneration = walkingAssistTicket
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        val nowMs = SystemClock.elapsedRealtime()
+        val ui = mutableUiState.value
+        val rawModelState = modelStore.state.value
+        val motion = motionTracker.stateAt(nowNanos)
+        val cameraPermissionGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA,
+        ) == PackageManager.PERMISSION_GRANTED
+        val isInvocationReady = rawModelState is VisionModelState.Ready &&
+            modelStore.segmenter.isReady &&
+            modelStore.segmenter.isInvocationReady
+        val transition = walkingAssistStateMachine.update(
+            WalkingAssistInput(
+                sessionGeneration = assistGeneration,
+                sessionActive = running.get(),
+                cameraPermissionGranted = cameraPermissionGranted,
+                cameraReady = ui.cameraStatus == CameraSessionStatus.Running,
+                cameraLost = ui.cameraStatus in setOf(
+                    CameraSessionStatus.CameraUnavailable,
+                    CameraSessionStatus.Error,
+                ),
+                modelReady = isInvocationReady,
+                modelFailed = rawModelState is VisionModelState.Error ||
+                    (rawModelState is VisionModelState.Missing && modelStore.isInitialRestoreCompleted.value),
+                motionSensorsAvailable = motionTracker.sensorsAvailable,
+                motionCalibrated = motion.isCalibrated,
+                motionReliable = motion.isReliable &&
+                    timingTracker.sensorTimestampSource == SensorTimestampSource.REALTIME_VERIFIED,
+                resultCaptureTimestampNanos = resultCaptureTimestampNanos,
+                transientFault = transientFault ?: if (isFrameStalled.get()) {
+                    WalkingAssistCause.PIPELINE_STALLED
+                } else {
+                    null
+                },
+            ),
+            nowMs,
+            nowNanos,
+        )
+        val telemetry = computeTelemetry(ui.cameraStatus == CameraSessionStatus.Running)
+        publishWalkingTransition(assistGeneration, transition, nowNanos, telemetry)
+    }
+
+    private fun publishWalkingTransition(
+        ticket: Long,
+        transition: WalkingAssistTransition,
+        nowNanos: Long,
+        telemetry: VisionComputeTelemetry = computeTelemetry(
+            mutableUiState.value.cameraStatus == CameraSessionStatus.Running,
+        ),
+    ) {
+        if (ticket != walkingAssistTicket) return
+        val announcement = transition.announcement
+        if (announcement == WalkingAssistAnnouncement.LIMITED) {
+            walkingAssistDiagnostics.recordLimited(
+                generation = ticket,
+                frameSequence = lastWalkingFrameSequence.get(),
+                elapsedRealtimeNanos = nowNanos,
+                reason = diagnosticReason(transition.current.cause),
+            )
+        }
+        mutableUiState.update {
+            if (ticket != walkingAssistTicket) it else it.copy(
+                walkingAssistState = transition.current,
+                computeTelemetry = telemetry,
+                walkingDiagnosticEvents = walkingAssistDiagnostics.snapshot(),
+            )
+        }
+        val statusSequence = walkingStatusSequence.incrementAndGet()
+        val frameSequence = lastWalkingFrameSequence.get()
+        synchronized(walkingAnnouncementFrameSequences) {
+            walkingAnnouncementFrameSequences[statusSequence] = frameSequence
+            while (walkingAnnouncementFrameSequences.size > 64) {
+                walkingAnnouncementFrameSequences.remove(walkingAnnouncementFrameSequences.keys.first())
+            }
+        }
+        hazardSpeechBridge.updateWalkingAssistState(
+            ticket,
+            statusSequence,
+            context.getString(WalkingAssistCopy.status(transition.current)),
+            announce = announcement != null,
+            stopped = transition.current.phase == WalkingAssistPhase.STOPPED,
+        )
+        if (announcement != null) {
+            walkingAssistDiagnostics.recordDispatch(ticket, frameSequence, nowNanos)
+            mutableUiState.update { it.copy(walkingDiagnosticEvents = walkingAssistDiagnostics.snapshot()) }
+        }
+    }
+
+    private fun scheduleWalkingAssistTick(ticket: Long) {
+        cancelWalkingAssistTick()
+        val tick = object : Runnable {
+            override fun run() {
+                if (ticket != walkingCameraTicket) return
+                updateWalkingAssist(
+                    ticket,
+                    latestWalkingResultCaptureNanos.get().takeIf { it > 0L },
+                )
+                if (ticket == walkingCameraTicket && walkingAssistStateMachineStateIsNotStopped()) {
+                    walkingAssistTickRunnable = this
+                    mainHandler.postDelayed(this, WALKING_ASSIST_POLL_MS)
+                }
+            }
+        }
+        walkingAssistTickRunnable = tick
+        mainHandler.postDelayed(tick, WALKING_ASSIST_POLL_MS)
+    }
+
+    private fun walkingAssistStateMachineStateIsNotStopped(): Boolean =
+        mutableUiState.value.walkingAssistState.phase != WalkingAssistPhase.STOPPED
+
+    private fun cancelWalkingAssistTick() {
+        walkingAssistTickRunnable?.let(mainHandler::removeCallbacks)
+        walkingAssistTickRunnable = null
+    }
+
+    private fun stopWalkingAssist(cameraTicket: Long, announceStopped: Boolean = true) {
+        if (cameraTicket != walkingCameraTicket) return
+        cancelWalkingAssistTick()
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        val assistGeneration = walkingAssistTicket
+        val transition = walkingAssistStateMachine.stopSession(assistGeneration)
+        // Fence analyzer/TTS callbacks before publishing STOPPED; stop speech itself still runs.
+        walkingAssistDiagnostics.stopSession(assistGeneration)
+        publishWalkingTransition(
+            assistGeneration,
+            if (announceStopped) transition else transition.copy(announcement = null),
+            nowNanos,
+        )
+    }
+
+    internal fun recordWalkingSpeechStart(session: Long, sequence: Long, elapsedRealtimeNanos: Long) {
+        if (session != walkingAssistTicket) return
+        val frameSequence = synchronized(walkingAnnouncementFrameSequences) {
+            walkingAnnouncementFrameSequences[sequence]
+        } ?: 0L
+        walkingAssistDiagnostics.recordSpeechStart(session, frameSequence, elapsedRealtimeNanos)
+        mutableUiState.update { it.copy(walkingDiagnosticEvents = walkingAssistDiagnostics.snapshot()) }
+    }
+
+    private fun computeTelemetry(isCameraRunning: Boolean): VisionComputeTelemetry =
+        modelStore.segmenter.currentComputeTelemetry(
+            isCameraRunning = isCameraRunning,
+            pipelineMode = currentMode,
+            modelState = modelStore.state.value,
+        )
+
+    private fun modelIdentifier(): String = when (val state = modelStore.state.value) {
+        is VisionModelState.Ready -> state.metadata.displayName
+        is VisionModelState.Loading -> state.displayName
+        is VisionModelState.Error -> "unavailable"
+        VisionModelState.Missing -> "missing"
+    }
+
+    private fun diagnosticReason(cause: WalkingAssistCause): WalkingDiagnosticReason = when (cause) {
+        WalkingAssistCause.CAMERA_PERMISSION_REQUIRED -> WalkingDiagnosticReason.PERMISSION_LOST
+        WalkingAssistCause.CAMERA_UNAVAILABLE,
+        WalkingAssistCause.CAMERA_STARTING -> WalkingDiagnosticReason.CAMERA_LOST
+        WalkingAssistCause.MODEL_LOADING,
+        WalkingAssistCause.MODEL_UNAVAILABLE -> WalkingDiagnosticReason.MODEL_UNAVAILABLE
+        WalkingAssistCause.MOTION_UNAVAILABLE -> WalkingDiagnosticReason.MOTION_UNAVAILABLE
+        WalkingAssistCause.MOTION_UNRELIABLE,
+        WalkingAssistCause.CALIBRATION_REQUIRED -> WalkingDiagnosticReason.MOTION_UNRELIABLE
+        WalkingAssistCause.RESULT_STALE -> WalkingDiagnosticReason.NO_FRESH_RESULT
+        WalkingAssistCause.PIPELINE_STALLED -> WalkingDiagnosticReason.PIPELINE_STALLED
+        WalkingAssistCause.PIPELINE_ERROR -> WalkingDiagnosticReason.PIPELINE_ERROR
+        else -> WalkingDiagnosticReason.NO_FRESH_RESULT
+    }
+
+    private fun diagnosticReason(reason: AlertSuppressionReason): WalkingDiagnosticReason = when (reason) {
+        AlertSuppressionReason.DUPLICATE_OR_OUT_OF_ORDER_CAPTURE -> WalkingDiagnosticReason.OUT_OF_ORDER_CAPTURE
+        AlertSuppressionReason.STALE_RESULT -> WalkingDiagnosticReason.STALE_RESULT
+        AlertSuppressionReason.FUTURE_CAPTURE -> WalkingDiagnosticReason.FUTURE_CAPTURE
+        AlertSuppressionReason.INVALID_CAPTURE -> WalkingDiagnosticReason.INVALID_CAPTURE
+        AlertSuppressionReason.COOLDOWN -> WalkingDiagnosticReason.COOLDOWN
+        AlertSuppressionReason.CONFIRMATION_PENDING -> WalkingDiagnosticReason.CONFIRMATION_PENDING
+        AlertSuppressionReason.NOT_A_HAZARD_CANDIDATE -> WalkingDiagnosticReason.NOT_A_HAZARD_CANDIDATE
+        AlertSuppressionReason.SESSION_INACTIVE -> WalkingDiagnosticReason.ALERT_SESSION_INACTIVE
     }
 
     fun setHazardAlertEnabled(enabled: Boolean) {
@@ -532,6 +848,7 @@ class VisionPipelineController(
         isTargetCameraAvailable = true
         modelStore.cancelCameraStabilityGate()
         sessionGeneration.incrementAndGet()
+        val permissionTicket = sessionGeneration.get()
         running.set(false)
         activeLifecycleOwner = null
         activeSurfaceProvider = null
@@ -549,19 +866,25 @@ class VisionPipelineController(
                 latestOverlayBitmap = null,
                 hazardAssessment = HazardAssessment(),
                 motionState = MotionState(),
+                computeTelemetry = VisionComputeTelemetry.INACTIVE,
                 groundContactDistance = GroundContactDistance(),
             )
         }
+        startWalkingAssistSession(permissionTicket)
+        updateWalkingAssist(permissionTicket)
     }
 
     fun reportCameraServiceFailure(detail: String) {
-        stopCamera()
+        stopCamera(announceStopped = false)
         mutableUiState.update {
             it.copy(
                 cameraStatus = CameraSessionStatus.Error,
                 cameraErrorDetail = detail,
             )
         }
+        val failureTicket = sessionGeneration.get()
+        startWalkingAssistSession(failureTicket)
+        updateWalkingAssist(failureTicket)
     }
 
     fun startCamera(
@@ -646,6 +969,8 @@ class VisionPipelineController(
                 groundContactDistance = GroundContactDistance(),
             )
         }
+
+        startWalkingAssistSession(ticket)
 
         scheduleStartupWatchdog(ticket)
         scheduleStreamingWatchdog(ticket)
@@ -1294,6 +1619,7 @@ class VisionPipelineController(
                 latestOverlayBitmap = null,
                 hazardAssessment = HazardAssessment(),
                 motionState = MotionState(),
+                computeTelemetry = VisionComputeTelemetry.INACTIVE,
                 groundContactDistance = GroundContactDistance(),
             )
         }
@@ -1458,6 +1784,24 @@ class VisionPipelineController(
 
             // Query aligned motion state and assess hazard
             val isClockRealtime = timingTracker.sensorTimestampSource == SensorTimestampSource.REALTIME_VERIFIED
+            val diagnosticFrameSequence = if (isClockRealtime && inferenceOutput != null) {
+                walkingAssistDiagnostics.recordCapture(
+                    generation = walkingAssistTicket,
+                    captureTimestampNanos = imageTimestampNanos,
+                    elapsedRealtimeNanos = analyzerEndNanos,
+                    backend = modelStore.segmenter.activeBackendDescription,
+                    model = modelIdentifier(),
+                )
+            } else null
+            if (diagnosticFrameSequence != null) {
+                lastWalkingFrameSequence.set(diagnosticFrameSequence)
+                latestWalkingResultCaptureNanos.set(imageTimestampNanos)
+                walkingAssistDiagnostics.recordDecision(
+                    walkingAssistTicket,
+                    diagnosticFrameSequence,
+                    SystemClock.elapsedRealtimeNanos(),
+                )
+            }
             val motionRaw = motionTracker.stateAt(imageTimestampNanos)
             val motion = if (isClockRealtime) {
                 motionRaw
@@ -1485,7 +1829,17 @@ class VisionPipelineController(
                         classMask = modelStore.segmenter.reusableClassMask,
                         motionState = motion,
                         timestampNanos = imageTimestampNanos,
-                    ).also { alertCoordinator.processAssessment(it, imageTimestampNanos) }
+                    ).also { assessed ->
+                        val decision = alertCoordinator.processAssessment(assessed, imageTimestampNanos)
+                        if (decision is AlertDecision.Suppressed && diagnosticFrameSequence != null) {
+                            walkingAssistDiagnostics.recordSuppression(
+                                walkingAssistTicket,
+                                diagnosticFrameSequence,
+                                SystemClock.elapsedRealtimeNanos(),
+                                diagnosticReason(decision.reason),
+                            )
+                        }
+                    }
                 }
             } else {
                 HazardAssessment(
@@ -1735,7 +2089,7 @@ class VisionPipelineController(
         }
     }
 
-    fun stopCamera() {
+    fun stopCamera(announceStopped: Boolean = true) {
         isBindingInFlight.set(false)
         isRebindInProgress.set(false)
         cancelStartupWatchdog()
@@ -1753,6 +2107,8 @@ class VisionPipelineController(
         isFrameInFlight.set(false)
         isFrameStalled.set(false)
         pendingFrameSnapshot.getAndSet(null)?.invoke(null)
+        val activeWalkingTicket = walkingCameraTicket
+        if (activeWalkingTicket >= 0L) stopWalkingAssist(activeWalkingTicket, announceStopped)
         sessionGeneration.incrementAndGet()
         running.set(false)
         activeLifecycleOwner = null
@@ -1783,6 +2139,7 @@ class VisionPipelineController(
                 latestOverlayBitmap = null,
                 hazardAssessment = HazardAssessment(),
                 motionState = MotionState(),
+                computeTelemetry = VisionComputeTelemetry.INACTIVE,
                 groundContactDistance = GroundContactDistance(),
             )
         }
@@ -2053,7 +2410,12 @@ class VisionPipelineController(
         cancelStreamingWatchdog()
         cancelScheduledRetry()
         cancelPendingRebindWait()
-        stopCamera()
+        stopCamera(announceStopped = false)
+        if (calibrationReceiverRegistered) {
+            runCatching { context.applicationContext.unregisterReceiver(calibrationReceiver) }
+            calibrationReceiverRegistered = false
+        }
+        hazardSpeechBridge.close()
         motionTracker.close()
         alertCoordinator.close()
         groundContactMotionTracker.close()
@@ -2071,6 +2433,7 @@ class VisionPipelineController(
     }
 
     companion object {
+        private const val WALKING_ASSIST_POLL_MS = 100L
         private const val METRICS_PUBLISH_INTERVAL_NANOS = 250_000_000L
         internal const val STARTUP_TIMEOUT_MS = 10_000L
         internal const val STREAMING_STALL_TIMEOUT_MS = 5_000L

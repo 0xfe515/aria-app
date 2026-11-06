@@ -38,6 +38,7 @@ class HazardAlertPolicyTest {
         val capture1 = (mockClockMs - 100L) * 1_000_000L
         val d1 = policy.evaluate(assessment(capture1, HazardLevel.NEAR_PATH_HAZARD), mockClockMs, mockClockMs * 1_000_000L)
         assertTrue("Frame 1 should be suppressed (waiting for confirmation)", d1 is AlertDecision.Suppressed)
+        assertEquals(AlertSuppressionReason.CONFIRMATION_PENDING, (d1 as AlertDecision.Suppressed).reason)
 
         // Advance clock by 100ms to 10,100ms
         mockClockMs += 100L
@@ -69,6 +70,35 @@ class HazardAlertPolicyTest {
     }
 
     @Test
+    fun confirmationResetsWhenCaptureGapExceeds500Milliseconds() {
+        val firstCapture = (mockClockMs - 50L) * 1_000_000L
+        val first = policy.evaluate(
+            assessment(firstCapture, HazardLevel.PATH_BLOCKED),
+            mockClockMs,
+            mockClockMs * 1_000_000L,
+        )
+        assertTrue(first is AlertDecision.Suppressed)
+
+        mockClockMs += 600L
+        val afterGapCapture = (mockClockMs - 50L) * 1_000_000L
+        val afterGap = policy.evaluate(
+            assessment(afterGapCapture, HazardLevel.PATH_BLOCKED),
+            mockClockMs,
+            mockClockMs * 1_000_000L,
+        )
+        assertTrue("A long capture gap starts a new confirmation run", afterGap is AlertDecision.Suppressed)
+
+        mockClockMs += 100L
+        val confirmedCapture = (mockClockMs - 50L) * 1_000_000L
+        val confirmed = policy.evaluate(
+            assessment(confirmedCapture, HazardLevel.PATH_BLOCKED),
+            mockClockMs,
+            mockClockMs * 1_000_000L,
+        )
+        assertTrue("Two new consecutive frames confirm after the gap", confirmed is AlertDecision.Fire)
+    }
+
+    @Test
     fun cooldown_suppressesRepeatsWithinCooldownAndAllowsAfter() {
         // Confirm and fire first alert
         var capture = (mockClockMs - 50L) * 1_000_000L
@@ -87,6 +117,11 @@ class HazardAlertPolicyTest {
 
         // Advance past cooldown (2,600ms later)
         mockClockMs += 2_600L
+        capture = (mockClockMs - 50L) * 1_000_000L
+        val postCooldownPending = policy.evaluate(assessment(capture, HazardLevel.PATH_BLOCKED), mockClockMs, mockClockMs * 1_000_000L)
+        assertTrue("A capture gap over 500ms requires fresh confirmation", postCooldownPending is AlertDecision.Suppressed)
+
+        mockClockMs += 100L
         capture = (mockClockMs - 50L) * 1_000_000L
         val postCooldown = policy.evaluate(assessment(capture, HazardLevel.PATH_BLOCKED), mockClockMs, mockClockMs * 1_000_000L)
         assertTrue("After cooldown elapses, alert should FIRE", postCooldown is AlertDecision.Fire)

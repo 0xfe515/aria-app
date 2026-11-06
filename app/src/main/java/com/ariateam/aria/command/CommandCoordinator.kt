@@ -85,7 +85,7 @@ data class CommandSnapshot(
     }
 }
 
-class CommandCoordinator(
+class CommandCoordinator internal constructor(
     private val context: Context?,
     private val update: (CommandSnapshot) -> Unit,
     private val soundChanged: (Boolean) -> Unit,
@@ -102,6 +102,7 @@ class CommandCoordinator(
     private val clockElapsedNanos: () -> Long = {
         try { SystemClock.elapsedRealtimeNanos() } catch (_: Throwable) { System.nanoTime() }
     },
+    speechOverride: CommandSpeech? = null,
 ) : AutoCloseable {
     private val main: Handler? = try { Handler(Looper.getMainLooper()) } catch (_: Throwable) { null }
     private val preferences = preferencesOverride ?: context?.getSharedPreferences("voice_settings", Context.MODE_PRIVATE)
@@ -117,7 +118,11 @@ class CommandCoordinator(
     private var awaiting = false
     private var stopPending = false
     private val stopDeadline = Runnable { finishStop() }
-    private val speech = CommandSpeech(context, suppress) { emit(snapshot) }
+    private val speech = speechOverride ?: CommandSpeech(
+        context = context,
+        suppress = suppress,
+        changed = { emit(snapshot) },
+    )
     var snapshot = CommandSnapshot(audible = preferences?.getBoolean("audible", true) ?: true)
         private set
 
@@ -126,6 +131,13 @@ class CommandCoordinator(
     private var lastHazardSequence: Long = 0L
     private var lastHazardMessage: String = ""
     private var lastHazardTimestamp: Long = 0L
+    private var walkingSession: Long = 0L
+    private var walkingSequence: Long = 0L
+    private var walkingStatusTimestampNanos: Long = 0L
+    private var walkingStatus: String = "보행 보조 상태를 아직 받지 못했어요."
+    private var walkingStopped = false
+    private var pendingCalibrationRequestId = 0L
+    private var calibrationTimeout: Runnable? = null
 
     init {
         try {
@@ -252,8 +264,10 @@ class CommandCoordinator(
                 commandContext = CommandContext("sound", clockRealtimeMs() + 30_000)
                 announce(if (enabled) "안내 소리를 켰어요." else "안내 소리를 껐어요.")
             }
-            AppCommand.Status -> announce("음성 명령 대기 중이에요. 안내 소리는 ${if (snapshot.audible) "켜져" else "꺼져"} 있어요.")
-            AppCommand.Help -> announce("홈으로 가, 설정 열어, 네이버 지도 또는 카카오맵으로 길안내, 안내 소리 켜 또는 꺼, 화면 숨겨 또는 보여줘, 현재 상태, 취소, 듣기 중지를 말할 수 있어요.")
+            AppCommand.Status -> announce("음성 명령 대기 중이에요. 안내 소리는 ${if (snapshot.audible) "켜져" else "꺼져"} 있어요. ${currentWalkingStatus()}")
+            AppCommand.WalkingStatus -> announce(currentWalkingStatus())
+            AppCommand.ForwardCalibration -> requestForwardCalibration(generateEventId())
+            AppCommand.Help -> announce("홈으로 가, 설정 열어, 네이버 지도 또는 카카오맵으로 길안내, 안내 소리 켜 또는 꺼, 화면 숨겨 또는 보여줘, 현재 상태, 보행 상태, 정면 보정, 취소, 전체 중지를 말할 수 있어요.")
             AppCommand.Cancel -> {
                 commandContext = CommandContext()
                 clearNavigation()
@@ -293,12 +307,12 @@ class CommandCoordinator(
         stopListening()
     }
 
-    private fun announce(message: String, done: () -> Unit = {}) {
+    private fun announce(message: String, started: (() -> Unit)? = null, done: () -> Unit = {}) {
         val nextEventId = generateEventId()
         emit(snapshot.copy(message = message, eventId = nextEventId, processing = false))
         vibrate()
         if (!visible) notifyResult(message)
-        if (snapshot.audible) speech.speak(message, done) else { speech.stop(); done() }
+        if (snapshot.audible) speech.speak(message, SpeechPriority.NormalCommand, started = started, done = done) else { speech.stop(); done() }
     }
 
     private fun navigate(destination: String) {
@@ -480,7 +494,11 @@ class CommandCoordinator(
         lastHazardMessage = message
         lastHazardTimestamp = now
 
-        // 3. Preempt cloud speech
+        // A hazard invalidates the in-flight question as well as its utterance; late Gemini
+        // callbacks then fail the existing question-id check and cannot resume speech.
+        clearCloudQuestion()
+
+        // 3. Preempt cloud and ordinary speech
         speech.preemptSpeech(SpeechPriority.HazardWarning)
 
         // 4. Mute / Vibration behavior
@@ -492,6 +510,90 @@ class CommandCoordinator(
         } else {
             speech.stop()
         }
+    }
+
+    fun updateWalkingAssistState(
+        session: Long,
+        sequence: Long,
+        timestampNanos: Long,
+        status: String,
+        shouldAnnounce: Boolean,
+        stopped: Boolean,
+    ) {
+        if (!active || session <= 0L || sequence <= 0L || status.isBlank()) return
+        val nowNanos = clockElapsedNanos()
+        if (timestampNanos <= 0L || timestampNanos > nowNanos + 500_000_000L ||
+            nowNanos - timestampNanos > WALKING_STATUS_FRESHNESS_NANOS
+        ) return
+        if (session < walkingSession || (session == walkingSession && sequence <= walkingSequence)) return
+        walkingSession = session
+        walkingSequence = sequence
+        walkingStatusTimestampNanos = timestampNanos
+        walkingStatus = status
+        walkingStopped = stopped
+        if (shouldAnnounce) announce(status, started = {
+            val ctx = context ?: return@announce
+            runCatching {
+                ctx.sendBroadcast(
+                    Intent(ACTION_WALKING_SPEECH_STARTED)
+                        .setPackage(ctx.packageName)
+                        .putExtra(EXTRA_WALKING_SESSION, session)
+                        .putExtra(EXTRA_WALKING_SEQUENCE, sequence)
+                        .putExtra(EXTRA_WALKING_SPEECH_STARTED_NANOS, clockElapsedNanos()),
+                )
+            }
+        })
+    }
+
+    private fun currentWalkingStatus(): String {
+        val age = clockElapsedNanos() - walkingStatusTimestampNanos
+        return if (!walkingStopped && (walkingStatusTimestampNanos == 0L || age < 0L || age > WALKING_STATUS_FRESHNESS_NANOS)) {
+            "보행 보조 상태를 확인할 수 없어요. 카메라, 모델, 움직임 센서 상태를 확인해 주세요."
+        } else walkingStatus
+    }
+
+    fun requestForwardCalibration(requestId: Long) {
+        if (!active || requestId <= 0L) return
+        calibrationTimeout?.let { main?.removeCallbacks(it) }
+        pendingCalibrationRequestId = requestId
+        val timeout = Runnable {
+            if (pendingCalibrationRequestId == requestId) {
+                completeForwardCalibration(requestId, successful = false)
+            }
+        }
+        calibrationTimeout = timeout
+        main?.postDelayed(timeout, FORWARD_CALIBRATION_TIMEOUT_MS)
+        val ctx = context
+        val sent = if (ctx != null) {
+            runCatching {
+                ctx.sendBroadcast(
+                    Intent(ACTION_FORWARD_CALIBRATION)
+                        .setPackage(ctx.packageName)
+                        .putExtra(EXTRA_CALIBRATION_REQUEST_ID, requestId),
+                )
+                true
+            }.getOrDefault(false)
+        } else false
+        if (sent) announce("정면 보정을 시도합니다.")
+        else completeForwardCalibration(requestId, successful = false)
+    }
+
+    fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {
+        completeForwardCalibration(requestId, successful)
+    }
+
+    private fun completeForwardCalibration(requestId: Long, successful: Boolean) {
+        if (!active || requestId <= 0L || requestId != pendingCalibrationRequestId) return
+        pendingCalibrationRequestId = 0L
+        calibrationTimeout?.let { main?.removeCallbacks(it) }
+        calibrationTimeout = null
+        val message = if (successful) {
+            context?.getString(R.string.walking_forward_calibration_succeeded) ?: "정면 보정이 완료되었습니다."
+        } else {
+            context?.getString(R.string.walking_forward_calibration_failed)
+                ?: "정면 보정을 완료하지 못했습니다. 자세를 안정시키고 다시 시도해 주세요."
+        }
+        announce(message)
     }
 
     fun speakHazardWarning(message: String) {
@@ -557,6 +659,9 @@ class CommandCoordinator(
     fun stopped() {
         stopPending = false
         main?.removeCallbacks(stopDeadline)
+        calibrationTimeout?.let { main?.removeCallbacks(it) }
+        calibrationTimeout = null
+        pendingCalibrationRequestId = 0L
         active = false
         invalidate()
         speech.stop()
@@ -572,6 +677,14 @@ class CommandCoordinator(
     }
 
     companion object {
+        const val ACTION_FORWARD_CALIBRATION = "com.ariateam.aria.action.FORWARD_CALIBRATION"
+        const val EXTRA_CALIBRATION_REQUEST_ID = "calibrationRequestId"
+        const val ACTION_WALKING_SPEECH_STARTED = "com.ariateam.aria.action.WALKING_SPEECH_STARTED"
+        const val EXTRA_WALKING_SESSION = "walkingSession"
+        const val EXTRA_WALKING_SEQUENCE = "walkingSequence"
+        const val EXTRA_WALKING_SPEECH_STARTED_NANOS = "walkingSpeechStartedNanos"
+        private const val WALKING_STATUS_FRESHNESS_NANOS = 2_000_000_000L
+        private const val FORWARD_CALIBRATION_TIMEOUT_MS = 5_000L
         private const val CHANNEL = "aria_commands"
         private const val NAVIGATION_NOTIFICATION = 12
         private const val EXTERNAL_NAVIGATION_NOTIFICATION = 13

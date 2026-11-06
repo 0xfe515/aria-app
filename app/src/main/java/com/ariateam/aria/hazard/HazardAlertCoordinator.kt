@@ -10,6 +10,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 import android.widget.Toast
+import com.ariateam.aria.R
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -96,24 +97,30 @@ class HazardAlertCoordinator(
         }
     }
 
-    fun processAssessment(assessment: HazardAssessment, captureTimestampNanos: Long = assessment.timestampNanos) {
+    fun processAssessment(
+        assessment: HazardAssessment,
+        captureTimestampNanos: Long = assessment.timestampNanos,
+    ): AlertDecision {
         var eventToDispatch: HazardAlertEvent? = null
         var sinkToDispatch: HazardAlertSink? = null
+        var decisionResult: AlertDecision = AlertDecision.Suppressed(AlertSuppressionReason.SESSION_INACTIVE)
 
         synchronized(lock) {
             if (!isSessionActive || !isEnabled) {
                 policy.reset()
-                return
+                return AlertDecision.Suppressed(AlertSuppressionReason.SESSION_INACTIVE)
             }
             if (captureTimestampNanos < sessionStartElapsedNanos) {
                 // Reject late or crossed-session frames older than session start
-                return
+                return AlertDecision.Suppressed(AlertSuppressionReason.DUPLICATE_OR_OUT_OF_ORDER_CAPTURE)
             }
             val ticket = generation.get()
             val nowElapsedNanos = clockNanos()
             val nowRealtime = nowElapsedNanos / 1_000_000L
 
-            when (val decision = policy.evaluate(assessment, nowRealtime, nowElapsedNanos)) {
+            val decision = policy.evaluate(assessment, nowRealtime, nowElapsedNanos)
+            decisionResult = decision
+            when (decision) {
                 is AlertDecision.Fire -> {
                     val staleExpiryNanos = policy.staleResultExpiryMs * 1_000_000L
                     val isFresh = (nowElapsedNanos - captureTimestampNanos) <= staleExpiryNanos
@@ -125,7 +132,15 @@ class HazardAlertCoordinator(
                             session = ticket,
                             sequence = seq,
                             timestampNanos = captureTimestampNanos,
-                            message = decision.assessment.messageKorean,
+                            message = context?.let { appContext ->
+                                val messageRes = when (decision.assessment.level) {
+                                    HazardLevel.NEAR_PATH_HAZARD -> R.string.walking_hazard_near
+                                    HazardLevel.PATH_BLOCKED -> R.string.walking_hazard_blocked
+                                    else -> 0
+                                }
+                                if (messageRes != 0) appContext.getString(messageRes)
+                                else decision.assessment.messageKorean
+                            } ?: decision.assessment.messageKorean,
                             level = decision.assessment.level,
                         )
                         sinkToDispatch = this.alertSink ?: sharedAlertSink
@@ -145,6 +160,7 @@ class HazardAlertCoordinator(
                 runCatching { Log.e(TAG, "Exception in HazardAlertSink", t) }
             }
         }
+        return decisionResult
     }
 
     private fun fireAlertLocked(assessment: HazardAssessment, ticket: Long, captureTimestampNanos: Long) {

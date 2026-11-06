@@ -434,6 +434,24 @@ class LiteRtVisionSegmenter internal constructor(
             }
         }
 
+        internal fun computeTelemetry(): VisionComputeTelemetry {
+            if (isClosed) return VisionComputeTelemetry.INACTIVE
+            val invocationReady = isInvocationReady
+            return VisionComputeTelemetry.build(
+                isCameraRunning = true,
+                pipelineMode = VisionPipelineMode.PREPROCESS_OR_INFERENCE,
+                isModelReady = invocationReady,
+                modelStateDescription = if (invocationReady) "모델 준비 완료" else "모델 워밍업 대기",
+                configuredBackend = backendType,
+                configuredCpuThreads = cpuThreads,
+                activeBackend = backendType.takeIf { invocationReady },
+                activeBackendDescription = backendDescription,
+                isInvocationReady = invocationReady,
+                gpuFallbackCause = gpuFallbackCause,
+                npuFallbackCause = npuFallbackCause,
+            )
+        }
+
         fun warmup() {
             if (isInvocationReady || closed.get()) return
             val input = ByteBuffer.allocateDirect(VisionContract.INPUT_BYTES).order(ByteOrder.nativeOrder())
@@ -541,6 +559,39 @@ class LiteRtVisionSegmenter internal constructor(
     val isInvocationReady: Boolean
         get() = synchronized(lock) { activeSession?.isInvocationReady == true }
 
+    internal fun currentSessionSnapshot(): VisionSessionSnapshot = synchronized(lock) {
+        val session = activeSession?.takeUnless { it.isClosed }
+        VisionSessionSnapshot(
+            configuredBackend = configuredBackend,
+            configuredCpuThreads = configuredCpuThreads,
+            activeBackendType = session?.backendType,
+            activeBackendDescription = session?.backendDescription ?: "N/A (모델 미적용)",
+            isInvocationReady = session?.isInvocationReady == true,
+            gpuFallbackCause = session?.gpuFallbackCause,
+            npuFallbackCause = session?.npuFallbackCause,
+        )
+    }
+
+    internal fun currentComputeTelemetry(
+        isCameraRunning: Boolean,
+        pipelineMode: VisionPipelineMode,
+        modelState: VisionModelState,
+    ): VisionComputeTelemetry {
+        val snapshot = currentSessionSnapshot()
+        return VisionComputeTelemetry.build(
+            isCameraRunning = isCameraRunning,
+            pipelineMode = pipelineMode,
+            modelState = modelState,
+            configuredBackend = snapshot.configuredBackend,
+            configuredCpuThreads = snapshot.configuredCpuThreads,
+            activeBackend = snapshot.activeBackendType,
+            activeBackendDescription = snapshot.activeBackendDescription,
+            isInvocationReady = snapshot.isInvocationReady,
+            gpuFallbackCause = snapshot.gpuFallbackCause,
+            npuFallbackCause = snapshot.npuFallbackCause,
+        )
+    }
+
     private val outputByteBuffer: ByteBuffer by lazy {
         ByteBuffer.allocateDirect(VisionContract.OUTPUT_BYTES).order(ByteOrder.nativeOrder())
     }
@@ -560,6 +611,7 @@ class LiteRtVisionSegmenter internal constructor(
     val reusableOverlayArgb: IntArray by lazy {
         IntArray(VisionContract.INPUT_PIXELS)
     }
+    private val overlayComponentFilter = OverlayComponentFilter()
 
     class PreparedModelSession internal constructor(
         internal val mappedBuffer: MappedByteBuffer,
@@ -1081,7 +1133,7 @@ class LiteRtVisionSegmenter internal constructor(
                 val invokeDurationNanos = (monotonicClockNanos() - invokeStart).coerceAtLeast(0L)
 
                 val postStart = monotonicClockNanos()
-                val summary = decodeArgmaxAndMask(
+                val summary = decodeArgmaxAndMaskInternal(
                     probabilities = outFloats,
                     outClassMask = reusableClassMask,
                     outOverlayArgb = if (produceOverlayBitmap) reusableOverlayArgb else null,
@@ -1092,6 +1144,7 @@ class LiteRtVisionSegmenter internal constructor(
                     transform = transform,
                     modelWidth = VisionContract.MODEL_INPUT_WIDTH,
                     modelHeight = VisionContract.MODEL_INPUT_HEIGHT,
+                    overlayComponentFilter = overlayComponentFilter,
                 )
                 val bitmap = if (produceOverlayBitmap) {
                     bitmapFactory.create(reusableOverlayArgb, VisionContract.MODEL_WIDTH, VisionContract.MODEL_HEIGHT)
@@ -1338,6 +1391,34 @@ class LiteRtVisionSegmenter internal constructor(
             transform: UprightCropRect? = null,
             modelWidth: Int = width,
             modelHeight: Int = height,
+        ): VisionSegmentationSummary = decodeArgmaxAndMaskInternal(
+            probabilities = probabilities,
+            outClassMask = outClassMask,
+            outOverlayArgb = outOverlayArgb,
+            width = width,
+            height = height,
+            numClasses = numClasses,
+            roiStartRow = roiStartRow,
+            transform = transform,
+            modelWidth = modelWidth,
+            modelHeight = modelHeight,
+            overlayComponentFilter = OverlayComponentFilter(),
+            minimumOverlayComponentPixels = OverlayComponentFilter.DEFAULT_MINIMUM_COMPONENT_PIXELS,
+        )
+
+        internal fun decodeArgmaxAndMaskInternal(
+            probabilities: FloatArray,
+            outClassMask: ByteArray,
+            outOverlayArgb: IntArray?,
+            width: Int,
+            height: Int,
+            numClasses: Int,
+            roiStartRow: Int,
+            transform: UprightCropRect?,
+            modelWidth: Int,
+            modelHeight: Int,
+            overlayComponentFilter: OverlayComponentFilter,
+            minimumOverlayComponentPixels: Int = OverlayComponentFilter.DEFAULT_MINIMUM_COMPONENT_PIXELS,
         ): VisionSegmentationSummary {
             require(width > 0 && height > 0 && modelWidth > 0 && modelHeight > 0 && numClasses > 0) {
                 "Dimensions must be positive: width=$width, height=$height, modelWidth=$modelWidth, modelHeight=$modelHeight, numClasses=$numClasses"
@@ -1507,6 +1588,16 @@ class LiteRtVisionSegmenter internal constructor(
                         pixelIndex++
                     }
                 }
+            }
+
+            if (outOverlayArgb != null) {
+                overlayComponentFilter.suppressSmallComponents(
+                    classMask = outClassMask,
+                    overlayArgb = outOverlayArgb,
+                    width = width,
+                    height = height,
+                    minimumComponentPixels = minimumOverlayComponentPixels,
+                )
             }
 
             var dominantCenterNonWalkable = 0

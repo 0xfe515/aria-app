@@ -1,11 +1,6 @@
 package com.ariateam.aria.command
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import java.util.Locale
 
 enum class SpeechPriority(val rank: Int) {
     CloudResponse(0),
@@ -13,120 +8,152 @@ enum class SpeechPriority(val rank: Int) {
     HazardWarning(2),
 }
 
-/** Owns playback exclusion. All callbacks and lifecycle calls are serialized on main. */
-class CommandSpeech(
-    context: Context?,
+/** Owns playback exclusion. All callbacks and lifecycle calls are serialized on the scheduler. */
+internal class CommandSpeech(
+    context: Context? = null,
     private val suppress: (Boolean) -> Unit,
-    private val changed: () -> Unit = {}
+    private val changed: () -> Unit = {},
+    engine: CommandSpeechPlaybackEngine? = null,
+    private val scheduler: CommandSpeechScheduler = HandlerSpeechScheduler(),
 ) : AutoCloseable {
-    private val main: Handler? = try { Handler(Looper.getMainLooper()) } catch (_: Throwable) { null }
-    private var ready = false
+    private data class PendingSpeech(
+        val text: String,
+        val priority: SpeechPriority,
+        val done: () -> Unit,
+        val started: (() -> Unit)?,
+        val token: Long,
+    )
+
+    private var initialized = false
     private var token = 0L
     private var closed = false
     private var completion: (() -> Unit)? = null
-    private var pending: Pair<String, () -> Unit>? = null
-    private var pendingPriority: SpeechPriority = SpeechPriority.NormalCommand
-    private var initialized = false
+    private var speechStarted: (() -> Unit)? = null
+    private var pending: PendingSpeech? = null
+    private var pendingTimeout: Runnable? = null
+    private var safetyTimeout: Runnable? = null
+    private var drainCallback: Runnable? = null
+    private val playback: CommandSpeechPlaybackEngine
     var available = false
         private set
     var currentPriority: SpeechPriority? = null
         private set
-    private var tts: TextToSpeech? = null
-    private val safety = Runnable { finish(token) }
 
     init {
-        if (context != null) {
-            try {
-                tts = TextToSpeech(context) { status ->
-                    main?.post {
-                        if (closed) return@post
-                        initialized = true
-                        ready = status == TextToSpeech.SUCCESS
-                        refreshVoice()
-                        val waiting = pending
-                        val waitingPri = pendingPriority
-                        pending = null
-                        if (waiting != null) speak(waiting.first, waitingPri, waiting.second)
-                    }
-                }
-                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String) = Unit
-                    override fun onDone(utteranceId: String) { main?.post { finish(utteranceId.toLongOrNull() ?: -1) } }
-                    @Deprecated("Legacy callback")
-                    override fun onError(utteranceId: String) { main?.post { finish(utteranceId.toLongOrNull() ?: -1) } }
-                })
-            } catch (_: Throwable) {
-                ready = false
-                available = false
+        playback = engine ?: AndroidSpeechPlaybackEngine(context, ::onEngineInitialized)
+        playback.setUtteranceListener(object : CommandSpeechPlaybackEngine.UtteranceListener {
+            override fun onDone(utteranceId: String) {
+                scheduler.post(Runnable { finish(utteranceId) })
             }
+
+            override fun onStart(utteranceId: String) {
+                scheduler.post(Runnable {
+                    if (utteranceId == token.toString() && completion != null) {
+                        val callback = speechStarted
+                        speechStarted = null
+                        callback?.invoke()
+                    }
+                })
+            }
+
+            override fun onError(utteranceId: String) {
+                scheduler.post(Runnable { finish(utteranceId) })
+            }
+        })
+        if (engine != null) {
+            initialized = playback.isReady
+            refreshVoice()
         }
+    }
+
+    private fun onEngineInitialized(success: Boolean) {
+        scheduler.post(Runnable {
+            if (closed) return@Runnable
+            initialized = true
+            refreshVoice()
+            val waiting = pending
+            pending = null
+            pendingTimeout?.let(scheduler::removeCallbacks)
+            pendingTimeout = null
+            if (waiting != null) speak(waiting.text, waiting.priority, started = waiting.started, done = waiting.done)
+        })
     }
 
     private fun refreshVoice() {
         val wasAvailable = available
-        available = runCatching {
-            val localTts = tts ?: return@runCatching false
-            if (!ready || localTts.setLanguage(Locale.KOREAN) < 0) false
-            else {
-                val voice = localTts.voices?.firstOrNull {
-                    it.locale.language == "ko" && !it.isNetworkConnectionRequired
-                }
-                voice != null && localTts.setVoice(voice) == TextToSpeech.SUCCESS
-            }
-        }.getOrDefault(false)
+        available = playback.isReady && playback.refreshVoice()
         if (wasAvailable != available) changed()
     }
 
-    fun speak(text: String, done: () -> Unit) = speak(text, SpeechPriority.NormalCommand, done)
+    fun speak(text: String, done: () -> Unit) = speak(text, SpeechPriority.NormalCommand, done = done)
 
-    fun speak(text: String, priority: SpeechPriority = SpeechPriority.NormalCommand, done: () -> Unit = {}) {
-        val activePri = currentPriority
-        if (activePri != null && priority.rank < activePri.rank) {
+    fun speak(
+        text: String,
+        priority: SpeechPriority = SpeechPriority.NormalCommand,
+        started: (() -> Unit)? = null,
+        done: () -> Unit = {},
+    ) {
+        val activePriority = currentPriority
+        if (activePriority != null && priority.rank < activePriority.rank) {
             done()
             return
         }
         stop(unsuppress = false)
-        currentPriority = priority
         if (closed) {
-            currentPriority = null
-            return
-        }
-        if (!initialized) {
-            pending = text to done
-            pendingPriority = priority
-            // Do not leave microphone suppression dependent on a TTS initialization callback.
-            val pendingToken = token
-            main?.postDelayed({
-                if (pendingToken != token || closed) return@postDelayed
-                val waiting = pending
-                pending = null
-                currentPriority = null
-                waiting?.second?.invoke()
-            }, 5_000)
-            return
-        }
-        refreshVoice()
-        if (!available || tts == null) {
-            currentPriority = null
             done()
             return
         }
+        currentPriority = priority
+        if (!initialized) {
+            val pendingToken = token
+            pending = PendingSpeech(text, priority, done, started, pendingToken)
+            val timeout = Runnable {
+                if (pending?.token != pendingToken || closed) return@Runnable
+                pending = null
+                pendingTimeout = null
+                currentPriority = null
+                done()
+            }
+            pendingTimeout = timeout
+            scheduler.postDelayed(timeout, INITIALIZATION_TIMEOUT_MILLIS)
+            return
+        }
+        refreshVoice()
+        if (!available) {
+            currentPriority = null
+            suppress(false)
+            done()
+            return
+        }
+
         completion = done
+        speechStarted = started
         suppress(true)
-        val id = token
-        main?.postDelayed(safety, 20_000)
-        if (tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id.toString()) == TextToSpeech.ERROR) finish(id)
+        val utteranceId = token.toString()
+        val timeout = Runnable { finish(utteranceId) }
+        safetyTimeout = timeout
+        scheduler.postDelayed(timeout, SAFETY_TIMEOUT_MILLIS)
+        if (playback.speak(text, utteranceId) == CommandSpeechPlaybackEngine.ERROR) finish(utteranceId)
     }
 
-    private fun finish(id: Long) {
-        if (id != token || completion == null || closed) return
-        main?.removeCallbacks(safety)
+    private fun finish(utteranceId: String) {
+        if (utteranceId != token.toString() || completion == null || closed) return
+        safetyTimeout?.let(scheduler::removeCallbacks)
+        safetyTimeout = null
         val done = completion
         completion = null
+        speechStarted = null
         currentPriority = null
-        // Stop even on timeout, then drain the microphone before reopening recognition.
-        tts?.stop()
-        main?.postDelayed({ if (id == token && !closed) { suppress(false); done?.invoke() } }, 500)
+        playback.stop()
+        val drain = Runnable {
+            if (utteranceId == token.toString() && !closed) {
+                drainCallback = null
+                suppress(false)
+                done?.invoke()
+            }
+        }
+        drainCallback = drain
+        scheduler.postDelayed(drain, DRAIN_DELAY_MILLIS)
     }
 
     fun stop(unsuppress: Boolean = true) {
@@ -134,27 +161,34 @@ class CommandSpeech(
         pending = null
         completion = null
         currentPriority = null
-        main?.removeCallbacks(safety)
-        tts?.stop()
+        listOfNotNull(pendingTimeout, safetyTimeout, drainCallback).forEach(scheduler::removeCallbacks)
+        pendingTimeout = null
+        safetyTimeout = null
+        drainCallback = null
+        playback.stop()
         if (unsuppress) suppress(false)
     }
 
     fun preemptCloudSpeech() {
-        if (currentPriority == SpeechPriority.CloudResponse) {
-            stop()
-        }
+        if (currentPriority == SpeechPriority.CloudResponse) stop()
     }
 
     fun preemptSpeech(minPriority: SpeechPriority = SpeechPriority.HazardWarning) {
-        val activePri = currentPriority
-        if (activePri != null && activePri.rank < minPriority.rank) {
-            stop()
-        }
+        val activePriority = currentPriority
+        if (activePriority != null && activePriority.rank < minPriority.rank) stop()
     }
 
     override fun close() {
+        if (closed) return
         stop()
         closed = true
-        tts?.shutdown()
+        playback.setUtteranceListener(null)
+        playback.shutdown()
+    }
+
+    private companion object {
+        const val INITIALIZATION_TIMEOUT_MILLIS = 5_000L
+        const val SAFETY_TIMEOUT_MILLIS = 20_000L
+        const val DRAIN_DELAY_MILLIS = 500L
     }
 }

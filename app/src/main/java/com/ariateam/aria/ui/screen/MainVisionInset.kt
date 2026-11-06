@@ -130,6 +130,21 @@ fun computeMainVisionStatus(
     return MainVisionStatus.Stopped
 }
 
+fun computeMainVisionGuidance(
+    status: MainVisionStatus,
+    requiresExplicitRestart: Boolean,
+    isActionableSetupHint: Boolean,
+): String = when {
+    status == MainVisionStatus.PermissionDenied ->
+        "카메라 권한을 허용해야 비전 모니터링이 시작됩니다."
+    requiresExplicitRestart ->
+        "설정 또는 진단 화면에서 카메라를 다시 시작할 수 있습니다."
+    isActionableSetupHint ->
+        "설정에서 키와 착용 위치를 등록할 수 있습니다."
+    else ->
+        "설정 또는 진단 화면에서 카메라를 시작할 수 있습니다."
+}
+
 fun formatCadenceOrLatency(timing: VisionTimingSnapshot): String? {
     val fps = timing.steadyProcessedFps
     val latencyMs = timing.totalAnalyzerMs?.p50Ms ?: timing.modelInvokeMs?.p50Ms
@@ -683,16 +698,11 @@ fun MainVisionInset(
                         modifier = Modifier.testTag("mainVisionInactiveHeadingStatus"),
                     )
                     Spacer(modifier = Modifier.height(6.dp))
-                    val guidance = when {
-                        status == MainVisionStatus.PermissionDenied ->
-                            "카메라 권한을 허용해야 비전 모니터링이 시작됩니다."
-                        requiresExplicitRestart ->
-                            "음성 명령 또는 설정에서 다시 시작할 수 있습니다."
-                        presentation.isActionableSetupHint ->
-                            "설정에서 키와 착용 위치를 등록할 수 있습니다."
-                        else ->
-                            "음성 명령으로 활성화할 수 있습니다."
-                    }
+                    val guidance = computeMainVisionGuidance(
+                        status = status,
+                        requiresExplicitRestart = requiresExplicitRestart,
+                        isActionableSetupHint = presentation.isActionableSetupHint,
+                    )
                     Text(
                         text = guidance,
                         color = AriaSlate.copy(alpha = 0.85f),

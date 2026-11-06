@@ -20,9 +20,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
-class VoiceViewModel(application: Application) : AndroidViewModel(application) {
-    private val context = application.applicationContext
-    private val main = Handler(Looper.getMainLooper())
+class VoiceViewModel internal constructor(
+    application: Application,
+    contextOverride: Context?,
+    mainOverride: Handler?,
+    bindImmediately: Boolean,
+) : AndroidViewModel(application) {
+    constructor(application: Application) : this(application, null, null, true)
+
+    private val context = contextOverride ?: application.applicationContext
+    private val main = mainOverride ?: Handler(Looper.getMainLooper())
     private val mutableAudible = MutableStateFlow(true)
     val audibleFeedback = mutableAudible.asStateFlow()
     private val feedback = VoiceFeedback(context).apply { audibleEnabled = mutableAudible.value }
@@ -36,6 +43,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private var bound = false
     private var processDied = false
     private var startPending = false
+    private var userStopRequested = false
     private var cleared = false
     private val receiver = VoiceStateReceiver()
     private val callback = object : IVoiceCallback.Stub() {
@@ -48,6 +56,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun acceptState(incoming: VoiceState, revision: Long, source: String) {
         if (cleared || processDied) return
+        if (userStopRequested && incoming.phase != VoicePhase.Stopped) return
         if (startPending && incoming.phase == VoicePhase.Stopped) return
         if (!receiver.accept(revision)) return
         if (incoming.phase != VoicePhase.Initializing) {
@@ -79,6 +88,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
+            if (cleared) return
             Log.i(TAG, "Voice service connected; restoring UI state")
             processDied = false
             receiver.reconnect()
@@ -95,7 +105,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         override fun onNullBinding(name: ComponentName) { handleDeath(); unbind() }
     }
 
-    init { bind() }
+    init { if (bindImmediately) bind() }
 
     private fun bind() {
         if (!bound) bound = context.bindService(Intent(context, VoiceService::class.java), connection, Context.BIND_AUTO_CREATE)
@@ -120,6 +130,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private fun start(action: String) {
         if (mutableState.value.phase == VoicePhase.Stopping) return
         processDied = false
+        userStopRequested = false
         receiver.clearFailure()
         startPending = true
         mutableState.update { it.copy(phase = VoicePhase.Initializing, errorCode = VoiceError.NONE) }
@@ -166,6 +177,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stop() {
         startPending = false
+        userStopRequested = true
         try {
             val service = remote
             if (service != null) service.stop()
@@ -202,6 +214,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         cleared = true
         main.removeCallbacksAndMessages(null)
         try { remote?.setUiVisible(false); remote?.unregisterCallback(callback) } catch (_: RemoteException) { }
+        remote = null
         unbind()
         feedback.close()
         super.onCleared()

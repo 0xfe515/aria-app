@@ -74,6 +74,8 @@ class AriaUnifiedStopReceiverTest {
         override fun cancelCloudQuestion(questionId: Long) {}
         override fun speakHazardWarning(message: String?) {}
         override fun postHazardAlert(session: Long, sequence: Long, timestampNanos: Long, message: String?) {}
+        override fun updateWalkingAssistState(session: Long, sequence: Long, timestampNanos: Long, status: String?, announce: Boolean, stopped: Boolean) {}
+        override fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {}
         override fun preemptSpeech() {}
 
         override fun isServiceActive(): Boolean = isActive

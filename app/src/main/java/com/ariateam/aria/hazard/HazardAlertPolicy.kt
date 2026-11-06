@@ -2,7 +2,18 @@ package com.ariateam.aria.hazard
 
 sealed interface AlertDecision {
     data class Fire(val assessment: HazardAssessment, val reason: String) : AlertDecision
-    object Suppressed : AlertDecision
+    data class Suppressed(val reason: AlertSuppressionReason = AlertSuppressionReason.CONFIRMATION_PENDING) : AlertDecision
+}
+
+enum class AlertSuppressionReason {
+    SESSION_INACTIVE,
+    INVALID_CAPTURE,
+    DUPLICATE_OR_OUT_OF_ORDER_CAPTURE,
+    FUTURE_CAPTURE,
+    STALE_RESULT,
+    NOT_A_HAZARD_CANDIDATE,
+    CONFIRMATION_PENDING,
+    COOLDOWN,
 }
 
 /**
@@ -24,6 +35,10 @@ class HazardAlertPolicy(
     private var lastAlertLevel: HazardLevel = HazardLevel.CLEAR_UNWARNED
     private var lastAlertCorridor: CorridorDirection? = null
 
+    private companion object {
+        const val MAX_CONSECUTIVE_CAPTURE_GAP_NANOS = 500_000_000L
+    }
+
     fun reset() {
         lastAssessmentTimestampNanos = 0L
         consecutiveRiskCount = 0
@@ -40,16 +55,16 @@ class HazardAlertPolicy(
         nowElapsedNanos: Long = nowRealtimeMs * 1_000_000L,
     ): AlertDecision {
         val captureNanos = assessment.timestampNanos
-        if (captureNanos <= 0L) return AlertDecision.Suppressed
+        if (captureNanos <= 0L) return AlertDecision.Suppressed(AlertSuppressionReason.INVALID_CAPTURE)
 
         // Reject duplicate or out-of-order capture timestamps
         if (lastAssessmentTimestampNanos > 0L && captureNanos <= lastAssessmentTimestampNanos) {
-            return AlertDecision.Suppressed
+            return AlertDecision.Suppressed(AlertSuppressionReason.DUPLICATE_OR_OUT_OF_ORDER_CAPTURE)
         }
 
         // Reject future capture timestamps (> 500ms ahead of reference clock)
         if (nowElapsedNanos > 0L && captureNanos > nowElapsedNanos + 500_000_000L) {
-            return AlertDecision.Suppressed
+            return AlertDecision.Suppressed(AlertSuppressionReason.FUTURE_CAPTURE)
         }
 
         // Reject stale inference results (> 1,500ms since camera capture)
@@ -59,7 +74,17 @@ class HazardAlertPolicy(
             lastCandidateLevel = null
             lastCandidateCorridor = null
             lastAssessmentTimestampNanos = captureNanos
-            return AlertDecision.Suppressed
+            return AlertDecision.Suppressed(AlertSuppressionReason.STALE_RESULT)
+        }
+        val captureGapNanos = if (lastAssessmentTimestampNanos > 0L) {
+            captureNanos - lastAssessmentTimestampNanos
+        } else {
+            0L
+        }
+        if (captureGapNanos > MAX_CONSECUTIVE_CAPTURE_GAP_NANOS) {
+            consecutiveRiskCount = 0
+            lastCandidateLevel = null
+            lastCandidateCorridor = null
         }
         lastAssessmentTimestampNanos = captureNanos
 
@@ -68,7 +93,7 @@ class HazardAlertPolicy(
             consecutiveRiskCount = 0
             lastCandidateLevel = null
             lastCandidateCorridor = null
-            return AlertDecision.Suppressed
+            return AlertDecision.Suppressed(AlertSuppressionReason.NOT_A_HAZARD_CANDIDATE)
         }
 
         // Confirmation hysteresis: require same level and corridor across consecutive frames
@@ -96,8 +121,12 @@ class HazardAlertPolicy(
                 lastAlertCorridor = assessment.activeCorridor
                 return AlertDecision.Fire(assessment, reason)
             }
+
         }
 
-        return AlertDecision.Suppressed
+        return AlertDecision.Suppressed(
+            if (consecutiveRiskCount >= confirmationFramesRequired) AlertSuppressionReason.COOLDOWN
+            else AlertSuppressionReason.CONFIRMATION_PENDING,
+        )
     }
 }

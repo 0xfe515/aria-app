@@ -64,6 +64,12 @@ class VoiceService : Service() {
         override fun postHazardAlert(session: Long, sequence: Long, timestampNanos: Long, message: String) {
             main.post { if (!destroyed) coordinator.postHazardAlert(session, sequence, timestampNanos, message) }
         }
+        override fun updateWalkingAssistState(session: Long, sequence: Long, timestampNanos: Long, status: String, announce: Boolean, stopped: Boolean) {
+            main.post { if (!destroyed) coordinator.updateWalkingAssistState(session, sequence, timestampNanos, status, announce, stopped) }
+        }
+        override fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {
+            main.post { if (!destroyed) coordinator.reportForwardCalibrationResult(requestId, successful) }
+        }
         override fun preemptSpeech() { main.post { if (!destroyed) coordinator.preemptSpeech() } }
         override fun isServiceActive(): Boolean = this@VoiceService.isEffectivelyActive
         override fun getServiceSessionId(): String = this@VoiceService.serviceSessionId
@@ -116,7 +122,7 @@ class VoiceService : Service() {
             suppress = { session.playbackChanged(it) },
             followUp = { session.beginFollowUp() },
             finishFollowUp = { session.cancelInput() },
-            stopListening = { requestStop() },
+            stopListening = { requestWholeSessionStop() },
             vibrate = { feedback.play(VoiceCue.Detected, audible = false) },
         )
         AriaUnifiedNotificationCoordinator.ensureChannel(this)
@@ -182,6 +188,17 @@ class VoiceService : Service() {
         coordinator.stopped()
         releaseResources()
         stopSelf()
+    }
+
+    private fun requestWholeSessionStop() {
+        if (destroyed) return
+        runCatching {
+            sendBroadcast(
+                Intent(AriaUnifiedNotificationCoordinator.ACTION_STOP_ALL)
+                    .setPackage(packageName),
+            )
+        }
+        requestStop()
     }
 
     private fun releaseResources() {

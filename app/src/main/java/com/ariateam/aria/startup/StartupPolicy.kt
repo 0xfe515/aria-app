@@ -6,6 +6,22 @@ import com.ariateam.aria.speech.VoiceState
 import com.ariateam.aria.vision.VisionModelState
 
 object StartupPolicy {
+    fun shouldStartVoiceDuringStartup(
+        hasBeenAdmitted: Boolean,
+        hasMicPermission: Boolean,
+        voicePhase: VoicePhase,
+        isVoiceActive: Boolean = false,
+        hasAttemptedStartupVoiceStart: Boolean = false,
+    ): Boolean =
+        !hasBeenAdmitted &&
+            hasMicPermission &&
+            !isVoiceActive &&
+            voicePhase == VoicePhase.Stopped &&
+            !hasAttemptedStartupVoiceStart
+
+    fun shouldLatchStartupVoiceHandled(isVoiceActive: Boolean, voicePhase: VoicePhase): Boolean =
+        isVoiceActive || voicePhase != VoicePhase.Stopped
+
     fun evaluate(
         isVisionRestoreCompleted: Boolean,
         visionModelState: VisionModelState,
