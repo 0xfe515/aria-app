@@ -1,0 +1,52 @@
+[
+  {
+    "suite": "CloudQuestionDeviceTest",
+    "passed": 10,
+    "nonpass": 0
+  },
+  {
+    "suite": "HazardSpeechIntegrationDeviceTest",
+    "passed": 2,
+    "nonpass": 0
+  },
+  {
+    "suite": "SettingsInfoRowUiTest",
+    "passed": 1,
+    "nonpass": 0
+  },
+  {
+    "suite": "SettingsScreenTest",
+    "passed": 14,
+    "nonpass": 0
+  },
+  {
+    "suite": "UnifiedStopDeviceTest",
+    "passed": 2,
+    "nonpass": 0
+  },
+  {
+    "suite": "VisionBackgroundSessionTest",
+    "passed": 9,
+    "nonpass": 0
+  },
+  {
+    "suite": "VisionNaturalStartupDeviceTest",
+    "passed": 1,
+    "nonpass": 0
+  },
+  {
+    "suite": "VoiceViewModelLifecycleTest",
+    "passed": 4,
+    "nonpass": 0
+  },
+  {
+    "suite": "WalkingAssistDeviceTest",
+    "passed": 1,
+    "nonpass": 0
+  },
+  {
+    "suite": "WalkingSpeechDeviceTest",
+    "passed": 3,
+    "nonpass": 0
+  }
+]

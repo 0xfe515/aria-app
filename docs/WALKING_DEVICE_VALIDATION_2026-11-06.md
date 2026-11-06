@@ -1,6 +1,6 @@
 # Walking assistance — Pixel 3 validation
 
-Validated on Google Pixel 3 (blueline), Android 12 / API 31, on 2026-11-06. This is a debug-signed preview build, versionCode 5 / `1.0.0-preview.20261104.3`. The source commit containing this report identifies the implementation; no new release version or production signing identity is claimed.
+Validated on Google Pixel 3 (blueline), Android 12 / API 31, on 2026-11-06. Initial functional verification used versionCode 5 / `1.0.0-preview.20261104.3`. The subsequent published prerelease is versionCode 6 / `1.0.0-preview.20261106.1`; its repeated validation and final APK checksum are recorded below. Both are debug-signed previews, not production-signed releases.
 
 ## Build and host results
 
@@ -45,3 +45,13 @@ APK SHA-256: `28466e1def8092637e021350f3914ff4d6f8d392f2102a5d38636d1f12d9a178`.
 Pruning candidates remain unapplied: prior Pixel 3 evaluation found GPU compilation incompatibility, no consistent CPU speed gain, and degraded segmentation metrics. Display filtering affects only overlay colors; hazard/distance masks remain original.
 
 This validates the selected Android/device execution paths. It does not establish real walking-course hazard accuracy, Korean spoken-command recognition accuracy, acoustic warning audibility, TalkBack usability with representative users, long-duration battery/thermal behavior, or a measured visual-quality improvement from filtering. No safety certification or universal device compatibility is claimed.
+
+## Published prerelease verification
+
+The user explicitly requested source plus an APK prerelease. After functional commit `8a219e8`, only `versionCode` and `versionName` changed in build configuration: 6 / `1.0.0-preview.20261106.1`. Functional source remained unchanged.
+
+The full host command above passed again (exit 0, 1m31s); the unchanged JVM suite remains **550 tests, 0 failures/errors/skips**. The version-6 APK and test APK were installed with `-r`, and **all 47 device tests in the table were rerun and passed with no skips**. [Final per-suite results](evidence/walking-prerelease-20261106/test-summary.json), [host log](evidence/walking-prerelease-20261106/host-validation.log), and individual instrumentation logs in the same directory preserve the evidence.
+
+Published APK: `aria-1.0.0-preview.20261106.1-debug.apk`.
+
+Final APK SHA-256: `a00e5520c743cfab161ffabda954d45e0ba8ab76d2737fb8e642860b1668a09e`. The installed base APK checksum matches this file; Android package inspection confirms versionCode 6 and versionName `1.0.0-preview.20261106.1`. The earlier checksum in the initial artifact section refers to versionCode 5 only. A checksum file accompanies the prerelease APK. The field-validation limitations above still apply.
