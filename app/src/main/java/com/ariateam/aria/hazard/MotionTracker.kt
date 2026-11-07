@@ -17,7 +17,11 @@ import android.view.Surface
 class MotionTracker(
     context: Context? = null,
     private val sensorDelay: Int = SensorManager.SENSOR_DELAY_GAME,
-    val engine: MotionFusionEngine = MotionFusionEngine(autoCalibrationEnabled = true),
+    val engine: MotionFusionEngine = MotionFusionEngine(
+        autoCalibrationEnabled = true,
+        walkingAutoCalibrationEnabled = true,
+        continuousRecenteringEnabled = true,
+    ),
     private val clock: () -> Long = { SystemClock.elapsedRealtimeNanos() },
 ) : AutoCloseable {
 
@@ -190,6 +194,23 @@ class MotionTracker(
         synchronized(lifecycleLock) {
             if (!isRunning) return false
             return engine.calibrateForward(realtimeElapsedNanos)
+        }
+    }
+
+    fun onVisualCorridorObservation(
+        timestampNanos: Long,
+        roiWalkableRatio: Float,
+        nearWalkableRatio: Float,
+        walkableCentroidOffsetX: Float,
+    ): Boolean {
+        synchronized(lifecycleLock) {
+            if (!isRunning || !sensorsAvailable) return false
+            return engine.onVisualCorridorObservation(
+                timestampNanos = timestampNanos,
+                roiWalkableRatio = roiWalkableRatio,
+                nearWalkableRatio = nearWalkableRatio,
+                walkableCentroidOffsetX = walkableCentroidOffsetX,
+            )
         }
     }
 

@@ -54,6 +54,7 @@ import com.ariateam.aria.hazard.MotionDegradedReason
 import com.ariateam.aria.hazard.MotionState
 import com.ariateam.aria.hazard.MotionTracker
 import com.ariateam.aria.hazard.ObjectTracker
+import com.ariateam.aria.hazard.walkableCentroidOffsetX
 import com.ariateam.aria.runtime.AriaRuntimeTimingTracker
 import com.ariateam.aria.speech.HazardSpeechBridge
 import com.ariateam.aria.vision.od.AuxiliaryObjectDetectionPipeline
@@ -1911,6 +1912,18 @@ class VisionPipelineController(
                     walkingAssistTicket,
                     diagnosticFrameSequence,
                     SystemClock.elapsedRealtimeNanos(),
+                )
+            }
+            if (inferenceOutput != null && isClockRealtime) {
+                val centerFeatures = hazardDetector.extractCorridorFeatures(
+                    modelStore.segmenter.reusableClassMask,
+                    CorridorDirection.CENTER,
+                )
+                motionTracker.onVisualCorridorObservation(
+                    timestampNanos = imageTimestampNanos,
+                    roiWalkableRatio = centerFeatures.roiWalkable,
+                    nearWalkableRatio = centerFeatures.nearWalkable,
+                    walkableCentroidOffsetX = centerFeatures.walkableCentroidOffsetX,
                 )
             }
             val motionRaw = motionTracker.stateAt(imageTimestampNanos)

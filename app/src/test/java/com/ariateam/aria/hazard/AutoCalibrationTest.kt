@@ -539,4 +539,229 @@ class AutoCalibrationTest {
         val state = engine.stateAt(timestamp)
         assertFalse("Engine should not auto-calibrate with zero gravity norm", state.isCalibrated)
     }
+
+    @Test
+    fun walkingAutoCalibration_calibratesWhileWalkingWithModerateMotion() {
+        val walkingEngine = MotionFusionEngine(
+            defaultHfovDegrees = 65.5f,
+            autoCalibrationEnabled = true,
+            walkingAutoCalibrationEnabled = true,
+            walkingAutoCalibrationWindowNanos = 450_000_000L,
+            walkingMaxLinearEnergy = 2.8f,
+            walkingMaxGyroDegPerSec = 12.0f,
+        )
+        val stationaryEngine = MotionFusionEngine(
+            defaultHfovDegrees = 65.5f,
+            autoCalibrationEnabled = true,
+            walkingAutoCalibrationEnabled = false,
+        )
+
+        var timestamp = 1_000_000_000L
+        // Moderate motion typical of steady walking:
+        // linMag ~ 1.2 m/s^2 (energy between 0.45 and 2.8 m/s^2), gyro ~ 5.7 deg/s (0.1 rad/s)
+        for (i in 0 until 55) {
+            val linY = if (i % 2 == 0) 1.2f else -1.2f
+            walkingEngine.onAccelerometerSample(timestamp, 0f, 9.81f + linY, 0f)
+            walkingEngine.onGyroscopeSample(timestamp, 0f, 0.10f, 0f)
+
+            stationaryEngine.onAccelerometerSample(timestamp, 0f, 9.81f + linY, 0f)
+            stationaryEngine.onGyroscopeSample(timestamp, 0f, 0.10f, 0f)
+
+            timestamp += 10_000_000L
+        }
+
+        val stationaryState = stationaryEngine.stateAt(timestamp)
+        assertFalse(
+            "Stationary auto-calibration should reject moderate walking motion",
+            stationaryState.isCalibrated,
+        )
+
+        val walkingState = walkingEngine.stateAt(timestamp)
+        assertTrue(
+            "Walking auto-calibration should succeed with moderate motion after 450ms window",
+            walkingState.isCalibrated,
+        )
+        assertNull("Walking auto-calibrated state should have no degradation reason", walkingState.degradedReason)
+    }
+
+    @Test
+    fun postTurnAutoReanchor_clearsExcessiveDriftAfterCornerTurn() {
+        val turnEngine = MotionFusionEngine(
+            defaultHfovDegrees = 65.5f,
+            autoCalibrationEnabled = true,
+            continuousRecenteringEnabled = true,
+            postTurnReanchorWindowNanos = 650_000_000L,
+            postTurnMaxYawRateDegPerSec = 8.0f,
+        )
+
+        var timestamp = 1_000_000_000L
+        // 1. Initial stationary calibration
+        for (i in 0 until 106) {
+            turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+            timestamp += 10_000_000L
+        }
+        assertTrue("Engine should be initial calibrated", turnEngine.stateAt(timestamp).isCalibrated)
+
+        // 2. Corner turn: rotate 90 degrees around vertical axis
+        // 90 degrees in 100 samples (1 second) = 90 deg/s = 1.5707963 rad/s
+        for (i in 0 until 100) {
+            timestamp += 10_000_000L
+            turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            turnEngine.onGyroscopeSample(timestamp, 0f, 1.5707963f, 0f)
+        }
+        // Settle rotation with quiet sample
+        timestamp += 10_000_000L
+        turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+        turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+
+        val turnedState = turnEngine.stateAt(timestamp)
+        assertEquals(MotionDegradedReason.EXCESSIVE_DRIFT, turnedState.degradedReason)
+
+        // 3. Steady heading in new direction: 30 samples (300ms) < 650ms window
+        for (i in 0 until 30) {
+            timestamp += 10_000_000L
+            turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+        }
+        val midState = turnEngine.stateAt(timestamp)
+        assertEquals(
+            "Should still be degraded before 650ms post-turn reanchor window elapses",
+            MotionDegradedReason.EXCESSIVE_DRIFT,
+            midState.degradedReason,
+        )
+
+        // Feed remaining samples (40 samples = 400ms, total 700ms > 650ms)
+        for (i in 0 until 40) {
+            timestamp += 10_000_000L
+            turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+        }
+
+        val reanchoredState = turnEngine.stateAt(timestamp)
+        assertNull(
+            "Post-turn re-anchor should clear excessive drift after steady window",
+            reanchoredState.degradedReason,
+        )
+        assertEquals(0f, reanchoredState.relativeHeadingDeg, 0.5f)
+        assertEquals(CorridorDirection.CENTER, reanchoredState.activeCorridor)
+    }
+
+    @Test
+    fun continuousRecentering_eliminatesSlowDriftWhilePreservingShortTermTurnSteering() {
+        val recenteringEngine = MotionFusionEngine(
+            defaultHfovDegrees = 65.5f,
+            autoCalibrationEnabled = true,
+            continuousRecenteringEnabled = true,
+            recenteringTauSeconds = 3.5f,
+        )
+
+        var timestamp = 1_000_000_000L
+        // 1. Initial calibration
+        for (i in 0 until 106) {
+            recenteringEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            recenteringEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+            timestamp += 10_000_000L
+        }
+        assertTrue("Engine should be initial calibrated", recenteringEngine.stateAt(timestamp).isCalibrated)
+
+        // 2. Introduce small turn within FOV (~10 degrees = ~0.174 rad) over 100ms (10 samples)
+        for (i in 0 until 10) {
+            timestamp += 10_000_000L
+            recenteringEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            recenteringEngine.onGyroscopeSample(timestamp, 0f, 1.74533f, 0f)
+        }
+
+        val steeringState = recenteringEngine.stateAt(timestamp)
+        // Short-term steering should be preserved: heading around 10 degrees
+        assertEquals(10.0f, steeringState.relativeHeadingDeg, 1.5f)
+
+        // 3. User continues walking straight (gy = 0) for 500 samples (5.0s, > tau of 3.5s)
+        for (i in 0 until 500) {
+            timestamp += 10_000_000L
+            recenteringEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            recenteringEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+        }
+
+        val recenteredState = recenteringEngine.stateAt(timestamp)
+        // Slow drift should be eliminated: relative heading decayed towards 0
+        assertTrue(
+            "Continuous recentering should decay relative heading towards 0 (was ${recenteredState.relativeHeadingDeg})",
+            recenteredState.relativeHeadingDeg < 3.0f,
+        )
+    }
+
+    @Test
+    fun visualCorridorObservation_immediatelyCalibratesAndReanchorsExcessiveDrift() {
+        val visualEngine = MotionFusionEngine(
+            defaultHfovDegrees = 65.5f,
+            autoCalibrationEnabled = false,
+            continuousRecenteringEnabled = true,
+        )
+
+        var timestamp = 1_000_000_000L
+        // Provide 10 samples so accelSampleCount >= 5 and gyroSampleCount >= 5
+        for (i in 0 until 10) {
+            visualEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            visualEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+            timestamp += 10_000_000L
+        }
+        assertFalse("Should be uncalibrated initially", visualEngine.stateAt(timestamp).isCalibrated)
+
+        // 1. Rejection when clear path condition is not met (roiWalkable < 0.45f)
+        val rejectedLowWalkable = visualEngine.onVisualCorridorObservation(
+            timestampNanos = timestamp,
+            roiWalkableRatio = 0.30f,
+            nearWalkableRatio = 0.40f,
+            walkableCentroidOffsetX = 0f,
+        )
+        assertFalse("Observation with low walkable ratio should be rejected", rejectedLowWalkable)
+
+        // Rejection when walkable centroid is off-center (> 0.18f)
+        val rejectedOffCenter = visualEngine.onVisualCorridorObservation(
+            timestampNanos = timestamp,
+            roiWalkableRatio = 0.60f,
+            nearWalkableRatio = 0.50f,
+            walkableCentroidOffsetX = 0.25f,
+        )
+        assertFalse("Observation with off-center centroid should be rejected", rejectedOffCenter)
+
+        // 2. Successful immediate calibration from uncalibrated state
+        val calibrated = visualEngine.onVisualCorridorObservation(
+            timestampNanos = timestamp,
+            roiWalkableRatio = 0.70f,
+            nearWalkableRatio = 0.60f,
+            walkableCentroidOffsetX = 0.05f,
+        )
+        assertTrue("Visual corridor observation should immediately calibrate uncalibrated engine", calibrated)
+        val stateAfterVisualCalib = visualEngine.stateAt(timestamp)
+        assertTrue("Engine state should reflect calibration", stateAfterVisualCalib.isCalibrated)
+        assertEquals(0f, stateAfterVisualCalib.relativeHeadingDeg, 0.1f)
+
+        // 3. Drift off to > halfHfov (e.g. 60 degrees turn)
+        for (i in 0 until 60) {
+            timestamp += 10_000_000L
+            visualEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            visualEngine.onGyroscopeSample(timestamp, 0f, 1.74533f, 0f)
+        }
+        // Settle rotation with quiet sample
+        timestamp += 10_000_000L
+        visualEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+        visualEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+
+        val driftedState = visualEngine.stateAt(timestamp)
+        assertEquals(MotionDegradedReason.EXCESSIVE_DRIFT, driftedState.degradedReason)
+
+        // 4. Visual corridor observation immediately clears excessive drift
+        val reanchored = visualEngine.onVisualCorridorObservation(
+            timestampNanos = timestamp,
+            roiWalkableRatio = 0.65f,
+            nearWalkableRatio = 0.55f,
+            walkableCentroidOffsetX = 0.02f,
+        )
+        assertTrue("Visual corridor observation should re-anchor excessive drift", reanchored)
+        val reanchoredState = visualEngine.stateAt(timestamp)
+        assertNull("Degraded reason should be cleared after visual re-anchor", reanchoredState.degradedReason)
+        assertEquals(0f, reanchoredState.relativeHeadingDeg, 0.1f)
+    }
 }

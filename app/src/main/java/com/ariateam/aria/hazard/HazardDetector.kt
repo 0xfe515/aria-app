@@ -32,6 +32,11 @@ class HazardDetector(
         structuralEdgeExtractor.reset()
     }
 
+    fun extractCorridorFeatures(
+        classMask: ByteArray,
+        corridor: CorridorDirection = CorridorDirection.CENTER,
+    ): SegmentationFeatures = featureExtractor.extract(classMask, corridor)
+
     fun assessHazard(
         classMask: ByteArray,
         motionState: MotionState,
@@ -337,3 +342,6 @@ class HazardDetector(
         }
     }
 }
+
+val SegmentationFeatures.walkableCentroidOffsetX: Float
+    get() = (sideRoadLeft - sideRoadRight) * 0.5f

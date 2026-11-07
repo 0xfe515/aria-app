@@ -21,6 +21,14 @@ class MotionFusionEngine(
     private val streamFreshnessToleranceNanos: Long = 200_000_000L, // 200ms
     private val autoCalibrationEnabled: Boolean = false, // Opt-in by default
     defaultHfovDegrees: Float? = null,
+    private val walkingAutoCalibrationEnabled: Boolean = false,
+    private val walkingAutoCalibrationWindowNanos: Long = 450_000_000L,
+    private val walkingMaxLinearEnergy: Float = 2.8f,
+    private val walkingMaxGyroDegPerSec: Float = 12.0f,
+    private val continuousRecenteringEnabled: Boolean = false,
+    private val recenteringTauSeconds: Float = 3.5f,
+    private val postTurnReanchorWindowNanos: Long = 650_000_000L,
+    private val postTurnMaxYawRateDegPerSec: Float = 8.0f,
 ) {
     private val lock = Any()
 
@@ -46,6 +54,9 @@ class MotionFusionEngine(
     // Auto-calibration tracking
     private var autoCalibrationReadyTimestampNanos: Long = 0L
     private var isAutoCalibrationReady = false
+
+    // Post-turn reanchor tracking
+    private var postTurnStableStartNanos: Long = 0L
 
     val accelSamplesReceived: Int get() = synchronized(lock) { accelSampleCount }
     val gyroSamplesReceived: Int get() = synchronized(lock) { gyroSampleCount }
@@ -115,6 +126,7 @@ class MotionFusionEngine(
                 // Reset auto-calibration tracking when display rotation changes
                 autoCalibrationReadyTimestampNanos = 0L
                 isAutoCalibrationReady = false
+                postTurnStableStartNanos = 0L
             }
         }
     }
@@ -166,6 +178,7 @@ class MotionFusionEngine(
                 // Reset auto-calibration tracking when camera geometry changes
                 autoCalibrationReadyTimestampNanos = 0L
                 isAutoCalibrationReady = false
+                postTurnStableStartNanos = 0L
             }
         }
     }
@@ -196,7 +209,8 @@ class MotionFusionEngine(
             if (pitchDeg < minPitchDegrees || pitchDeg > maxPitchDegrees || abs(rollDeg) > maxRollDegrees) {
                 return false
             }
-            if (filteredLinearAccelEnergy > 0.45f) {
+            val maxEnergy = if (walkingAutoCalibrationEnabled) walkingMaxLinearEnergy else 0.45f
+            if (filteredLinearAccelEnergy > maxEnergy) {
                 return false
             }
 
@@ -229,6 +243,7 @@ class MotionFusionEngine(
             // Auto-calibration tracking
             autoCalibrationReadyTimestampNanos = 0L
             isAutoCalibrationReady = false
+            postTurnStableStartNanos = 0L
             latestRawGx = 0f
             latestRawGy = 0f
             latestRawGz = 0f
@@ -260,6 +275,7 @@ class MotionFusionEngine(
                     // Out-of-order accel timestamp: invalidate pending stable window without integrating
                     autoCalibrationReadyTimestampNanos = 0L
                     isAutoCalibrationReady = false
+                    postTurnStableStartNanos = 0L
                     return false
                 }
                 if (dtNanos > streamFreshnessToleranceNanos) {
@@ -268,6 +284,7 @@ class MotionFusionEngine(
                     // Reset auto-calibration tracking when stream gap detected
                     autoCalibrationReadyTimestampNanos = 0L
                     isAutoCalibrationReady = false
+                    postTurnStableStartNanos = 0L
                     updateLatestStateLocked(timestampNanos, rawGx = latestRawGx, rawGy = latestRawGy, rawGz = latestRawGz)
                     return true
                 }
@@ -331,6 +348,7 @@ class MotionFusionEngine(
                     // Out-of-order gyro timestamp: invalidate pending stable window without integrating
                     autoCalibrationReadyTimestampNanos = 0L
                     isAutoCalibrationReady = false
+                    postTurnStableStartNanos = 0L
                     return false
                 }
                 if (dtNanos > streamFreshnessToleranceNanos) {
@@ -344,6 +362,7 @@ class MotionFusionEngine(
                     // Reset auto-calibration tracking when stream gap detected
                     autoCalibrationReadyTimestampNanos = 0L
                     isAutoCalibrationReady = false
+                    postTurnStableStartNanos = 0L
                     updateLatestStateLocked(timestampNanos, rawGx = rawGx, rawGy = rawGy, rawGz = rawGz)
                     return true
                 }
@@ -377,7 +396,7 @@ class MotionFusionEngine(
                 integratedHeadingDeg += yawRateDegPerSec * dtSec
             }
 
-            updateLatestStateLocked(timestampNanos, yawRateDegPerSec, rawGx, rawGy, rawGz)
+            updateLatestStateLocked(timestampNanos, yawRateDegPerSec, rawGx, rawGy, rawGz, gyroDtSec = dtSec)
             return true
         }
     }
@@ -388,6 +407,7 @@ class MotionFusionEngine(
         rawGx: Float = 0f,
         rawGy: Float = 0f,
         rawGz: Float = 0f,
+        gyroDtSec: Float = 0f,
     ) {
         val yawRate = currentYawRateDegPerSec ?: latestState.yawRateDegPerSec
 
@@ -409,12 +429,14 @@ class MotionFusionEngine(
             // Reset auto-calibration tracking when camera FOV is unavailable
             autoCalibrationReadyTimestampNanos = 0L
             isAutoCalibrationReady = false
+            postTurnStableStartNanos = 0L
         } else if (accelFault || gyroFault) {
             degradedReason = MotionDegradedReason.NON_FINITE_DATA
             confidence = 0f
             // Reset auto-calibration tracking when sensor fault occurs
             autoCalibrationReadyTimestampNanos = 0L
             isAutoCalibrationReady = false
+            postTurnStableStartNanos = 0L
         } else if (isStreamGapped && (accelSampleCount > 0 || gyroSampleCount > 0)) {
             degradedReason = MotionDegradedReason.SAMPLES_STALE
             confidence = 0f
@@ -424,6 +446,7 @@ class MotionFusionEngine(
             // Reset auto-calibration tracking when stream gap detected
             autoCalibrationReadyTimestampNanos = 0L
             isAutoCalibrationReady = false
+            postTurnStableStartNanos = 0L
         } else if (!isCalibrated) {
             degradedReason = MotionDegradedReason.CALIBRATION_PENDING
             confidence = 0f
@@ -433,6 +456,35 @@ class MotionFusionEngine(
         } else if (abs(yawRate) > rapidTurnThresholdDegPerSec) {
             degradedReason = MotionDegradedReason.RAPID_TURN_TRANSIENT
             confidence = 0.2f
+        }
+
+        if (continuousRecenteringEnabled && isCalibrated && activeHfovDegrees != null && !accelFault && !gyroFault && !isStreamGapped) {
+            val postureValid = pitchDeg.isFinite() && rollDeg.isFinite() && pitchDeg >= minPitchDegrees && pitchDeg <= maxPitchDegrees && abs(rollDeg) <= maxRollDegrees
+            val gyroMag = Companion.gyroMagnitudeDegPerSec(rawGx, rawGy, rawGz)
+            val isSteadyHeading = postureValid && abs(yawRate) <= postTurnMaxYawRateDegPerSec && gyroMag <= walkingMaxGyroDegPerSec
+            val rawRelHeading = integratedHeadingDeg - baselineHeadingDeg
+            val isCurrentlyOutOfFov = halfHfovRad > 0f && abs(Math.toRadians(rawRelHeading.toDouble())) > halfHfovRad.toDouble()
+            if (isSteadyHeading) {
+                if (isCurrentlyOutOfFov) {
+                    if (postTurnStableStartNanos == 0L) {
+                        postTurnStableStartNanos = timestampNanos
+                    }
+                    if ((timestampNanos - postTurnStableStartNanos) >= postTurnReanchorWindowNanos) {
+                        baselineHeadingDeg = integratedHeadingDeg
+                        calibrationTimestampNanos = timestampNanos
+                        postTurnStableStartNanos = 0L
+                    }
+                } else {
+                    postTurnStableStartNanos = 0L
+                    if (gyroDtSec > 0f && recenteringTauSeconds > 0f) {
+                        val alpha = (gyroDtSec / (recenteringTauSeconds + gyroDtSec)).coerceIn(0f, 0.15f)
+                        baselineHeadingDeg += alpha * (integratedHeadingDeg - baselineHeadingDeg)
+                        calibrationTimestampNanos = timestampNanos
+                    }
+                }
+            } else {
+                postTurnStableStartNanos = 0L
+            }
         }
 
         val relHeading = integratedHeadingDeg - baselineHeadingDeg
@@ -522,6 +574,7 @@ class MotionFusionEngine(
         // Reset auto-calibration tracking when sensor fault occurs
         autoCalibrationReadyTimestampNanos = 0L
         isAutoCalibrationReady = false
+        postTurnStableStartNanos = 0L
     }
 
     private fun updateAutoCalibrationTracking(
@@ -567,6 +620,10 @@ class MotionFusionEngine(
             return
         }
 
+        val maxLinearEnergy = if (walkingAutoCalibrationEnabled) walkingMaxLinearEnergy else 0.45f
+        val maxGyroDegPerSec = if (walkingAutoCalibrationEnabled) walkingMaxGyroDegPerSec else (gyroDeadbandDegPerSec * 3f)
+        val requiredWindowNanos = if (walkingAutoCalibrationEnabled) walkingAutoCalibrationWindowNanos else 1_000_000_000L
+
         // Check if all stability conditions are met (before stable-window start)
         val isStable =
                 // Minimum evidence counts required before stable window can start
@@ -581,10 +638,10 @@ class MotionFusionEngine(
                         // Valid orientation (upright enough)
                         pitchDeg >= minPitchDegrees && pitchDeg <= maxPitchDegrees &&
                                 abs(rollDeg) <= maxRollDegrees &&
-                        // Low linear acceleration (stationary)
-                        filteredLinearAccelEnergy <= 0.45f &&
+                        // Low linear acceleration
+                        filteredLinearAccelEnergy <= maxLinearEnergy &&
                         // Full gyro vector magnitude below threshold (converted to deg/sec)
-                        Companion.gyroMagnitudeDegPerSec(rawGx, rawGy, rawGz) <= gyroDeadbandDegPerSec * 3 // Allow up to 3x deadband for stability
+                        Companion.gyroMagnitudeDegPerSec(rawGx, rawGy, rawGz) <= maxGyroDegPerSec
 
         if (isStable) {
             // If we haven't started tracking stability yet, set the start time
@@ -592,9 +649,9 @@ class MotionFusionEngine(
                 autoCalibrationReadyTimestampNanos = timestampNanos
             }
 
-            // Check if we've had stable conditions for ~1 second
+            // Check if we've had stable conditions for required window
             val stableDurationNanos = timestampNanos - autoCalibrationReadyTimestampNanos
-            if (stableDurationNanos >= 1_000_000_000L) { // 1 second
+            if (stableDurationNanos >= requiredWindowNanos) {
                 isAutoCalibrationReady = true
             }
         } else {
@@ -673,6 +730,84 @@ class MotionFusionEngine(
             }
 
             return bestEntry.state
+        }
+    }
+
+    fun onVisualCorridorObservation(
+        timestampNanos: Long,
+        roiWalkableRatio: Float,
+        nearWalkableRatio: Float,
+        walkableCentroidOffsetX: Float,
+    ): Boolean {
+        if (timestampNanos <= 0L) return false
+        synchronized(lock) {
+            if (activeHfovDegrees == null || accelFault || gyroFault ||
+                accelSampleCount < 5 || gyroSampleCount < 5
+            ) {
+                return false
+            }
+            val accelAge = timestampNanos - lastAccelTimestampNanos
+            val gyroAge = timestampNanos - lastGyroTimestampNanos
+            if (accelAge !in 0L..streamFreshnessToleranceNanos ||
+                gyroAge !in 0L..streamFreshnessToleranceNanos
+            ) {
+                return false
+            }
+
+            val pitchRad = atan2(gravZ.toDouble(), gravY.toDouble())
+            val pitchDeg = Math.toDegrees(pitchRad).toFloat()
+            val rollRad = atan2(gravX.toDouble(), sqrt((gravY * gravY + gravZ * gravZ).toDouble()))
+            val rollDeg = Math.toDegrees(rollRad).toFloat()
+
+            if (!pitchDeg.isFinite() || !rollDeg.isFinite() ||
+                pitchDeg < minPitchDegrees || pitchDeg > maxPitchDegrees ||
+                abs(rollDeg) > maxRollDegrees ||
+                abs(latestState.yawRateDegPerSec) > walkingMaxGyroDegPerSec
+            ) {
+                return false
+            }
+
+            val isClearCenteredPath = roiWalkableRatio.isFinite() &&
+                nearWalkableRatio.isFinite() &&
+                walkableCentroidOffsetX.isFinite() &&
+                roiWalkableRatio >= 0.45f &&
+                nearWalkableRatio >= 0.35f &&
+                abs(walkableCentroidOffsetX) <= 0.18f
+
+            if (!isClearCenteredPath) {
+                return false
+            }
+
+            if (!isCalibrated) {
+                baselineHeadingDeg = integratedHeadingDeg
+                isCalibrated = true
+                calibrationTimestampNanos = timestampNanos
+                autoCalibrationReadyTimestampNanos = 0L
+                isAutoCalibrationReady = false
+                postTurnStableStartNanos = 0L
+                updateLatestStateLocked(timestampNanos, rawGx = latestRawGx, rawGy = latestRawGy, rawGz = latestRawGz)
+                return true
+            }
+
+            val relHeading = integratedHeadingDeg - baselineHeadingDeg
+            val isOutOfFov = halfHfovRad > 0f && abs(Math.toRadians(relHeading.toDouble())) > halfHfovRad.toDouble()
+
+            if (isOutOfFov) {
+                baselineHeadingDeg = integratedHeadingDeg
+                calibrationTimestampNanos = timestampNanos
+                postTurnStableStartNanos = 0L
+                updateLatestStateLocked(timestampNanos, rawGx = latestRawGx, rawGy = latestRawGy, rawGz = latestRawGz)
+                return true
+            }
+
+            if (continuousRecenteringEnabled && abs(relHeading) > 1.0f) {
+                baselineHeadingDeg += 0.25f * relHeading
+                calibrationTimestampNanos = timestampNanos
+                updateLatestStateLocked(timestampNanos, rawGx = latestRawGx, rawGy = latestRawGy, rawGz = latestRawGz)
+                return true
+            }
+
+            return false
         }
     }
 
