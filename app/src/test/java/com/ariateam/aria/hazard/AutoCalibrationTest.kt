@@ -610,16 +610,29 @@ class AutoCalibrationTest {
             turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
             turnEngine.onGyroscopeSample(timestamp, 0f, 1.5707963f, 0f)
         }
-        // Settle rotation with quiet sample
+        // Settle rotation with quiet sample: initially in recovery hysteresis
         timestamp += 10_000_000L
         turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
         turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
 
         val turnedState = turnEngine.stateAt(timestamp)
-        assertEquals(MotionDegradedReason.EXCESSIVE_DRIFT, turnedState.degradedReason)
+        assertEquals(MotionDegradedReason.RAPID_TURN_TRANSIENT, turnedState.degradedReason)
 
-        // 3. Steady heading in new direction: 30 samples (300ms) < 650ms window
-        for (i in 0 until 30) {
+        // Settle quiet samples until smoothing drops below 25 deg/s plus 300ms recovery window (45 samples = 450ms)
+        for (i in 0 until 45) {
+            timestamp += 10_000_000L
+            turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+        }
+        val postRecoveryState = turnEngine.stateAt(timestamp)
+        assertEquals(
+            "After rapid turn recovery hysteresis elapses, state reflects EXCESSIVE_DRIFT",
+            MotionDegradedReason.EXCESSIVE_DRIFT,
+            postRecoveryState.degradedReason,
+        )
+
+        // 3. Steady heading in new direction: 10 more samples (100ms) -> total 560ms < 650ms window
+        for (i in 0 until 10) {
             timestamp += 10_000_000L
             turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
             turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
@@ -631,8 +644,8 @@ class AutoCalibrationTest {
             midState.degradedReason,
         )
 
-        // Feed remaining samples (40 samples = 400ms, total 700ms > 650ms)
-        for (i in 0 until 40) {
+        // Feed remaining samples (20 samples = 200ms, total 760ms > 650ms)
+        for (i in 0 until 20) {
             timestamp += 10_000_000L
             turnEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
             turnEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
@@ -744,10 +757,20 @@ class AutoCalibrationTest {
             visualEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
             visualEngine.onGyroscopeSample(timestamp, 0f, 1.74533f, 0f)
         }
-        // Settle rotation with quiet sample
+        // Settle rotation: initially in recovery hysteresis (RAPID_TURN_TRANSIENT)
         timestamp += 10_000_000L
         visualEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
         visualEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+
+        val recoveringState = visualEngine.stateAt(timestamp)
+        assertEquals(MotionDegradedReason.RAPID_TURN_TRANSIENT, recoveringState.degradedReason)
+
+        // Settle quiet samples until smoothing drops below 25 deg/s plus 300ms recovery window (45 samples = 450ms)
+        for (i in 0 until 45) {
+            timestamp += 10_000_000L
+            visualEngine.onAccelerometerSample(timestamp, 0f, 9.81f, 0f)
+            visualEngine.onGyroscopeSample(timestamp, 0f, 0f, 0f)
+        }
 
         val driftedState = visualEngine.stateAt(timestamp)
         assertEquals(MotionDegradedReason.EXCESSIVE_DRIFT, driftedState.degradedReason)

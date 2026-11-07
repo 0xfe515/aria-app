@@ -229,7 +229,7 @@ class CommandCoordinator internal constructor(
             return
         }
 
-        // 3. Conversational text / questions route directly to Gemini cloud
+        // 3. Conversational text / questions route directly to ChatGPT cloud
         handleCloudTextQuestion(text)
     }
 
@@ -449,7 +449,7 @@ class CommandCoordinator internal constructor(
                 announce("사진 질문 응답 시간이 초과되었어요.")
             }
         }, 60_000)
-        announce("사진을 촬영하여 Gemini에 질문을 보냅니다.")
+        announce("사진을 촬영하여 ChatGPT에 질문을 보냅니다.")
     }
 
     fun consumeCloudQuestion(id: Long) {
@@ -494,7 +494,7 @@ class CommandCoordinator internal constructor(
         lastHazardMessage = message
         lastHazardTimestamp = now
 
-        // A hazard invalidates the in-flight question as well as its utterance; late Gemini
+        // A hazard invalidates the in-flight question as well as its utterance; late ChatGPT
         // callbacks then fail the existing question-id check and cannot resume speech.
         clearCloudQuestion()
 

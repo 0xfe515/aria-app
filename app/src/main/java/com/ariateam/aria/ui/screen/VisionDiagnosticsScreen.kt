@@ -324,19 +324,27 @@ fun VisionDiagnosticsScreen(
                     fontWeight = FontWeight.Medium,
                     color = if (motion.isCalibrated) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = String.format(Locale.US, "피치(기울기): %.1f° | 롤: %.1f°", motion.pitchDegrees, motion.rollDegrees),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        text = String.format(Locale.US, "회전속도: %.1f°/s", motion.yawRateDegPerSec),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
+                Text(
+                    text = String.format(Locale.US, "피치(기울기): %.1f° | 롤: %.1f°", motion.pitchDegrees, motion.rollDegrees),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = String.format(Locale.US, "방향 회전속도: %.1f°/s (평활: %.1f°/s)", motion.yawRateDegPerSec, motion.smoothedYawRateDegPerSec),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "방향 마지막 전이 이유: ${motion.restrictionReason ?: "없음"}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                val gcd = uiState.groundContactDistance
+                Text(
+                    text = String.format(Locale.US, "지면 자이로: %.1f°/s (평활: %.1f°/s)", gcd.rawGyroDegPerSec, gcd.smoothedGyroDegPerSec),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "지면 마지막 전이 이유: ${gcd.restrictionReason ?: "없음"}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,

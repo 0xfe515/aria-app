@@ -68,7 +68,7 @@ class RuleCommandInterpreterTest {
     }
 
     @Test fun recognizesCloudTextQuestionCommands() {
-        val result = parse("제미나이 질문 오늘 서울 날씨 어때")
+        val result = parse("챗지피티 질문 오늘 서울 날씨 어때")
         assertTrue(result is Interpretation.CloudTextQuestion)
         val q = result as Interpretation.CloudTextQuestion
         assertTrue(q.question.contains("오늘 서울 날씨 어때"))

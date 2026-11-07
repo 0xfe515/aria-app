@@ -321,8 +321,8 @@ android {
         applicationId = "com.ariateam.aria"
         minSdk = 31
         targetSdk = 37
-        versionCode = 7
-        versionName = "1.0.0-preview.20261107.1"
+        versionCode = 8
+        versionName = "1.0.0-preview.20261108.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         proguardFiles(
@@ -402,6 +402,7 @@ dependencies {
     implementation(libs.androidx.fragment.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     testImplementation(libs.junit)
+    testImplementation(libs.json)
     testImplementation(libs.litert.gpu.api)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

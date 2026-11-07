@@ -160,11 +160,22 @@ class GroundContactMotionTrackerTest {
         val normalOrientation = tracker.orientationAt(t)
         assertTrue(normalOrientation.isReliable)
 
-        // Rapid gyro (90 deg/s in radians, well above 45 deg/s threshold)
+        // Brief moderate spike (90 deg/s for 10ms < 150ms)
         t += 10_000_000L
         val rapidGz = Math.toRadians(90.0).toFloat()
         tracker.onGyroscopeSample(t, 0f, 0f, rapidGz)
         tracker.onAccelerometerSample(t, 0f, 9.81f, 0f)
+
+        val spikeOrientation = tracker.orientationAt(t)
+        assertTrue("Brief moderate spike should not restrict", spikeOrientation.isReliable)
+        assertFalse(spikeOrientation.rapidMotion)
+
+        // Sustained rapid turn (> 45 deg/s sustained for >= 150ms after smoothed rate crosses 45 deg/s: 25 samples = 250ms)
+        for (i in 0 until 25) {
+            t += 10_000_000L
+            tracker.onGyroscopeSample(t, 0f, 0f, rapidGz)
+            tracker.onAccelerometerSample(t, 0f, 9.81f, 0f)
+        }
 
         val rapidOrientation = tracker.orientationAt(t)
         assertFalse(rapidOrientation.isReliable)
@@ -315,35 +326,39 @@ class GroundContactMotionTrackerTest {
         assertFalse(tracker.onGyroscopeSample(t1, 0f, 0f, 0f))
         assertFalse(tracker.onGyroscopeSample(t1 - 10_000_000L, 0f, 0f, 0f))
 
-        // 4. Old callbacks must not extend rapid motion hold
-        // Trigger rapid motion at t1 + 10ms (hold lasts 200ms, until t1 + 210ms)
+        // 4. Old callbacks must not extend or revive rapid motion restriction
+        // Trigger immediate severe rapid motion at t1 + 10ms (raw >= 120 deg/s: 130 deg/s)
         val tRapid = t1 + 10_000_000L
-        val rapidGz = Math.toRadians(90.0).toFloat()
-        assertTrue(tracker.onGyroscopeSample(tRapid, 0f, 0f, rapidGz))
+        val severeGz = Math.toRadians(130.0).toFloat()
+        assertTrue(tracker.onGyroscopeSample(tRapid, 0f, 0f, severeGz))
         tracker.onAccelerometerSample(tRapid, 0f, 9.81f, 0f)
 
-        // At tRapid, rapid motion is active
+        // At tRapid, rapid motion is immediately active
         val activeRapid = tracker.orientationAt(tRapid)
         assertFalse(activeRapid.isReliable)
         assertTrue(activeRapid.rapidMotion)
 
-        // Advance to tExpired = tRapid + 250ms (hold expired)
-        val tExpired = tRapid + 250_000_000L
-        assertTrue(tracker.onGyroscopeSample(tExpired, 0f, 0f, 0f))
-        assertTrue(tracker.onAccelerometerSample(tExpired, 0f, 9.81f, 0f))
+        // Advance with quiet samples to allow recovery (50 samples = 500ms > 300ms recovery window)
+        var tRecover = tRapid
+        for (i in 0 until 50) {
+            tRecover += 10_000_000L
+            tracker.onGyroscopeSample(tRecover, 0f, 0f, 0f)
+            tracker.onAccelerometerSample(tRecover, 0f, 9.81f, 0f)
+        }
 
-        val expiredRapid = tracker.orientationAt(tExpired)
-        assertTrue(expiredRapid.isReliable)
-        assertFalse(expiredRapid.rapidMotion)
+        val recoveredRapid = tracker.orientationAt(tRecover)
+        assertTrue(recoveredRapid.isReliable)
+        assertFalse(recoveredRapid.rapidMotion)
 
-        // An out-of-order callback with old timestamp (tRapid + 100ms) arrives:
-        // Must be rejected and must NOT revive or extend the hold
-        val oldCallbackAccepted = tracker.onGyroscopeSample(tRapid + 100_000_000L, 0f, 0f, rapidGz)
+        // An out-of-order callback with old timestamp arrives:
+        // Must be rejected and must NOT revive or extend restriction
+        val oldCallbackAccepted = tracker.onGyroscopeSample(tRapid + 100_000_000L, 0f, 0f, severeGz)
         assertFalse("Old callback must be rejected by monotonic check", oldCallbackAccepted)
 
-        val checkStillExpired = tracker.orientationAt(tExpired)
-        assertTrue("Rapid motion must remain inactive after old callback", checkStillExpired.isReliable)
-        assertFalse(checkStillExpired.rapidMotion)
+        val checkStillRecovered = tracker.orientationAt(tRecover)
+        assertTrue(checkStillRecovered.isReliable)
+        assertFalse(checkStillRecovered.rapidMotion)
+        assertTrue("Rapid motion must remain inactive after old callback", checkStillRecovered.isReliable)
     }
 
     @Test
@@ -362,5 +377,62 @@ class GroundContactMotionTrackerTest {
         // Duplicate or older timestamp rejected
         assertFalse(tracker.onAccelerometerSample(t, 0f, 9.81f, 0f))
         assertFalse(tracker.onAccelerometerSample(t - 10_000_000L, 0f, 9.81f, 0f))
+    }
+
+    @Test
+    fun severeGyroBetweenAccelSnapshots_restrictsCurrentQueryWithoutContaminatingPastFrame() {
+        val tracker = GroundContactMotionTracker()
+        tracker.start(Surface.ROTATION_0)
+
+        // 1. Initial calm frame at t1
+        val t1 = 1_000_000_000L
+        tracker.onAccelerometerSample(t1, 0f, 9.81f, 0f)
+        tracker.onGyroscopeSample(t1, 0f, 0f, 0f)
+
+        // Historical query at t1 is reliable and not restricted
+        val orientationPast = tracker.orientationAt(t1)
+        assertTrue(orientationPast.isReliable)
+        assertFalse(orientationPast.rapidMotion)
+
+        // 2. Severe gyro (130 deg/s) arrives at t2 (t1 + 15ms) BETWEEN accelerometer callbacks
+        val t2 = t1 + 15_000_000L
+        val severeGz = Math.toRadians(130.0).toFloat()
+        tracker.onGyroscopeSample(t2, 0f, 0f, severeGz)
+
+        // Query at t2 (current time): severe gyro must immediately restrict without waiting for next accel
+        val orientationCurrent = tracker.orientationAt(t2)
+        assertFalse("Current query at severe gyro time must be restricted", orientationCurrent.isReliable)
+        assertTrue(orientationCurrent.rapidMotion)
+        assertEquals("급격한 기기 움직임 감지", orientationCurrent.degradedReason)
+
+        // But query at t1 (historical frame before gyro event) MUST NOT be contaminated
+        val orientationPastRechecked = tracker.orientationAt(t1)
+        assertTrue("Past frame before gyro burst must remain reliable", orientationPastRechecked.isReliable)
+        assertFalse("Past frame before gyro burst must not be contaminated", orientationPastRechecked.rapidMotion)
+    }
+
+    @Test
+    fun accelRegressionAndGap_clearsRapidMotionPolicy() {
+        val tracker = GroundContactMotionTracker()
+        tracker.start(Surface.ROTATION_0)
+
+        val t1 = 1_000_000_000L
+        tracker.onAccelerometerSample(t1, 0f, 9.81f, 0f)
+        // Trigger severe gyro
+        val severeGz = Math.toRadians(130.0).toFloat()
+        tracker.onGyroscopeSample(t1, 0f, 0f, severeGz)
+        assertTrue(tracker.rapidMotionPolicy.isRestricted)
+
+        // Accel regression: out-of-order timestamp resets policy
+        tracker.onAccelerometerSample(t1 - 10_000_000L, 0f, 9.81f, 0f)
+        assertFalse("Accel regression must reset rapidMotionPolicy", tracker.rapidMotionPolicy.isRestricted)
+
+        // Re-restrict
+        tracker.onGyroscopeSample(t1 + 10_000_000L, 0f, 0f, severeGz)
+        assertTrue(tracker.rapidMotionPolicy.isRestricted)
+
+        // Accel gap (> 200ms): gap resets policy
+        tracker.onAccelerometerSample(t1 + 300_000_000L, 0f, 9.81f, 0f)
+        assertFalse("Accel gap > 200ms must reset rapidMotionPolicy", tracker.rapidMotionPolicy.isRestricted)
     }
 }

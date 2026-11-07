@@ -10,13 +10,15 @@ import com.ariateam.aria.distance.BodyMountPosition
  * - Exact category order: General, Account, Diagnostics, Demo, App info
  * - Korean labels: 일반, 계정, 진단, 데모, 앱 정보
  * - General holds: stature/mount (removed from demo), voice wake, audible feedback, notifications
- * - Account holds: Gemini API key register/status/delete, replaces local LLM UI/dependencies
+ * - Account holds: Official ChatGPT (SIWC) login, safe status and plan permissions; replaces
+ *   local conversation LLM management and Gemini API keys
  *   (retains on-device Local ASR and Vision models, no local LLM download/setup gating)
  * - Diagnostics holds: strictly developer state/probes (Vision diagnostics, Voice diagnostics, App settings)
  * - Demo holds: unified demo/presentation entrances (Presentation demo, AR distance demo);
  *   strictly NO ordinary settings (e.g. mount profile) and NO diagnostics
  * - Mount choices: exactly "어깨" and "가슴" with NO explanatory subtitles
- * - Scope: Gemini only, no provider expansion; API key store not reset
+ * - Scope: Official ChatGPT login only (chatgpt/openai); Gemini, Claude, and API keys are strictly rejected
+ *   per latest user override.
  */
 enum class SettingsCategory(
     val titleResId: Int,
@@ -77,10 +79,12 @@ object SettingsPolicy {
     const val HAS_MOUNT_EXPLANATORY_SUBTITLES: Boolean = false
 
     /**
-     * Account provider policy: Gemini only. No provider expansion permitted.
+     * Account provider policy: Official ChatGPT (OpenAI) only.
+     * API keys, Gemini, and Claude are strictly rejected per latest override.
      */
     fun isSupportedAccountProvider(provider: String): Boolean =
-        provider.equals("gemini", ignoreCase = true)
+        provider.equals("chatgpt", ignoreCase = true) ||
+            provider.equals("openai", ignoreCase = true)
 
     /**
      * Validates whether a category is permitted to hold stature and mount profile setup.

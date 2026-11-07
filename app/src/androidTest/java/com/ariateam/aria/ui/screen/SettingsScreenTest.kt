@@ -1,5 +1,6 @@
 package com.ariateam.aria.ui.screen
 
+import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
@@ -15,7 +16,11 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.platform.app.InstrumentationRegistry
 import com.ariateam.aria.R
-import com.ariateam.aria.cloud.AriaKeyStorage
+import com.ariateam.aria.cloud.auth.ChatGptAccountInfo
+import com.ariateam.aria.cloud.auth.ChatGptAccountSummary
+import com.ariateam.aria.cloud.auth.ChatGptAuthRepository
+import com.ariateam.aria.cloud.auth.ChatGptAuthState
+import com.ariateam.aria.cloud.auth.ChatGptAuthStatus
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceState
 import com.ariateam.aria.ui.theme.AriaTheme
@@ -23,21 +28,57 @@ import com.ariateam.aria.vision.CameraSessionStatus
 import com.ariateam.aria.vision.VisionModelMetadata
 import com.ariateam.aria.vision.VisionModelState
 import com.ariateam.aria.vision.VisionUiState
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.junit.Rule
 import org.junit.Test
 
-private class FakeAriaKeyStorage(private var key: String? = null) : AriaKeyStorage {
-    override fun saveApiKey(key: String): Boolean {
-        this.key = key
-        return true
+private class FakeChatGptAuthRepository(
+    initialState: ChatGptAuthState = ChatGptAuthState(),
+) : ChatGptAuthRepository {
+    private val _sessionState = MutableStateFlow(initialState)
+    override val sessionState: StateFlow<ChatGptAuthState> = _sessionState.asStateFlow()
+
+    var startLoginCount = 0
+    var cancelLoginCount = 0
+    var signOutCount = 0
+    var switchAccountCount = 0
+    var lastTargetClientId: String? = null
+    var lastForceReconsent: Boolean = false
+    var savedAccountsList: List<ChatGptAccountSummary> = emptyList()
+
+    fun updateState(state: ChatGptAuthState) {
+        _sessionState.value = state
     }
-    override fun getApiKey(): String? = key
-    override fun clearApiKey(): Boolean {
-        this.key = null
-        return true
+
+    override suspend fun validAccessToken(): String? = "fake_token"
+
+    override fun startLogin(context: Context, targetClientId: String?, forceReconsent: Boolean) {
+        startLoginCount++
+        lastTargetClientId = targetClientId
+        lastForceReconsent = forceReconsent
+        _sessionState.value = _sessionState.value.copy(status = ChatGptAuthStatus.AUTHORIZING)
     }
-    override fun hasApiKey(): Boolean = !key.isNullOrBlank()
-    override fun getMaskedApiKey(): String? = if (hasApiKey()) "***" else null
+
+    override fun cancelLogin() {
+        cancelLoginCount++
+        _sessionState.value = _sessionState.value.copy(status = ChatGptAuthStatus.UNAUTHENTICATED)
+    }
+
+    override suspend fun signOut() {
+        signOutCount++
+        _sessionState.value = ChatGptAuthState(
+            status = ChatGptAuthStatus.UNAUTHENTICATED,
+            remoteRevocationConfirmed = false,
+        )
+    }
+
+    override suspend fun switchAccount(clientId: String) {
+        switchAccountCount++
+    }
+
+    override fun getSavedAccounts(): List<ChatGptAccountSummary> = savedAccountsList
 }
 
 class SettingsScreenTest {
@@ -76,8 +117,8 @@ class SettingsScreenTest {
         compose.onNodeWithText(context.getString(R.string.engine_description)).assertDoesNotExist()
     }
 
-    @Test fun accountPageManagesApiKeyAndRetainsLocalModels() {
-        val fakeStorage = FakeAriaKeyStorage()
+    @Test fun accountPageAuthenticatesWithChatGptAndRetainsLocalModels() {
+        val fakeAuth = FakeChatGptAuthRepository()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         compose.setContent {
             AriaTheme {
@@ -85,23 +126,19 @@ class SettingsScreenTest {
                     state = VoiceState(),
                     onStartWaiting = {},
                     onStop = {},
-                    keyStorage = fakeStorage,
+                    authRepository = fakeAuth,
                 )
             }
         }
         compose.onNodeWithText(context.getString(R.string.settings_account_title)).performClick()
 
-        // Unregistered key status
-        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_empty)).assertIsDisplayed()
-        compose.onNodeWithTag("gemini_register_key_btn").assertIsDisplayed().performClick()
+        // Unauthenticated status and official login button
+        compose.onNodeWithTag("chatgpt_status_unauthenticated").assertIsDisplayed()
+        compose.onNodeWithTag("chatgpt_login_button").assertIsDisplayed()
 
-        // Enter key in dialog
-        compose.onNodeWithTag("gemini_key_input").performTextInput("test-gemini-key")
-        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_save)).performClick()
-
-        // Key is registered and masked key displayed
-        compose.onNodeWithTag("gemini_change_key_btn").assertIsDisplayed()
-        compose.onNodeWithTag("gemini_clear_key_btn").assertIsDisplayed()
+        // Confirm API key input controls are absent
+        compose.onNodeWithTag("gemini_key_input").assertDoesNotExist()
+        compose.onNodeWithTag("gemini_register_key_btn").assertDoesNotExist()
 
         // Retained on-device local models (ASR and Vision) are displayed below fold; scroll before asserting
         compose.onNodeWithText(context.getString(R.string.settings_account_local_asr_title))
@@ -111,14 +148,237 @@ class SettingsScreenTest {
             .performScrollTo()
             .assertIsDisplayed()
 
-        // Clear key: scroll back up to clear button before clicking
-        compose.onNodeWithTag("gemini_clear_key_btn")
+        // Click login button
+        compose.onNodeWithTag("chatgpt_login_button")
             .performScrollTo()
             .performClick()
-        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_delete_confirm)).performClick()
-        compose.onNodeWithText(context.getString(R.string.settings_cloud_key_empty))
-            .performScrollTo()
+        org.junit.Assert.assertEquals(1, fakeAuth.startLoginCount)
+    }
+
+    @Test fun accountPageShowsAuthorizingAndAllowsCancel() {
+        val fakeAuth = FakeChatGptAuthRepository(
+            initialState = ChatGptAuthState(status = ChatGptAuthStatus.AUTHORIZING),
+        )
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        compose.setContent {
+            AriaTheme {
+                SettingsScreen(
+                    state = VoiceState(),
+                    onStartWaiting = {},
+                    onStop = {},
+                    authRepository = fakeAuth,
+                )
+            }
+        }
+        compose.onNodeWithText(context.getString(R.string.settings_account_title)).performClick()
+
+        compose.onNodeWithTag("chatgpt_status_authorizing").assertIsDisplayed()
+        compose.onNodeWithTag("chatgpt_cancel_button")
             .assertIsDisplayed()
+            .performClick()
+
+        org.junit.Assert.assertEquals(1, fakeAuth.cancelLoginCount)
+    }
+
+    @Test fun accountPageShowsPlanPermissionAndAllowsSignOutWithRevocationNotice() {
+        val fakeAuth = FakeChatGptAuthRepository(
+            initialState = ChatGptAuthState(
+                status = ChatGptAuthStatus.AUTHENTICATED,
+                account = ChatGptAccountInfo(
+                    subject = "sub_12345",
+                    email = "testuser@example.com",
+                    name = "Test User",
+                    clientId = "client_abc",
+                    scopes = setOf("chatgpt.tokens.use.direct", "resource.invoke"),
+                    hasPlanUsagePermission = true,
+                ),
+                remoteRevocationConfirmed = null,
+            ),
+        )
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        compose.setContent {
+            AriaTheme {
+                SettingsScreen(
+                    state = VoiceState(),
+                    onStartWaiting = {},
+                    onStop = {},
+                    authRepository = fakeAuth,
+                )
+            }
+        }
+        compose.onNodeWithText(context.getString(R.string.settings_account_title)).performClick()
+
+        // Account friendly label displayed
+        compose.onNodeWithTag("chatgpt_account_email").assertIsDisplayed()
+        compose.onNodeWithText("Test User (testuser@example.com)").assertIsDisplayed()
+
+        // Client ID technical identifier is NOT exposed to ordinary UI
+        compose.onNodeWithTag("chatgpt_client_id").assertDoesNotExist()
+
+        // Plan permission granted
+        compose.onNodeWithTag("chatgpt_permission_status").assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.chatgpt_permission_granted)).assertIsDisplayed()
+
+        // Normal authenticated state must NOT display alarming revocation unconfirmed notice
+        compose.onNodeWithTag("chatgpt_revocation_status").assertDoesNotExist()
+
+        // Logout flow
+        compose.onNodeWithTag("chatgpt_logout_button")
+            .assertIsDisplayed()
+            .performClick()
+
+        // Confirm logout in dialog
+        compose.onNodeWithTag("chatgpt_logout_confirm_btn")
+            .assertIsDisplayed()
+            .performClick()
+
+        org.junit.Assert.assertEquals(1, fakeAuth.signOutCount)
+
+        // After logout with unconfirmed remote revocation, notice is displayed truthfully
+        compose.onNodeWithTag("chatgpt_revocation_status").assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.chatgpt_remote_revocation_failed)).assertIsDisplayed()
+    }
+
+    @Test fun accountPageShowsReconnectReusingSavedClientIdWhenRefreshFails() {
+        val fakeAuth = FakeChatGptAuthRepository(
+            initialState = ChatGptAuthState(
+                status = ChatGptAuthStatus.REFRESH_FAILED_RECONNECT,
+                account = ChatGptAccountInfo(
+                    subject = "sub_999",
+                    email = "refresh@example.com",
+                    name = "Refresh User",
+                    clientId = "client_saved_reconnect_123",
+                    scopes = setOf("chatgpt.tokens.use.direct"),
+                    hasPlanUsagePermission = true,
+                ),
+                remoteRevocationConfirmed = null,
+            ),
+        )
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        compose.setContent {
+            AriaTheme {
+                SettingsScreen(
+                    state = VoiceState(),
+                    onStartWaiting = {},
+                    onStop = {},
+                    authRepository = fakeAuth,
+                )
+            }
+        }
+        compose.onNodeWithText(context.getString(R.string.settings_account_title)).performClick()
+
+        compose.onNodeWithTag("chatgpt_status_refresh_failed").assertIsDisplayed()
+        compose.onNodeWithTag("chatgpt_reconnect_button")
+            .assertIsDisplayed()
+            .performClick()
+
+        org.junit.Assert.assertEquals(1, fakeAuth.startLoginCount)
+        org.junit.Assert.assertEquals("client_saved_reconnect_123", fakeAuth.lastTargetClientId)
+        org.junit.Assert.assertFalse(fakeAuth.lastForceReconsent)
+    }
+
+    @Test fun accountPageUnauthenticatedOffersSavedAccountReconnectWithSavedId() {
+        val savedAccount = ChatGptAccountSummary(
+            subject = "sub_saved_1",
+            email = "saved@example.com",
+            name = "Saved User",
+            clientId = "dyn_client_saved_456",
+            isActive = true,
+            hasPlanUsagePermission = true,
+        )
+        val fakeAuth = FakeChatGptAuthRepository(
+            initialState = ChatGptAuthState(status = ChatGptAuthStatus.UNAUTHENTICATED),
+        )
+        fakeAuth.savedAccountsList = listOf(savedAccount)
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        compose.setContent {
+            AriaTheme {
+                SettingsScreen(
+                    state = VoiceState(),
+                    onStartWaiting = {},
+                    onStop = {},
+                    authRepository = fakeAuth,
+                )
+            }
+        }
+        compose.onNodeWithText(context.getString(R.string.settings_account_title)).performClick()
+
+        // Saved account reconnect button displays friendly label and reuses saved ID
+        compose.onNodeWithTag("chatgpt_login_button")
+            .assertIsDisplayed()
+            .performClick()
+
+        org.junit.Assert.assertEquals(1, fakeAuth.startLoginCount)
+        org.junit.Assert.assertEquals("dyn_client_saved_456", fakeAuth.lastTargetClientId)
+
+        // Add-account button starts dynamic registration with null targetClientId
+        compose.onNodeWithTag("chatgpt_add_account_button")
+            .assertIsDisplayed()
+            .performClick()
+
+        org.junit.Assert.assertEquals(2, fakeAuth.startLoginCount)
+        org.junit.Assert.assertNull(fakeAuth.lastTargetClientId)
+    }
+
+    @Test fun selectingSavedAccountWithGrantedScopesStartsLoginWithSavedClientId() {
+        val activeAccount = ChatGptAccountSummary(
+            subject = "sub_active",
+            email = "active@example.com",
+            name = "Active User",
+            clientId = "dyn_client_active_000",
+            isActive = true,
+            hasPlanUsagePermission = true,
+        )
+        val savedAccount = ChatGptAccountSummary(
+            subject = "sub_saved_scopes",
+            email = "scopes@example.com",
+            name = "Scopes User",
+            clientId = "dyn_client_saved_789",
+            isActive = false,
+            hasPlanUsagePermission = true, // has granted scopes stored, but signed-out
+        )
+        val fakeAuth = FakeChatGptAuthRepository(
+            initialState = ChatGptAuthState(
+                status = ChatGptAuthStatus.AUTHENTICATED,
+                account = ChatGptAccountInfo(
+                    subject = "sub_active",
+                    email = "active@example.com",
+                    name = "Active User",
+                    clientId = "dyn_client_active_000",
+                    scopes = setOf("chatgpt.tokens.use.direct"),
+                    hasPlanUsagePermission = true,
+                ),
+            ),
+        )
+        fakeAuth.savedAccountsList = listOf(activeAccount, savedAccount)
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        compose.setContent {
+            AriaTheme {
+                SettingsScreen(
+                    state = VoiceState(),
+                    onStartWaiting = {},
+                    onStop = {},
+                    authRepository = fakeAuth,
+                )
+            }
+        }
+        compose.onNodeWithText(context.getString(R.string.settings_account_title)).performClick()
+
+        // Open account picker dialog
+        compose.onNodeWithTag("chatgpt_switch_account_button")
+            .assertIsDisplayed()
+            .performClick()
+
+        // Click the saved account in the dialog
+        compose.onNodeWithText("Scopes User (scopes@example.com)")
+            .assertIsDisplayed()
+            .performClick()
+
+        // Must start login with saved client ID rather than assume tokens remain usable
+        org.junit.Assert.assertEquals(1, fakeAuth.startLoginCount)
+        org.junit.Assert.assertEquals("dyn_client_saved_789", fakeAuth.lastTargetClientId)
     }
 
     @Test fun feedbackSwitchUpdatesTheSelectedMode() {

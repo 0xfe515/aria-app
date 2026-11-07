@@ -167,11 +167,22 @@ class MotionFusionEngineTest {
         }
         assertTrue(engine.calibrateForward(t))
 
-        // Rapid violent turn around Y axis at 60 deg/s (> 35 deg/s threshold)
+        // Brief moderate spike around Y axis at 60 deg/s (< 120 deg/s, duration 10ms < 150ms)
         t += 10_000_000L
         val rapidGy = Math.toRadians(60.0).toFloat()
         engine.onAccelerometerSample(t, 0f, 9.81f, 0f)
         engine.onGyroscopeSample(t, 0f, rapidGy, 0f)
+
+        val spikeState = engine.stateAt(t)
+        assertNull("Brief moderate spike should not immediately degrade", spikeState.degradedReason)
+        assertTrue(spikeState.isReliable)
+
+        // Sustained rapid turn (> 35 deg/s sustained for >= 150ms after smoothed rate crosses 35 deg/s: 25 samples = 250ms)
+        for (i in 0 until 25) {
+            t += 10_000_000L
+            engine.onAccelerometerSample(t, 0f, 9.81f, 0f)
+            engine.onGyroscopeSample(t, 0f, rapidGy, 0f)
+        }
 
         val turnState = engine.stateAt(t)
         assertEquals(MotionDegradedReason.RAPID_TURN_TRANSIENT, turnState.degradedReason)

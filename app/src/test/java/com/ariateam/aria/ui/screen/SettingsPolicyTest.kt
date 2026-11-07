@@ -14,7 +14,7 @@ import org.junit.Test
  * - Consolidation of ordinary settings and stature/mount in General (removed from Demo)
  * - Developer state/probes isolated in Diagnostics with NO duplicate demo entrance
  * - Unified presentation and AR distance entrances in Demo with NO ordinary settings or diagnostics
- * - Account scope: Gemini only, replaces local conversation LLM management while retaining
+ * - Account scope: Official ChatGPT only, replaces local conversation LLM management while retaining
  *   on-device Local ASR and Vision models
  * - Mount choices: exactly "어깨" and "가슴" with NO explanatory subtitles
  */
@@ -75,7 +75,7 @@ class SettingsPolicyTest {
     }
 
     @Test
-    fun accountReplacesLocalLlmManagementAndScopeIsGeminiOnly() {
+    fun accountReplacesLocalLlmManagementAndScopeIsOfficialChatGptOnly() {
         // Local conversation LLM UI management is disabled / removed
         assertFalse(SettingsPolicy.IS_LOCAL_CONVERSATION_LLM_MANAGEMENT_ENABLED)
 
@@ -83,13 +83,19 @@ class SettingsPolicyTest {
         assertTrue(SettingsPolicy.IS_LOCAL_ASR_RETAINED)
         assertTrue(SettingsPolicy.IS_LOCAL_VISION_RETAINED)
 
-        // Gemini only account provider policy
-        assertTrue(SettingsPolicy.isSupportedAccountProvider("gemini"))
-        assertTrue(SettingsPolicy.isSupportedAccountProvider("GEMINI"))
-        assertTrue(SettingsPolicy.isSupportedAccountProvider("Gemini"))
-        assertFalse(SettingsPolicy.isSupportedAccountProvider("openai"))
+        // Official ChatGPT (OpenAI) only account provider policy
+        assertTrue(SettingsPolicy.isSupportedAccountProvider("chatgpt"))
+        assertTrue(SettingsPolicy.isSupportedAccountProvider("CHATGPT"))
+        assertTrue(SettingsPolicy.isSupportedAccountProvider("openai"))
+        assertTrue(SettingsPolicy.isSupportedAccountProvider("OPENAI"))
+
+        // Legacy / unverified providers and API keys are strictly rejected
+        assertFalse(SettingsPolicy.isSupportedAccountProvider("gemini"))
+        assertFalse(SettingsPolicy.isSupportedAccountProvider("GEMINI"))
+        assertFalse(SettingsPolicy.isSupportedAccountProvider("claude"))
         assertFalse(SettingsPolicy.isSupportedAccountProvider("anthropic"))
         assertFalse(SettingsPolicy.isSupportedAccountProvider("ollama"))
+        assertFalse(SettingsPolicy.isSupportedAccountProvider("api_key"))
     }
 
     @Test

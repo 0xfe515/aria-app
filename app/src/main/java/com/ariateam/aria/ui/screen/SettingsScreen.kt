@@ -13,7 +13,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,8 +32,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ariateam.aria.R
-import com.ariateam.aria.cloud.AndroidKeyStoreAriaKeyStorage
-import com.ariateam.aria.cloud.AriaKeyStorage
+import com.ariateam.aria.cloud.auth.ChatGptAuthRepository
+import com.ariateam.aria.cloud.auth.ChatGptAuthState
+import com.ariateam.aria.cloud.auth.ChatGptAuthStatus
+import com.ariateam.aria.cloud.auth.DefaultChatGptAuthRepository
 import com.ariateam.aria.command.LegacyConversationModelCleaner
 import com.ariateam.aria.distance.BodyMountProfile
 import com.ariateam.aria.distance.BodyMountProfileStore
@@ -73,17 +74,13 @@ fun SettingsScreen(
     onOpenDistanceMode: () -> Unit = {},
     onOpenProfileSetup: () -> Unit = {},
     onOpenAppSettings: () -> Unit = {},
-    keyStorage: AriaKeyStorage? = null,
+    authRepository: ChatGptAuthRepository? = null,
 ) {
     val context = LocalContext.current
-    val effectiveKeyStorage = remember(context, keyStorage) {
-        keyStorage ?: AndroidKeyStoreAriaKeyStorage(context)
+    val effectiveAuthRepository = remember(context, authRepository) {
+        authRepository ?: DefaultChatGptAuthRepository.getInstance(context)
     }
-    var hasApiKey by remember { mutableStateOf(effectiveKeyStorage.hasApiKey()) }
-    var maskedKey by remember { mutableStateOf(effectiveKeyStorage.getMaskedApiKey()) }
-    var showKeyInputDialog by rememberSaveable { mutableStateOf(false) }
-    var confirmKeyDelete by rememberSaveable { mutableStateOf(false) }
-    var keyInputText by rememberSaveable { mutableStateOf("") }
+    val authState by effectiveAuthRepository.sessionState.collectAsStateWithLifecycle()
     var hasLegacyModel by remember { mutableStateOf(LegacyConversationModelCleaner.hasLegacyArtifacts(context)) }
     var legacySizeBytes by remember { mutableStateOf(LegacyConversationModelCleaner.getLegacyArtifactSizeBytes(context)) }
     var showCleanupDialog by rememberSaveable { mutableStateOf(false) }
@@ -114,8 +111,7 @@ fun SettingsScreen(
     ) {
         when (page) {
             SettingsPage.Root -> SettingsRoot(
-                hasApiKey = hasApiKey,
-                maskedKey = maskedKey,
+                authState = authState,
                 onOpenGeneral = { page = SettingsPage.General },
                 onOpenAccount = { page = SettingsPage.Account },
                 onOpenDiagnostics = { page = SettingsPage.Diagnostics },
@@ -139,25 +135,11 @@ fun SettingsScreen(
                 onBack = { page = SettingsPage.Root },
             )
 
-            SettingsPage.Account -> AccountSettings(
-                hasApiKey = hasApiKey,
-                maskedKey = maskedKey,
+            SettingsPage.Account -> ChatGptAccountSettings(
+                authRepository = effectiveAuthRepository,
                 hasLegacyModel = hasLegacyModel,
                 legacySizeBytes = legacySizeBytes,
-                onRegisterKey = {
-                    keyInputText = ""
-                    showKeyInputDialog = true
-                },
-                onChangeKey = {
-                    keyInputText = ""
-                    showKeyInputDialog = true
-                },
-                onClearKey = {
-                    confirmKeyDelete = true
-                },
-                onOpenCleanup = {
-                    showCleanupDialog = true
-                },
+                onOpenCleanup = { showCleanupDialog = true },
                 onBack = { page = SettingsPage.Root },
             )
 
@@ -186,74 +168,6 @@ fun SettingsScreen(
             onDismiss = { showInternalProfileDialog = false },
             initialProfile = profile,
             profileStore = profileStore,
-        )
-    }
-
-    if (showKeyInputDialog) {
-        AlertDialog(
-            onDismissRequest = { showKeyInputDialog = false },
-            title = { Text(stringResource(R.string.settings_cloud_key_input_title)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = stringResource(R.string.settings_cloud_privacy_notice),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedTextField(
-                        value = keyInputText,
-                        onValueChange = { keyInputText = it },
-                        modifier = Modifier.fillMaxWidth().testTag("gemini_key_input"),
-                        label = { Text(stringResource(R.string.settings_cloud_key_input_hint)) },
-                        singleLine = true,
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val trimmed = keyInputText.trim()
-                        if (trimmed.isNotEmpty()) {
-                            effectiveKeyStorage.saveApiKey(trimmed)
-                            hasApiKey = effectiveKeyStorage.hasApiKey()
-                            maskedKey = effectiveKeyStorage.getMaskedApiKey()
-                        }
-                        showKeyInputDialog = false
-                    },
-                ) {
-                    Text(stringResource(R.string.settings_cloud_key_save))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showKeyInputDialog = false }) {
-                    Text(stringResource(R.string.settings_cancel))
-                }
-            },
-        )
-    }
-
-    if (confirmKeyDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmKeyDelete = false },
-            title = { Text(stringResource(R.string.settings_cloud_key_delete_title)) },
-            text = { Text(stringResource(R.string.settings_cloud_key_delete_message)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmKeyDelete = false
-                        effectiveKeyStorage.clearApiKey()
-                        hasApiKey = effectiveKeyStorage.hasApiKey()
-                        maskedKey = effectiveKeyStorage.getMaskedApiKey()
-                    },
-                ) {
-                    Text(stringResource(R.string.settings_cloud_key_delete_confirm))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmKeyDelete = false }) {
-                    Text(stringResource(R.string.settings_cancel))
-                }
-            },
         )
     }
 
@@ -288,8 +202,7 @@ fun SettingsScreen(
 
 @Composable
 private fun SettingsRoot(
-    hasApiKey: Boolean,
-    maskedKey: String?,
+    authState: ChatGptAuthState,
     onOpenGeneral: () -> Unit,
     onOpenAccount: () -> Unit,
     onOpenDiagnostics: () -> Unit,
@@ -312,13 +225,22 @@ private fun SettingsRoot(
     )
 
     // 2. 계정 (Account)
+    val accountSummary = when (authState.status) {
+        ChatGptAuthStatus.AUTHENTICATED -> {
+            val userLabel = ChatGptAccountUiPolicy.formatFriendlyAccountLabel(
+                email = authState.account?.email,
+                name = authState.account?.name,
+            )
+            stringResource(R.string.settings_cloud_summary_registered, userLabel)
+        }
+        ChatGptAuthStatus.AUTHORIZING -> stringResource(R.string.settings_cloud_summary_authorizing)
+        ChatGptAuthStatus.PLAN_USE_NOT_ENABLED -> stringResource(R.string.settings_cloud_summary_plan_required)
+        ChatGptAuthStatus.REFRESH_FAILED_RECONNECT -> stringResource(R.string.settings_cloud_summary_reconnect)
+        ChatGptAuthStatus.UNAUTHENTICATED -> stringResource(R.string.settings_cloud_summary_empty)
+    }
     SettingsNavigationRow(
         title = stringResource(R.string.settings_account_title),
-        summary = if (hasApiKey) {
-            stringResource(R.string.settings_cloud_summary_registered, maskedKey.orEmpty())
-        } else {
-            stringResource(R.string.settings_cloud_summary_empty)
-        },
+        summary = accountSummary,
         onClick = onOpenAccount,
     )
 
@@ -428,108 +350,6 @@ private fun GeneralSettings(
 }
 
 @Composable
-private fun AccountSettings(
-    hasApiKey: Boolean,
-    maskedKey: String?,
-    hasLegacyModel: Boolean,
-    legacySizeBytes: Long,
-    onRegisterKey: () -> Unit,
-    onChangeKey: () -> Unit,
-    onClearKey: () -> Unit,
-    onOpenCleanup: () -> Unit,
-    onBack: () -> Unit,
-) {
-    SettingsPageHeader(stringResource(R.string.settings_account_title), onBack)
-    SettingsSectionTitle(stringResource(R.string.settings_account_group))
-
-    SettingsNavigationRow(
-        title = stringResource(R.string.settings_cloud_model_title),
-        summary = stringResource(R.string.settings_cloud_model_summary),
-        onClick = {},
-    )
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            text = if (hasApiKey) {
-                stringResource(R.string.settings_cloud_key_registered, maskedKey.orEmpty())
-            } else {
-                stringResource(R.string.settings_cloud_key_empty)
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (hasApiKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (hasApiKey) {
-                TextButton(onClick = onChangeKey, modifier = Modifier.testTag("gemini_change_key_btn")) {
-                    Text(stringResource(R.string.settings_cloud_key_change_btn))
-                }
-                TextButton(onClick = onClearKey, modifier = Modifier.testTag("gemini_clear_key_btn")) {
-                    Text(stringResource(R.string.settings_cloud_key_clear_btn), color = MaterialTheme.colorScheme.error)
-                }
-            } else {
-                TextButton(onClick = onRegisterKey, modifier = Modifier.testTag("gemini_register_key_btn")) {
-                    Text(stringResource(R.string.settings_cloud_key_register_btn))
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = stringResource(R.string.settings_cloud_privacy_notice),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-
-    // 대화 및 질문 자동 전환 정책 (Automatic Fallback Policy)
-    SettingsSectionTitle(stringResource(R.string.settings_cloud_fallback_policy_title))
-    Text(
-        text = stringResource(R.string.settings_cloud_fallback_policy_summary),
-        style = MaterialTheme.typography.bodyMedium,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-    )
-
-    // 저장공간 관리 (선택적 레거시 로컬 모델 정리)
-    SettingsSectionTitle(stringResource(R.string.settings_account_storage_section))
-    val sizeText = if (legacySizeBytes > 0L) {
-        val sizeMb = legacySizeBytes / (1024L * 1024L)
-        if (sizeMb >= 1024L) "%.2f GB".format(legacySizeBytes / (1024.0 * 1024.0 * 1024.0))
-        else "$sizeMb MB"
-    } else "0 MB"
-    SettingsNavigationRow(
-        title = stringResource(R.string.settings_account_cleanup_title),
-        summary = if (hasLegacyModel) {
-            stringResource(R.string.settings_account_cleanup_summary_present, sizeText)
-        } else {
-            stringResource(R.string.settings_account_cleanup_summary_empty)
-        },
-        onClick = onOpenCleanup,
-    )
-
-    // 온디바이스 AI 컴포넌트 (음성 인식 및 비전)
-    SettingsSectionTitle(stringResource(R.string.settings_account_local_models_group))
-    SettingsNavigationRow(
-        title = stringResource(R.string.settings_account_local_asr_title),
-        summary = stringResource(R.string.settings_account_local_asr_summary),
-        onClick = {},
-    )
-    SettingsNavigationRow(
-        title = stringResource(R.string.settings_account_local_vision_title),
-        summary = stringResource(R.string.settings_account_local_vision_summary),
-        onClick = {},
-    )
-}
-
-@Composable
 private fun DiagnosticsSettings(
     onOpenVisionDiagnostics: () -> Unit,
     onOpenVoiceDiagnostics: () -> Unit,
@@ -608,7 +428,7 @@ private fun AppInfoSettings(onOpenLicenses: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun SettingsPageHeader(title: String, onBack: () -> Unit) {
+internal fun SettingsPageHeader(title: String, onBack: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -623,7 +443,7 @@ private fun SettingsPageHeader(title: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun SettingsSectionTitle(title: String) {
+internal fun SettingsSectionTitle(title: String) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleSmall,

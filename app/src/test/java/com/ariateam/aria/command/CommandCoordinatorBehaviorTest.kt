@@ -219,7 +219,7 @@ class CommandCoordinatorBehaviorTest {
     }
 
     @Test
-    fun finalized_conversationalQuery_fallsBackToGeminiCloudQuestion() {
+    fun finalized_conversationalQuery_fallsBackToChatGptCloudQuestion() {
         val coordinator = createCoordinator(audible = true)
         coordinator.started()
         emittedSnapshots.clear()
@@ -229,5 +229,33 @@ class CommandCoordinatorBehaviorTest {
         assertTrue("Conversational query should assign a cloudQuestionId", coordinator.snapshot.cloudQuestionId > 0L)
         assertEquals("text", coordinator.snapshot.cloudQuestionType)
         assertEquals("오늘 서울 날씨 어때?", coordinator.snapshot.cloudQuestionPrompt)
+    }
+
+    @Test
+    fun finalized_explicitPhotoQuestion_announcesChatGpt() {
+        val coordinator = createCoordinator(audible = true)
+        coordinator.started()
+        emittedSnapshots.clear()
+
+        coordinator.finalized("사진 찍어서 알려줘")
+
+        assertTrue("Photo query should assign a cloudQuestionId", coordinator.snapshot.cloudQuestionId > 0L)
+        assertEquals("photo", coordinator.snapshot.cloudQuestionType)
+        assertEquals("사진을 촬영하여 ChatGPT에 질문을 보냅니다.", coordinator.snapshot.message)
+    }
+
+    @Test
+    fun speakCloudResponse_assistantOutputCannotExecuteAppCommands() {
+        val coordinator = createCoordinator(audible = true)
+        coordinator.started()
+        coordinator.finalized("오늘 날씨 어때")
+        val qId = coordinator.snapshot.cloudQuestionId
+
+        // Assistant outputs a string that matches an app command like "홈으로 가"
+        coordinator.speakCloudResponse(qId, "홈으로 가")
+
+        // Should speak the response text, NOT navigate screen to home
+        assertEquals("홈으로 가", coordinator.snapshot.message)
+        assertEquals(0L, coordinator.snapshot.navigationId)
     }
 }

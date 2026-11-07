@@ -29,6 +29,10 @@ class MotionFusionEngine(
     private val recenteringTauSeconds: Float = 3.5f,
     private val postTurnReanchorWindowNanos: Long = 650_000_000L,
     private val postTurnMaxYawRateDegPerSec: Float = 8.0f,
+    val rapidTurnPolicy: MotionRapidTurnPolicy = MotionRapidTurnPolicy.forDirection(
+        entryThresholdDegPerSec = rapidTurnThresholdDegPerSec,
+        exitThresholdDegPerSec = (rapidTurnThresholdDegPerSec - 10f).coerceAtLeast(10f),
+    ),
 ) {
     private val lock = Any()
 
@@ -127,6 +131,7 @@ class MotionFusionEngine(
                 autoCalibrationReadyTimestampNanos = 0L
                 isAutoCalibrationReady = false
                 postTurnStableStartNanos = 0L
+                rapidTurnPolicy.reset()
             }
         }
     }
@@ -179,6 +184,7 @@ class MotionFusionEngine(
                 autoCalibrationReadyTimestampNanos = 0L
                 isAutoCalibrationReady = false
                 postTurnStableStartNanos = 0L
+                rapidTurnPolicy.reset()
             }
         }
     }
@@ -250,6 +256,7 @@ class MotionFusionEngine(
             ringHead = 0
             ringCount = 0
             latestState = MotionState()
+            rapidTurnPolicy.reset()
         }
     }
 
@@ -263,6 +270,7 @@ class MotionFusionEngine(
         if (!rawAx.isFinite() || !rawAy.isFinite() || !rawAz.isFinite()) {
             synchronized(lock) {
                 accelFault = true
+                rapidTurnPolicy.reset()
                 recordDegradedSnapshotLocked(timestampNanos, MotionDegradedReason.NON_FINITE_DATA)
             }
             return false
@@ -272,7 +280,8 @@ class MotionFusionEngine(
             if (lastAccelTimestampNanos > 0L) {
                 val dtNanos = timestampNanos - lastAccelTimestampNanos
                 if (dtNanos <= 0L) {
-                    // Out-of-order accel timestamp: invalidate pending stable window without integrating
+                    // Out-of-order accel timestamp: clear policy and invalidate pending stable window without integrating
+                    rapidTurnPolicy.reset()
                     autoCalibrationReadyTimestampNanos = 0L
                     isAutoCalibrationReady = false
                     postTurnStableStartNanos = 0L
@@ -281,6 +290,7 @@ class MotionFusionEngine(
                 if (dtNanos > streamFreshnessToleranceNanos) {
                     lastAccelTimestampNanos = timestampNanos
                     isCalibrated = false
+                    rapidTurnPolicy.reset()
                     // Reset auto-calibration tracking when stream gap detected
                     autoCalibrationReadyTimestampNanos = 0L
                     isAutoCalibrationReady = false
@@ -336,6 +346,7 @@ class MotionFusionEngine(
         if (!rawGx.isFinite() || !rawGy.isFinite() || !rawGz.isFinite()) {
             synchronized(lock) {
                 gyroFault = true
+                rapidTurnPolicy.reset()
                 recordDegradedSnapshotLocked(timestampNanos, MotionDegradedReason.NON_FINITE_DATA)
             }
             return false
@@ -345,16 +356,18 @@ class MotionFusionEngine(
             if (lastGyroTimestampNanos > 0L) {
                 val dtNanos = timestampNanos - lastGyroTimestampNanos
                 if (dtNanos <= 0L) {
-                    // Out-of-order gyro timestamp: invalidate pending stable window without integrating
+                    // Out-of-order gyro timestamp / regression: clear policy and invalidate pending stable window
+                    rapidTurnPolicy.reset()
                     autoCalibrationReadyTimestampNanos = 0L
                     isAutoCalibrationReady = false
                     postTurnStableStartNanos = 0L
                     return false
                 }
                 if (dtNanos > streamFreshnessToleranceNanos) {
-                    // Stream gap detected: do NOT integrate across gap, invalidate calibration
+                    // Stream gap detected: do NOT integrate across gap, invalidate calibration and clear policy
                     lastGyroTimestampNanos = timestampNanos
                     isCalibrated = false
+                    rapidTurnPolicy.reset()
                     // Store latest raw gyro so accel callbacks don't consult stale quiet vector
                     latestRawGx = rawGx
                     latestRawGy = rawGy
@@ -395,6 +408,8 @@ class MotionFusionEngine(
             if (abs(yawRateDegPerSec) > gyroDeadbandDegPerSec) {
                 integratedHeadingDeg += yawRateDegPerSec * dtSec
             }
+
+            rapidTurnPolicy.update(timestampNanos, yawRateDegPerSec)
 
             updateLatestStateLocked(timestampNanos, yawRateDegPerSec, rawGx, rawGy, rawGz, gyroDtSec = dtSec)
             return true
@@ -453,7 +468,7 @@ class MotionFusionEngine(
         } else if (pitchDeg < minPitchDegrees || pitchDeg > maxPitchDegrees || abs(rollDeg) > maxRollDegrees) {
             degradedReason = MotionDegradedReason.CAMERA_TILT_INVALID
             confidence = (1f - (abs(rollDeg) / 60f)).coerceIn(0.1f, 0.4f)
-        } else if (abs(yawRate) > rapidTurnThresholdDegPerSec) {
+        } else if (rapidTurnPolicy.isRestricted) {
             degradedReason = MotionDegradedReason.RAPID_TURN_TRANSIENT
             confidence = 0.2f
         }
@@ -545,6 +560,8 @@ class MotionFusionEngine(
             isCameraForwardWalk = isCalibrated && degradedReason == null,
             confidence = confidence,
             degradedReason = degradedReason,
+            smoothedYawRateDegPerSec = rapidTurnPolicy.smoothedRateDegPerSec,
+            restrictionReason = rapidTurnPolicy.lastTransitionReason,
         )
 
         latestState = state

@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import android.view.Surface
+import com.ariateam.aria.hazard.MotionRapidTurnPolicy
 import com.ariateam.aria.hazard.Vector3D
 import kotlin.math.sqrt
 
@@ -25,6 +26,9 @@ data class GroundContactOrientation(
     val isReliable: Boolean = false,
     val degradedReason: String? = null,
     val rapidMotion: Boolean = false,
+    val rawGyroDegPerSec: Float = 0f,
+    val smoothedGyroDegPerSec: Float = 0f,
+    val restrictionReason: String? = null,
 )
 
 /**
@@ -34,7 +38,7 @@ data class GroundContactOrientation(
  * - Free of heading calibration dependency (works immediately from gravity).
  * - Avoids magnetometer dependency (uses accelerometer + gyro).
  * - Maps Android sensor coordinates to upright camera coordinates based on display rotation.
- * - Enforces freshness tolerance (<= 200ms) and rapid-motion angular velocity rejection (> 45 deg/s).
+ * - Enforces freshness tolerance (<= 200ms) and time-based rapid-motion policy (> 45 deg/s sustained 150ms, >= 120 deg/s immediate).
  * - Validates acceleration magnitude (rejects freefall < 4.5 m/s² and extreme shock > 16.5 m/s²).
  * - Bounded history ring buffer aligns exact camera frame timestamps.
  * - Per-session listener instances fence late callbacks across stop/start cycles.
@@ -42,6 +46,7 @@ data class GroundContactOrientation(
 class GroundContactMotionTracker(
     context: Context? = null,
     private val sensorDelay: Int = SensorManager.SENSOR_DELAY_GAME,
+    val rapidMotionPolicy: MotionRapidTurnPolicy = MotionRapidTurnPolicy.forGroundContact(),
     private val clock: () -> Long = { SystemClock.elapsedRealtimeNanos() },
 ) : AutoCloseable {
 
@@ -74,7 +79,6 @@ class GroundContactMotionTracker(
     // Fault latching
     private var accelFault = false
     private var gyroFault = false
-    private var rapidTurnUntilNanos = 0L
 
     // Bounded history ring buffer for timestamp-aligned orientation
     internal data class HistoryEntry(
@@ -84,6 +88,9 @@ class GroundContactMotionTracker(
         val upZ: Float,
         val isFault: Boolean,
         val isRapidMotion: Boolean,
+        val rawGyroDegPerSec: Float = 0f,
+        val smoothedGyroDegPerSec: Float = 0f,
+        val restrictionReason: String? = null,
     )
 
     private val historyCapacity = 128
@@ -181,6 +188,7 @@ class GroundContactMotionTracker(
                 hasGravity = false
                 ringHead = 0
                 ringCount = 0
+                rapidMotionPolicy.reset()
             }
         }
     }
@@ -198,11 +206,11 @@ class GroundContactMotionTracker(
         hasGravity = false
         accelFault = false
         gyroFault = false
-        rapidTurnUntilNanos = 0L
         ringHead = 0
         ringCount = 0
         latestAccelTimestampNanos = 0L
         latestGyroTimestampNanos = 0L
+        rapidMotionPolicy.reset()
     }
 
     fun onAccelerometerSample(
@@ -220,6 +228,7 @@ class GroundContactMotionTracker(
 
             if (!rawAx.isFinite() || !rawAy.isFinite() || !rawAz.isFinite()) {
                 accelFault = true
+                rapidMotionPolicy.reset()
                 pushHistoryLocked(timestampNanos, 0f, -1f, 0f, isFault = true, isRapid = false)
                 return false
             }
@@ -228,13 +237,20 @@ class GroundContactMotionTracker(
             val rawMag = sqrt(rawAx * rawAx + rawAy * rawAy + rawAz * rawAz)
             if (rawMag < MIN_GRAVITY_MAG || rawMag > MAX_GRAVITY_MAG) {
                 accelFault = true
+                rapidMotionPolicy.reset()
                 pushHistoryLocked(timestampNanos, 0f, -1f, 0f, isFault = true, isRapid = false)
                 return false
             }
 
             val dtSec = if (latestAccelTimestampNanos > 0L) {
                 val dt = timestampNanos - latestAccelTimestampNanos
-                if (dt <= 0L) return false
+                if (dt <= 0L) {
+                    rapidMotionPolicy.reset()
+                    return false
+                }
+                if (dt > FRESHNESS_TOLERANCE_NANOS) {
+                    rapidMotionPolicy.reset()
+                }
                 (dt / 1_000_000_000.0f).coerceIn(0.001f, 0.5f)
             } else {
                 0.01f
@@ -270,8 +286,18 @@ class GroundContactMotionTracker(
                 gravCamZ = (1f - alpha) * gravCamZ + alpha * aCamZ
             }
 
-            val isRapid = timestampNanos < rapidTurnUntilNanos
-            pushHistoryLocked(timestampNanos, gravCamX, gravCamY, gravCamZ, isFault = false, isRapid = isRapid)
+            val isRapid = rapidMotionPolicy.isRestricted
+            pushHistoryLocked(
+                timestampNanos = timestampNanos,
+                gx = gravCamX,
+                gy = gravCamY,
+                gz = gravCamZ,
+                isFault = false,
+                isRapid = isRapid,
+                rawGyro = rapidMotionPolicy.rawRateDegPerSec,
+                smoothedGyro = rapidMotionPolicy.smoothedRateDegPerSec,
+                restrictionReason = rapidMotionPolicy.lastTransitionReason,
+            )
             return true
         }
     }
@@ -289,11 +315,13 @@ class GroundContactMotionTracker(
             if (listener != null && activeListener !== listener) return false
             if (timestampNanos <= 0L) return false
             if (latestGyroTimestampNanos > 0L && timestampNanos <= latestGyroTimestampNanos) {
+                rapidMotionPolicy.reset()
                 return false
             }
 
             if (!rawGx.isFinite() || !rawGy.isFinite() || !rawGz.isFinite()) {
                 gyroFault = true
+                rapidMotionPolicy.reset()
                 return false
             }
 
@@ -301,12 +329,7 @@ class GroundContactMotionTracker(
             gyroFault = false
             val omegaMagRad = sqrt(rawGx * rawGx + rawGy * rawGy + rawGz * rawGz)
             val omegaMagDeg = Math.toDegrees(omegaMagRad.toDouble()).toFloat()
-            if (omegaMagDeg > RAPID_MOTION_THRESHOLD_DEG_PER_SEC) {
-                val newHoldUntil = timestampNanos + RAPID_MOTION_HOLD_NANOS
-                if (newHoldUntil > rapidTurnUntilNanos) {
-                    rapidTurnUntilNanos = newHoldUntil
-                }
-            }
+            rapidMotionPolicy.update(timestampNanos, omegaMagDeg)
             return true
         }
     }
@@ -318,6 +341,9 @@ class GroundContactMotionTracker(
         gz: Float,
         isFault: Boolean,
         isRapid: Boolean,
+        rawGyro: Float = rapidMotionPolicy.rawRateDegPerSec,
+        smoothedGyro: Float = rapidMotionPolicy.smoothedRateDegPerSec,
+        restrictionReason: String? = rapidMotionPolicy.lastTransitionReason,
     ) {
         val entry = HistoryEntry(
             timestampNanos = timestampNanos,
@@ -326,6 +352,9 @@ class GroundContactMotionTracker(
             upZ = gz,
             isFault = isFault,
             isRapidMotion = isRapid,
+            rawGyroDegPerSec = rawGyro,
+            smoothedGyroDegPerSec = smoothedGyro,
+            restrictionReason = restrictionReason,
         )
         ringBuffer[ringHead] = entry
         ringHead = (ringHead + 1) % historyCapacity
@@ -377,6 +406,9 @@ class GroundContactMotionTracker(
                     upVector = Vector3D(0f, -1f, 0f),
                     isReliable = false,
                     degradedReason = "센서 데이터 탐색 실패",
+                    rawGyroDegPerSec = 0f,
+                    smoothedGyroDegPerSec = 0f,
+                    restrictionReason = null,
                 )
             }
 
@@ -387,6 +419,9 @@ class GroundContactMotionTracker(
                     upVector = Vector3D(0f, -1f, 0f),
                     isReliable = false,
                     degradedReason = "센서 데이터 지연",
+                    rawGyroDegPerSec = bestEntry.rawGyroDegPerSec,
+                    smoothedGyroDegPerSec = bestEntry.smoothedGyroDegPerSec,
+                    restrictionReason = bestEntry.restrictionReason,
                 )
             }
 
@@ -396,17 +431,30 @@ class GroundContactMotionTracker(
                     upVector = Vector3D(0f, -1f, 0f),
                     isReliable = false,
                     degradedReason = "비정상 센서 수치(가속도 이상) 감지",
+                    rawGyroDegPerSec = bestEntry.rawGyroDegPerSec,
+                    smoothedGyroDegPerSec = bestEntry.smoothedGyroDegPerSec,
+                    restrictionReason = bestEntry.restrictionReason,
                 )
             }
 
-            if (bestEntry.isRapidMotion || queryTimestampNanos < rapidTurnUntilNanos) {
+            val isRestricted = bestEntry.isRapidMotion ||
+                (queryTimestampNanos >= latestGyroTimestampNanos && latestGyroTimestampNanos > 0L && rapidMotionPolicy.isRestricted)
+            if (isRestricted) {
                 val upVec = Vector3D(bestEntry.upX, bestEntry.upY, bestEntry.upZ).normalize() ?: Vector3D(0f, -1f, 0f)
+                val reason = if (bestEntry.isRapidMotion) {
+                    bestEntry.restrictionReason
+                } else {
+                    rapidMotionPolicy.lastTransitionReason
+                }
                 return GroundContactOrientation(
                     timestampNanos = queryTimestampNanos,
                     upVector = upVec,
                     isReliable = false,
                     degradedReason = "급격한 기기 움직임 감지",
                     rapidMotion = true,
+                    rawGyroDegPerSec = if (bestEntry.isRapidMotion) bestEntry.rawGyroDegPerSec else rapidMotionPolicy.rawRateDegPerSec,
+                    smoothedGyroDegPerSec = if (bestEntry.isRapidMotion) bestEntry.smoothedGyroDegPerSec else rapidMotionPolicy.smoothedRateDegPerSec,
+                    restrictionReason = reason,
                 )
             }
 
@@ -418,6 +466,9 @@ class GroundContactMotionTracker(
                     upVector = Vector3D(0f, -1f, 0f),
                     isReliable = false,
                     degradedReason = "중력 벡터 크기 비정상",
+                    rawGyroDegPerSec = bestEntry.rawGyroDegPerSec,
+                    smoothedGyroDegPerSec = bestEntry.smoothedGyroDegPerSec,
+                    restrictionReason = bestEntry.restrictionReason,
                 )
             }
 
@@ -427,6 +478,9 @@ class GroundContactMotionTracker(
                 isReliable = true,
                 degradedReason = null,
                 rapidMotion = false,
+                rawGyroDegPerSec = bestEntry.rawGyroDegPerSec,
+                smoothedGyroDegPerSec = bestEntry.smoothedGyroDegPerSec,
+                restrictionReason = bestEntry.restrictionReason,
             )
         }
     }
@@ -438,8 +492,6 @@ class GroundContactMotionTracker(
     companion object {
         const val FRESHNESS_TOLERANCE_NANOS = 200_000_000L // 200ms
         const val GRAVITY_TAU_SECONDS = 0.20f
-        const val RAPID_MOTION_THRESHOLD_DEG_PER_SEC = 45f
-        const val RAPID_MOTION_HOLD_NANOS = 200_000_000L // 200ms
         const val MIN_GRAVITY_MAG = 4.5f // Freefall threshold
         const val MAX_GRAVITY_MAG = 16.5f // Extreme acceleration threshold
     }

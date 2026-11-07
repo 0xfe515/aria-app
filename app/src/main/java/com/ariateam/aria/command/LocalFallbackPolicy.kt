@@ -3,7 +3,7 @@ package com.ariateam.aria.command
 /**
  * Evaluates whether an unparsed Korean voice utterance should be rejected locally
  * (as a cancellation, negation, or incomplete local command intent)
- * or allowed to fall back to conversational cloud processing (Gemini).
+ * or allowed to fall back to conversational cloud processing (ChatGPT).
  */
 object LocalFallbackPolicy {
 

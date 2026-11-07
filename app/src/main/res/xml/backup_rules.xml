@@ -2,5 +2,6 @@
 <full-backup-content>
     <exclude domain="sharedpref" path="gemma_download.xml" />
     <exclude domain="sharedpref" path="aria_cloud_secure_prefs.xml" />
+    <exclude domain="sharedpref" path="aria_chatgpt_auth_prefs.xml" />
     <exclude domain="external" path="Download/" />
 </full-backup-content>

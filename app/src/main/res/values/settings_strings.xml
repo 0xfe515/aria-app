@@ -10,16 +10,16 @@
 
     <!-- Account (계정) -->
     <string name="settings_account_title">계정</string>
-    <string name="settings_account_group">Gemini 계정</string>
-    <string name="settings_account_summary_registered">Gemini API 키 등록됨 (%1$s)</string>
-    <string name="settings_account_summary_empty">Gemini API 키 미설정</string>
+    <string name="settings_account_group">ChatGPT 계정</string>
+    <string name="settings_account_summary_registered">ChatGPT 계정 연결됨 (%1$s)</string>
+    <string name="settings_account_summary_empty">ChatGPT 로그인 필요</string>
     <string name="settings_account_local_models_group">온디바이스 AI</string>
     <string name="settings_account_local_asr_title">한국어 음성 인식</string>
     <string name="settings_account_local_asr_summary">온디바이스 (Sherpa-ONNX) · 오프라인 동작</string>
     <string name="settings_account_local_vision_title">보행 안전 비전</string>
     <string name="settings_account_local_vision_summary">온디바이스 (LiteRT) · 오프라인 동작</string>
     <string name="settings_account_model_info_title">대화 및 복합 질문</string>
-    <string name="settings_account_model_info_summary">Google Gemini API (클라우드)</string>
+    <string name="settings_account_model_info_summary">공식 ChatGPT (클라우드)</string>
 
     <!-- Diagnostics (진단) -->
     <string name="settings_diagnostics_title">진단</string>

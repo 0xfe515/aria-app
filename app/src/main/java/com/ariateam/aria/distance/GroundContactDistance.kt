@@ -17,4 +17,7 @@ data class GroundContactDistance(
     val timestampNanos: Long = 0L,
     val contactXNormalized: Float? = null,
     val contactYNormalized: Float? = null,
+    val rawGyroDegPerSec: Float = 0f,
+    val smoothedGyroDegPerSec: Float = 0f,
+    val restrictionReason: String? = null,
 )

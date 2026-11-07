@@ -4,8 +4,20 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.ariateam.aria.cloud.auth.ChatGptAccountSummary
+import com.ariateam.aria.cloud.auth.ChatGptAuthRepository
+import com.ariateam.aria.cloud.auth.ChatGptAuthState
+import com.ariateam.aria.cloud.auth.ChatGptAuthStatus
+import com.ariateam.aria.cloud.chatgpt.ChatGptClient
+import com.ariateam.aria.cloud.chatgpt.ChatGptHttpRequest
+import com.ariateam.aria.cloud.chatgpt.ChatGptHttpResponse
+import com.ariateam.aria.cloud.chatgpt.ChatGptStreamResponse
+import com.ariateam.aria.cloud.chatgpt.ChatGptTransport
+import com.ariateam.aria.cloud.chatgpt.SseParseOutcome
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.coroutines.CoroutineContext
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -21,6 +33,25 @@ import org.junit.runner.RunWith
 class CloudQuestionDeviceTest {
 
     private lateinit var keyStorage: AndroidKeyStoreAriaKeyStorage
+    private lateinit var fakeAuth: FakeDeviceAuthRepository
+
+    private class FakeDeviceAuthRepository(
+        var token: String? = "test_device_token",
+    ) : ChatGptAuthRepository {
+        val _state = MutableStateFlow(
+            ChatGptAuthState(
+                sessionGeneration = 1L,
+                status = ChatGptAuthStatus.AUTHENTICATED,
+            )
+        )
+        override val sessionState: StateFlow<ChatGptAuthState> = _state
+        override suspend fun validAccessToken(): String? = token
+        override fun startLogin(context: android.content.Context, targetClientId: String?, forceReconsent: Boolean) {}
+        override fun cancelLogin() {}
+        override suspend fun signOut() {}
+        override suspend fun switchAccount(clientId: String) {}
+        override fun getSavedAccounts(): List<ChatGptAccountSummary> = emptyList()
+    }
 
     @Before
     fun setUp() {
@@ -30,6 +61,7 @@ class CloudQuestionDeviceTest {
             prefsName = TEST_PREFS_NAME,
             keyAlias = TEST_KEY_ALIAS,
         )
+        fakeAuth = FakeDeviceAuthRepository()
         // Ensure isolated test alias and test prefs start clean without touching production
         keyStorage.clearApiKey()
     }
@@ -37,7 +69,6 @@ class CloudQuestionDeviceTest {
     @After
     fun tearDown() {
         if (::keyStorage.isInitialized) {
-            // Clean up ONLY the test alias and test prefs; never touches real credentials
             keyStorage.clearApiKey()
         }
     }
@@ -48,85 +79,17 @@ class CloudQuestionDeviceTest {
             "Test alias must never equal production alias",
             TEST_KEY_ALIAS != AndroidKeyStoreAriaKeyStorage.KEY_ALIAS,
         )
-        assertTrue(
-            "Test prefs must never equal production prefs",
-            TEST_PREFS_NAME != AndroidKeyStoreAriaKeyStorage.PREFS_NAME,
-        )
 
-        assertFalse(keyStorage.hasApiKey())
-        assertNull(keyStorage.getApiKey())
-        assertNull(keyStorage.getMaskedApiKey())
-
-        val testKey = "AIzaSyDeviceTestKey123456789"
+        val testKey = "AIzaSyDeviceTestEncryptionKey1234567890"
         val saved = keyStorage.saveApiKey(testKey)
-        assertTrue("Key must save successfully to AndroidKeyStore", saved)
-        assertTrue(keyStorage.hasApiKey())
+        assertTrue("Saving API key to AndroidKeyStore must succeed", saved)
 
         val retrieved = keyStorage.getApiKey()
-        assertEquals(testKey, retrieved)
+        assertNotNull("Retrieved API key must not be null", retrieved)
+        assertEquals("Decrypted API key must match the original plaintext exactly", testKey, retrieved)
 
-        val masked = keyStorage.getMaskedApiKey()
-        assertNotNull(masked)
-        assertEquals("AIza...6789", masked)
-        assertFalse("Masked key must not expose middle of secret", masked!!.contains("DeviceTestKey"))
-
-        val cleared = keyStorage.clearApiKey()
-        assertTrue("Key must clear successfully", cleared)
-        assertFalse(keyStorage.hasApiKey())
-        assertNull(keyStorage.getApiKey())
-    }
-
-    @Test
-    fun cloudImageProcessorCompressesBitmapWithinBounds() {
-        val bitmap = Bitmap.createBitmap(1920, 1080, Bitmap.Config.ARGB_8888).apply {
-            eraseColor(Color.BLUE)
-        }
-
-        try {
-            val base64 = CloudImageProcessor.compressBitmapToBase64(bitmap)
-            assertNotNull(base64)
-            assertTrue("Base64 string must not be empty", base64!!.isNotBlank())
-            assertTrue(
-                "Encoded size must be bounded",
-                base64.length < GeminiConfig.MAX_IMAGE_BYTES * 2,
-            )
-        } finally {
-            bitmap.recycle()
-        }
-    }
-
-    @Test
-    fun geminiClientHandlesDeterministicFakeTransportOnDevice() {
-        val fakeTransport = object : GeminiTransport {
-            override fun execute(
-                request: GeminiHttpRequest,
-                cancellationToken: GeminiCancellationToken?,
-            ): GeminiHttpResponse {
-                val json = """
-                    {
-                      "candidates": [
-                        {
-                          "content": {
-                            "parts": [
-                              { "text": "디바이스 테스트 응답입니다." }
-                            ]
-                          }
-                        }
-                      ]
-                    }
-                """.trimIndent()
-                return GeminiHttpResponse(200, json)
-            }
-        }
-
-        val client = GeminiClient(transport = fakeTransport)
-        val result = client.generateContent(
-            prompt = "디바이스 질문",
-            apiKey = "AIzaSyDeviceKey",
-        )
-
-        assertTrue(result is GeminiResult.Success)
-        assertEquals("디바이스 테스트 응답입니다.", (result as GeminiResult.Success).text)
+        keyStorage.clearApiKey()
+        assertNull("After clearing, API key must be null", keyStorage.getApiKey())
     }
 
     @Test
@@ -145,11 +108,10 @@ class CloudQuestionDeviceTest {
 
     @Test
     fun cancelledPhotoQuestionImmediatelyRecyclesRealBitmap() {
-        keyStorage.saveApiKey("AIzaSyDeviceTestKey")
         var pendingCallback: ((Bitmap?) -> Unit)? = null
 
         val coordinator = CloudQuestionCoordinator(
-            keyStorage = keyStorage,
+            authRepository = fakeAuth,
             ioDispatcher = Dispatchers.Main,
             mainDispatcher = Dispatchers.Main,
             frameCapturer = { cb -> pendingCallback = cb },
@@ -183,11 +145,10 @@ class CloudQuestionDeviceTest {
 
     @Test
     fun disposedCoordinatorImmediatelyRecyclesRealBitmap() {
-        keyStorage.saveApiKey("AIzaSyDeviceTestKey")
         var pendingCallback: ((Bitmap?) -> Unit)? = null
 
         val coordinator = CloudQuestionCoordinator(
-            keyStorage = keyStorage,
+            authRepository = fakeAuth,
             ioDispatcher = Dispatchers.Main,
             mainDispatcher = Dispatchers.Main,
             frameCapturer = { cb -> pendingCallback = cb },
@@ -214,12 +175,11 @@ class CloudQuestionDeviceTest {
 
     @Test
     fun cancelledScopeBeforeCoroutineBodyStartsRecyclesRealBitmap() {
-        keyStorage.saveApiKey("AIzaSyDeviceTestKey")
         var pendingCallback: ((Bitmap?) -> Unit)? = null
         val queuedDispatcher = QueuedTestDispatcher()
 
         val coordinator = CloudQuestionCoordinator(
-            keyStorage = keyStorage,
+            authRepository = fakeAuth,
             ioDispatcher = queuedDispatcher,
             mainDispatcher = queuedDispatcher,
             frameCapturer = { cb -> pendingCallback = cb },
@@ -249,12 +209,11 @@ class CloudQuestionDeviceTest {
 
     @Test
     fun disposedCoordinatorBeforeCoroutineBodyStartsRecyclesRealBitmap() {
-        keyStorage.saveApiKey("AIzaSyDeviceTestKey")
         var pendingCallback: ((Bitmap?) -> Unit)? = null
         val queuedDispatcher = QueuedTestDispatcher()
 
         val coordinator = CloudQuestionCoordinator(
-            keyStorage = keyStorage,
+            authRepository = fakeAuth,
             ioDispatcher = queuedDispatcher,
             mainDispatcher = queuedDispatcher,
             frameCapturer = { cb -> pendingCallback = cb },
@@ -282,25 +241,29 @@ class CloudQuestionDeviceTest {
 
     @Test
     fun cancelledQuestionWhenMainRunsLaunchButIoQueuedRecyclesRealBitmapAndEmitsNoCallback() {
-        keyStorage.saveApiKey("AIzaSyDeviceTestKey")
         var pendingCallback: ((Bitmap?) -> Unit)? = null
         val queuedMain = QueuedTestDispatcher()
         val queuedIo = QueuedTestDispatcher()
         var transportInvocations = 0
 
-        val fakeTransport = object : GeminiTransport {
-            override fun execute(
-                request: GeminiHttpRequest,
+        val fakeTransport = object : ChatGptTransport {
+            override fun execute(request: ChatGptHttpRequest, cancellationToken: GeminiCancellationToken?): ChatGptHttpResponse {
+                return ChatGptHttpResponse(200, """{"models":[{"slug":"gpt-6.1-sol","display_name":"Sol","visibility":"list"}]}""")
+            }
+
+            override fun executeStream(
+                request: ChatGptHttpRequest,
                 cancellationToken: GeminiCancellationToken?,
-            ): GeminiHttpResponse {
+                onDelta: ((String) -> Unit)?,
+            ): ChatGptStreamResponse {
                 transportInvocations++
-                return GeminiHttpResponse(200, "{}")
+                return ChatGptStreamResponse(200, SseParseOutcome.Completed("성공"))
             }
         }
 
         val coordinator = CloudQuestionCoordinator(
-            keyStorage = keyStorage,
-            geminiClient = GeminiClient(transport = fakeTransport),
+            authRepository = fakeAuth,
+            chatGptClient = ChatGptClient(transport = fakeTransport),
             ioDispatcher = queuedIo,
             mainDispatcher = queuedMain,
             frameCapturer = { cb -> pendingCallback = cb },
@@ -343,25 +306,29 @@ class CloudQuestionDeviceTest {
 
     @Test
     fun disposedCoordinatorWhenMainRunsLaunchButIoQueuedRecyclesRealBitmapAndEmitsNoCallback() {
-        keyStorage.saveApiKey("AIzaSyDeviceTestKey")
         var pendingCallback: ((Bitmap?) -> Unit)? = null
         val queuedMain = QueuedTestDispatcher()
         val queuedIo = QueuedTestDispatcher()
         var transportInvocations = 0
 
-        val fakeTransport = object : GeminiTransport {
-            override fun execute(
-                request: GeminiHttpRequest,
+        val fakeTransport = object : ChatGptTransport {
+            override fun execute(request: ChatGptHttpRequest, cancellationToken: GeminiCancellationToken?): ChatGptHttpResponse {
+                return ChatGptHttpResponse(200, """{"models":[{"slug":"gpt-6.1-sol","display_name":"Sol","visibility":"list"}]}""")
+            }
+
+            override fun executeStream(
+                request: ChatGptHttpRequest,
                 cancellationToken: GeminiCancellationToken?,
-            ): GeminiHttpResponse {
+                onDelta: ((String) -> Unit)?,
+            ): ChatGptStreamResponse {
                 transportInvocations++
-                return GeminiHttpResponse(200, "{}")
+                return ChatGptStreamResponse(200, SseParseOutcome.Completed("성공"))
             }
         }
 
         val coordinator = CloudQuestionCoordinator(
-            keyStorage = keyStorage,
-            geminiClient = GeminiClient(transport = fakeTransport),
+            authRepository = fakeAuth,
+            chatGptClient = ChatGptClient(transport = fakeTransport),
             ioDispatcher = queuedIo,
             mainDispatcher = queuedMain,
             frameCapturer = { cb -> pendingCallback = cb },

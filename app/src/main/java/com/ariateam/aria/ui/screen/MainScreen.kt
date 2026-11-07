@@ -394,8 +394,19 @@ fun MainScreen(
     var lastExternalNavId by rememberSaveable { mutableLongStateOf(state.command.externalNavId) }
     var hasExternalNavBaseline by rememberSaveable { mutableStateOf(false) }
 
-    val keyStorage = remember(context) { com.ariateam.aria.cloud.AndroidKeyStoreAriaKeyStorage(context) }
-    val cloudCoordinator = remember(keyStorage) { com.ariateam.aria.cloud.CloudQuestionCoordinator(keyStorage) }
+    val authRepository = remember(context) {
+        com.ariateam.aria.cloud.auth.DefaultChatGptAuthRepository.getInstance(context)
+    }
+    val chatGptClient = remember { com.ariateam.aria.cloud.chatgpt.ChatGptClient() }
+    val cloudCoordinator = remember(authRepository, chatGptClient) {
+        com.ariateam.aria.cloud.CloudQuestionCoordinator(
+            authRepository = authRepository,
+            chatGptClient = chatGptClient,
+            onAuthInvalidated = { qId ->
+                model.cancelCloudQuestion(qId)
+            },
+        )
+    }
 
     DisposableEffect(cloudCoordinator) {
         onDispose {
@@ -896,7 +907,7 @@ fun MainScreen(
                         else -> saveableStateHolder.SaveableStateProvider("settings") {
                             SettingsScreen(
                                 state = state,
-                                keyStorage = keyStorage,
+                                authRepository = authRepository,
                                 onStartWaiting = { requestAction(0) },
                                 onStop = model::stop,
                                 audibleFeedback = audibleFeedback,

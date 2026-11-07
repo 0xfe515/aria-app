@@ -1,30 +1,69 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="settings_cloud_title">Gemini 질문 설정</string>
-    <string name="settings_cloud_summary_registered">API 키 등록됨 (%1$s)</string>
-    <string name="settings_cloud_summary_empty">API 키 미설정</string>
-    <string name="settings_cloud_model_title">기본 모델</string>
-    <string name="settings_cloud_model_summary">Gemini 2.5 Flash</string>
-    <string name="settings_cloud_key_registered">API 키가 등록되어 있습니다 (%1$s)</string>
-    <string name="settings_cloud_key_empty">Gemini API 키가 등록되지 않았습니다.</string>
-    <string name="settings_cloud_key_input_title">Gemini API 키 입력</string>
-    <string name="settings_cloud_key_input_hint">AI Studio에서 발급받은 API 키 입력</string>
-    <string name="settings_cloud_key_delete_title">API 키 삭제</string>
-    <string name="settings_cloud_key_delete_message">저장된 Gemini API 키를 삭제하시겠습니까? 삭제 후에는 클라우드 질문 기능을 사용할 수 없습니다.</string>
-    <string name="settings_cloud_key_delete_confirm">삭제</string>
-    <string name="settings_cloud_key_save">저장</string>
-    <string name="settings_cloud_key_register_btn">API 키 등록</string>
-    <string name="settings_cloud_key_change_btn">API 키 변경</string>
-    <string name="settings_cloud_key_clear_btn">API 키 삭제</string>
-    <string name="settings_cloud_privacy_notice">보안 및 개인정보 안내: API 키는 기기 내 Android Keystore로 암호화되어 앱 내부 저장소에 안전하게 보관되며, 백업이나 로그에 노출되지 않습니다. 사진 질문은 사용자가 요청했을 때만 단일 프레임을 전송하며 지속적인 촬영이나 전송은 수행하지 않습니다.</string>
+    <!-- ChatGPT Official Account & Questions Settings -->
+    <string name="settings_cloud_title">ChatGPT 질문 설정</string>
+    <string name="settings_cloud_summary_registered">ChatGPT 연결됨 (%1$s)</string>
+    <string name="settings_cloud_summary_empty">ChatGPT 미연결</string>
+    <string name="settings_cloud_summary_authorizing">ChatGPT 로그인 진행 중…</string>
+    <string name="settings_cloud_summary_plan_required">ChatGPT 플랜 권한 필요</string>
+    <string name="settings_cloud_summary_reconnect">ChatGPT 재연결 필요</string>
+
+    <string name="settings_cloud_model_title">연결 모델</string>
+    <string name="settings_cloud_model_summary">ChatGPT (공식 브라우저 로그인)</string>
+
+    <!-- Deprecated / legacy string identifiers retained for safety -->
+    <string name="settings_cloud_key_registered">ChatGPT 계정이 연결되어 있습니다 (%1$s)</string>
+    <string name="settings_cloud_key_empty">ChatGPT 계정이 연결되지 않았습니다.</string>
+    <string name="settings_cloud_key_input_title">ChatGPT 계정 설정</string>
+    <string name="settings_cloud_key_input_hint">공식 브라우저 로그인을 사용합니다</string>
+    <string name="settings_cloud_key_delete_title">ChatGPT 로그아웃</string>
+    <string name="settings_cloud_key_delete_message">저장된 ChatGPT 인증 정보를 삭제하고 로그아웃하시겠습니까? 로그아웃 후에는 클라우드 질문 기능을 사용할 수 없습니다.</string>
+    <string name="settings_cloud_key_delete_confirm">로그아웃</string>
+    <string name="settings_cloud_key_save">확인</string>
+    <string name="settings_cloud_key_register_btn">ChatGPT 로그인</string>
+    <string name="settings_cloud_key_change_btn">계정 관리</string>
+    <string name="settings_cloud_key_clear_btn">로그아웃</string>
+
+    <!-- Official Sign in with ChatGPT UI & State strings -->
+    <string name="chatgpt_login_button">Continue with ChatGPT</string>
+    <string name="chatgpt_login_button_sub">ChatGPT로 계속하기</string>
+    <string name="chatgpt_status_unauthenticated">ChatGPT 계정이 연결되지 않았습니다.</string>
+    <string name="chatgpt_status_authorizing">브라우저에서 ChatGPT 로그인을 진행 중입니다…</string>
+    <string name="chatgpt_status_authenticated">ChatGPT 계정 연결됨: %1$s</string>
+    <string name="chatgpt_status_plan_not_enabled">ChatGPT 계정은 연결되었으나, 플랜 토큰 사용 권한(chatgpt.tokens.use.direct)이 활성화되지 않았습니다. 권한을 확인하거나 다시 로그인해주세요.</string>
+    <string name="chatgpt_status_refresh_failed">인증 토큰 갱신에 실패하여 재로그인이 필요합니다.</string>
+    <string name="chatgpt_permission_granted">플랜 토큰 사용 권한: 활성화됨</string>
+    <string name="chatgpt_permission_denied">플랜 토큰 사용 권한: 미부여 (권한 승인 필요)</string>
+    <string name="chatgpt_remote_revocation_unconfirmed">원격 토큰 해지 상태: 확인 안 됨</string>
+    <string name="chatgpt_remote_revocation_confirmed">원격 토큰 해지 상태: 서버 해지 확인됨</string>
+    <string name="chatgpt_remote_revocation_failed">원격 토큰 해지 상태: 서버 미확인 (로컬 로그아웃 완료)</string>
+    <string name="chatgpt_action_cancel">로그인 취소</string>
+    <string name="chatgpt_action_logout">로그아웃</string>
+    <string name="chatgpt_action_reconnect">다시 연결</string>
+    <string name="chatgpt_action_switch_account">계정 전환</string>
+    <string name="chatgpt_action_add_account">다른 계정 추가</string>
+    <string name="chatgpt_action_add_new_account">다른 계정으로 로그인 (새 계정)</string>
+    <string name="chatgpt_reconnect_saved_account">저장된 계정으로 다시 연결 (%1$s)</string>
+    <string name="chatgpt_action_error_message">계정 작업 처리 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.</string>
+    <string name="chatgpt_logout_confirm_title">ChatGPT 로그아웃</string>
+    <string name="chatgpt_logout_confirm_message">저장된 ChatGPT 인증 정보를 삭제하고 로그아웃하시겠습니까? 로그아웃 후에는 클라우드 질문 기능을 사용할 수 없습니다.</string>
+    <string name="chatgpt_account_picker_title">ChatGPT 계정 선택</string>
+    <string name="chatgpt_account_client_id_label">클라이언트 ID: %1$s</string>
+    <string name="chatgpt_saved_accounts_title">저장된 계정</string>
+    <string name="chatgpt_dialog_close">닫기</string>
+
+    <!-- Privacy and Question routing notices -->
+    <string name="settings_cloud_privacy_notice">보안 및 개인정보 안내: OpenAI 공식 Sign in with ChatGPT(SIWC) 표준 웹 브라우저 인증을 사용합니다. 인증 토큰은 기기 내 Android Keystore로 암호화되어 로컬에만 안전하게 보관되며, 백업이나 로그에 노출되지 않습니다. 음성 질문은 사용자가 질문했을 때만 연결된 ChatGPT로 전달되며 생성된 답변을 음성으로 읽어줍니다. OpenAI 공식 계정 권한 정책이 적용되며, 유료 플랜이라고 해서 모든 기능이 일괄 승인되는 것은 아닙니다.</string>
     <string name="settings_cloud_fallback_policy_title">음성 명령 및 대화 전환 정책</string>
-    <string name="settings_cloud_fallback_policy_summary">호출어 인식 후 앱 제어 및 길안내 오프라인 명령을 최우선으로 실행합니다. 취소, 부정 또는 불완전한 로컬 의도는 클라우드로 전송하지 않고 기기에서 즉시 거부하며, 명령으로 해석되지 않은 일반 대화 및 질문만 Gemini 클라우드로 자동 전달됩니다.</string>
+    <string name="settings_cloud_fallback_policy_summary">호출어 인식 후 앱 제어 및 길안내 오프라인 명령을 최우선으로 실행합니다. 취소, 부정 또는 불완전한 로컬 의도는 클라우드로 전송하지 않고 기기에서 즉시 거부하며, 명령으로 해석되지 않은 일반 대화 및 질문만 연결된 ChatGPT 클라우드로 자동 전달됩니다.</string>
+
+    <!-- Legacy storage cleanup and Retained Local AI models -->
     <string name="settings_account_storage_section">저장공간 관리</string>
     <string name="settings_account_cleanup_title">이전 대화 모델 파일 정리</string>
-    <string name="settings_account_cleanup_summary_present">이전 온디바이스 대화 모델 파일(%1$s)을 삭제하여 저장공간을 확보합니다. API 키 및 온디바이스 음성·비전 모델은 유지됩니다.</string>
+    <string name="settings_account_cleanup_summary_present">이전 온디바이스 대화 모델 파일(%1$s)을 삭제하여 저장공간을 확보합니다. ChatGPT 계정 정보 및 온디바이스 음성·비전 모델은 유지됩니다.</string>
     <string name="settings_account_cleanup_summary_empty">정리할 이전 로컬 모델 파일이 없습니다 (0 MB)</string>
     <string name="settings_account_cleanup_dialog_title">이전 대화 모델 파일 삭제</string>
-    <string name="settings_account_cleanup_dialog_message">과거 다운로드된 대화 모델 파일을 삭제하시겠습니까? Gemini 클라우드 API 및 온디바이스 음성 인식, 비전 모델은 계속 정상 작동합니다.</string>
+    <string name="settings_account_cleanup_dialog_message">과거 다운로드된 대화 모델 파일을 삭제하시겠습니까? ChatGPT 클라우드 연동 및 온디바이스 음성 인식, 비전 모델은 계속 정상 작동합니다.</string>
     <string name="settings_account_cleanup_confirm">정리 실행</string>
     <string name="settings_account_cleanup_success">이전 모델 파일이 삭제되었습니다.</string>
 </resources>

@@ -44,6 +44,8 @@ data class MotionState(
     val isCameraForwardWalk: Boolean = false,
     val confidence: Float = 0f,
     val degradedReason: MotionDegradedReason? = MotionDegradedReason.CALIBRATION_PENDING,
+    val smoothedYawRateDegPerSec: Float = 0f,
+    val restrictionReason: String? = null,
 ) {
     val isReliable: Boolean get() = isCalibrated && degradedReason == null && confidence >= 0.5f
 }

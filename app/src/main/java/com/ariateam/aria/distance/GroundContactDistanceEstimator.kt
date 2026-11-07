@@ -107,6 +107,9 @@ class GroundContactDistanceEstimator(
                 distanceMeters = null,
                 message = reason,
                 timestampNanos = timestampNanos,
+                rawGyroDegPerSec = orientation?.rawGyroDegPerSec ?: 0f,
+                smoothedGyroDegPerSec = orientation?.smoothedGyroDegPerSec ?: 0f,
+                restrictionReason = orientation?.restrictionReason,
             )
         }
 
@@ -116,6 +119,9 @@ class GroundContactDistanceEstimator(
                 distanceMeters = null,
                 message = "전방 보행 경로 장애물 미감지",
                 timestampNanos = timestampNanos,
+                rawGyroDegPerSec = orientation.rawGyroDegPerSec,
+                smoothedGyroDegPerSec = orientation.smoothedGyroDegPerSec,
+                restrictionReason = orientation.restrictionReason,
             )
         }
 
@@ -139,6 +145,9 @@ class GroundContactDistanceEstimator(
                 distanceMeters = null,
                 message = "전방 보행 경로 장애물 미감지",
                 timestampNanos = timestampNanos,
+                rawGyroDegPerSec = orientation.rawGyroDegPerSec,
+                smoothedGyroDegPerSec = orientation.smoothedGyroDegPerSec,
+                restrictionReason = orientation.restrictionReason,
             )
         }
 
@@ -156,6 +165,9 @@ class GroundContactDistanceEstimator(
                 distanceMeters = null,
                 message = message,
                 timestampNanos = timestampNanos,
+                rawGyroDegPerSec = orientation.rawGyroDegPerSec,
+                smoothedGyroDegPerSec = orientation.smoothedGyroDegPerSec,
+                restrictionReason = orientation.restrictionReason,
             )
         }
 
@@ -202,6 +214,9 @@ class GroundContactDistanceEstimator(
             timestampNanos = timestampNanos,
             contactXNormalized = bestCandidate.xNorm,
             contactYNormalized = bestCandidate.yNorm,
+            rawGyroDegPerSec = orientation.rawGyroDegPerSec,
+            smoothedGyroDegPerSec = orientation.smoothedGyroDegPerSec,
+            restrictionReason = orientation.restrictionReason,
         )
     }
 
