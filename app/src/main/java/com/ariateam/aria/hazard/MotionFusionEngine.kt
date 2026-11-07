@@ -19,6 +19,7 @@ class MotionFusionEngine(
     private val gyroDeadbandDegPerSec: Float = 1.5f,
     private val historyCapacity: Int = 512,
     private val streamFreshnessToleranceNanos: Long = 200_000_000L, // 200ms
+    private val autoCalibrationEnabled: Boolean = false, // Opt-in by default
     defaultHfovDegrees: Float? = null,
 ) {
     private val lock = Any()
@@ -36,6 +37,15 @@ class MotionFusionEngine(
     private var gyroFault = false
     private var accelSampleCount = 0
     private var gyroSampleCount = 0
+
+    // Latest raw gyro vector (radians/sec) for accel-callback auto-cal evidence
+    private var latestRawGx = 0f
+    private var latestRawGy = 0f
+    private var latestRawGz = 0f
+
+    // Auto-calibration tracking
+    private var autoCalibrationReadyTimestampNanos: Long = 0L
+    private var isAutoCalibrationReady = false
 
     val accelSamplesReceived: Int get() = synchronized(lock) { accelSampleCount }
     val gyroSamplesReceived: Int get() = synchronized(lock) { gyroSampleCount }
@@ -101,6 +111,10 @@ class MotionFusionEngine(
                     degradedReason = reason,
                 )
                 pushSnapshotLocked(latestState, lastAccelTimestampNanos, lastGyroTimestampNanos)
+
+                // Reset auto-calibration tracking when display rotation changes
+                autoCalibrationReadyTimestampNanos = 0L
+                isAutoCalibrationReady = false
             }
         }
     }
@@ -148,6 +162,10 @@ class MotionFusionEngine(
                     degradedReason = initialReason,
                 )
                 pushSnapshotLocked(latestState, lastAccelTimestampNanos, lastGyroTimestampNanos)
+
+                // Reset auto-calibration tracking when camera geometry changes
+                autoCalibrationReadyTimestampNanos = 0L
+                isAutoCalibrationReady = false
             }
         }
     }
@@ -208,6 +226,12 @@ class MotionFusionEngine(
             baselineHeadingDeg = 0f
             isCalibrated = false
             calibrationTimestampNanos = 0L
+            // Auto-calibration tracking
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
+            latestRawGx = 0f
+            latestRawGy = 0f
+            latestRawGz = 0f
             ringHead = 0
             ringCount = 0
             latestState = MotionState()
@@ -232,11 +256,19 @@ class MotionFusionEngine(
         synchronized(lock) {
             if (lastAccelTimestampNanos > 0L) {
                 val dtNanos = timestampNanos - lastAccelTimestampNanos
-                if (dtNanos <= 0L) return false
+                if (dtNanos <= 0L) {
+                    // Out-of-order accel timestamp: invalidate pending stable window without integrating
+                    autoCalibrationReadyTimestampNanos = 0L
+                    isAutoCalibrationReady = false
+                    return false
+                }
                 if (dtNanos > streamFreshnessToleranceNanos) {
                     lastAccelTimestampNanos = timestampNanos
                     isCalibrated = false
-                    updateLatestStateLocked(timestampNanos)
+                    // Reset auto-calibration tracking when stream gap detected
+                    autoCalibrationReadyTimestampNanos = 0L
+                    isAutoCalibrationReady = false
+                    updateLatestStateLocked(timestampNanos, rawGx = latestRawGx, rawGy = latestRawGy, rawGz = latestRawGz)
                     return true
                 }
             }
@@ -272,7 +304,7 @@ class MotionFusionEngine(
             val beta = 0.10f
             filteredLinearAccelEnergy = (1f - beta) * filteredLinearAccelEnergy + beta * linMag
 
-            updateLatestStateLocked(timestampNanos)
+            updateLatestStateLocked(timestampNanos, rawGx = latestRawGx, rawGy = latestRawGy, rawGz = latestRawGz)
             return true
         }
     }
@@ -295,12 +327,24 @@ class MotionFusionEngine(
         synchronized(lock) {
             if (lastGyroTimestampNanos > 0L) {
                 val dtNanos = timestampNanos - lastGyroTimestampNanos
-                if (dtNanos <= 0L) return false
+                if (dtNanos <= 0L) {
+                    // Out-of-order gyro timestamp: invalidate pending stable window without integrating
+                    autoCalibrationReadyTimestampNanos = 0L
+                    isAutoCalibrationReady = false
+                    return false
+                }
                 if (dtNanos > streamFreshnessToleranceNanos) {
                     // Stream gap detected: do NOT integrate across gap, invalidate calibration
                     lastGyroTimestampNanos = timestampNanos
                     isCalibrated = false
-                    updateLatestStateLocked(timestampNanos)
+                    // Store latest raw gyro so accel callbacks don't consult stale quiet vector
+                    latestRawGx = rawGx
+                    latestRawGy = rawGy
+                    latestRawGz = rawGz
+                    // Reset auto-calibration tracking when stream gap detected
+                    autoCalibrationReadyTimestampNanos = 0L
+                    isAutoCalibrationReady = false
+                    updateLatestStateLocked(timestampNanos, rawGx = rawGx, rawGy = rawGy, rawGz = rawGz)
                     return true
                 }
             }
@@ -312,6 +356,11 @@ class MotionFusionEngine(
             lastGyroTimestampNanos = timestampNanos
             gyroFault = false
             gyroSampleCount++
+
+            // Store latest raw gyro vector for accel-callback auto-cal evidence
+            latestRawGx = rawGx
+            latestRawGy = rawGy
+            latestRawGz = rawGz
 
             val (gx, gy, gz) = remapSensorAxes(rawGx, rawGy, rawGz, displayRotation)
 
@@ -328,7 +377,7 @@ class MotionFusionEngine(
                 integratedHeadingDeg += yawRateDegPerSec * dtSec
             }
 
-            updateLatestStateLocked(timestampNanos, yawRateDegPerSec)
+            updateLatestStateLocked(timestampNanos, yawRateDegPerSec, rawGx, rawGy, rawGz)
             return true
         }
     }
@@ -336,6 +385,9 @@ class MotionFusionEngine(
     private fun updateLatestStateLocked(
         timestampNanos: Long,
         currentYawRateDegPerSec: Float? = null,
+        rawGx: Float = 0f,
+        rawGy: Float = 0f,
+        rawGz: Float = 0f,
     ) {
         val yawRate = currentYawRateDegPerSec ?: latestState.yawRateDegPerSec
 
@@ -354,12 +406,24 @@ class MotionFusionEngine(
         if (activeHfovDegrees == null) {
             degradedReason = MotionDegradedReason.CAMERA_FOV_UNKNOWN
             confidence = 0f
+            // Reset auto-calibration tracking when camera FOV is unavailable
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
         } else if (accelFault || gyroFault) {
             degradedReason = MotionDegradedReason.NON_FINITE_DATA
             confidence = 0f
+            // Reset auto-calibration tracking when sensor fault occurs
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
         } else if (isStreamGapped && (accelSampleCount > 0 || gyroSampleCount > 0)) {
             degradedReason = MotionDegradedReason.SAMPLES_STALE
             confidence = 0f
+            // Invalidate calibration when stream goes stale (auto mode only) — remain uncalibrated
+            // until a full fresh stable window re-establishes it. Default manual engine keeps reference.
+            if (autoCalibrationEnabled) isCalibrated = false
+            // Reset auto-calibration tracking when stream gap detected
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
         } else if (!isCalibrated) {
             degradedReason = MotionDegradedReason.CALIBRATION_PENDING
             confidence = 0f
@@ -433,16 +497,111 @@ class MotionFusionEngine(
 
         latestState = state
         pushSnapshotLocked(state, lastAccelTimestampNanos, lastGyroTimestampNanos)
+
+        // Update auto-calibration tracking
+        updateAutoCalibrationTracking(timestampNanos, accelAge, gyroAge, pitchDeg, rollDeg, yawRate, rawGx, rawGy, rawGz)
+
+        // Trigger auto-calibration if conditions are met
+        if (isAutoCalibrationReady && !isCalibrated) {
+            calibrateForward(timestampNanos)
+        }
     }
 
     private fun recordDegradedSnapshotLocked(timestampNanos: Long, reason: MotionDegradedReason) {
+        // Invalidate calibration on sensor fault (auto mode only) before building snapshot.
+        // Default manual engine keeps its reference semantics.
+        if (autoCalibrationEnabled) isCalibrated = false
         val state = latestState.copy(
             timestampNanos = timestampNanos,
+            isCalibrated = isCalibrated,
             confidence = 0f,
             degradedReason = reason,
         )
         latestState = state
         pushSnapshotLocked(state, lastAccelTimestampNanos, lastGyroTimestampNanos)
+        // Reset auto-calibration tracking when sensor fault occurs
+        autoCalibrationReadyTimestampNanos = 0L
+        isAutoCalibrationReady = false
+    }
+
+    private fun updateAutoCalibrationTracking(
+        timestampNanos: Long,
+        accelAge: Long,
+        gyroAge: Long,
+        pitchDeg: Float,
+        rollDeg: Float,
+        yawRateDegPerSec: Float,
+        rawGx: Float,
+        rawGy: Float,
+        rawGz: Float,
+    ) {
+        // Only track auto-calibration if enabled and not already calibrated
+        if (!autoCalibrationEnabled || isCalibrated) {
+            // Reset tracking if calibration gets disabled or we become calibrated
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
+            return
+        }
+
+        // Reject evidence with missing geometry or non-fresh streams
+        if (activeHfovDegrees == null) {
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
+            return
+        }
+
+        // Reject negative ages (future timestamps) for either stream
+        if (accelAge < 0L || gyroAge < 0L) {
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
+            return
+        }
+
+        // Reject implausible gravity norm: all-zero accel yields finite atan2(0,0)=0 pitch/roll
+        // which could falsely pass posture guards. Physical gravity norm is ~9.81 m/s^2;
+        // use broad .5g..1.5g band in m/s^2 units.
+        val gravityNorm = sqrt(gravX * gravX + gravY * gravY + gravZ * gravZ)
+        if (!gravityNorm.isFinite() || gravityNorm < 0.5f * 9.81f || gravityNorm > 1.5f * 9.81f) {
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
+            return
+        }
+
+        // Check if all stability conditions are met (before stable-window start)
+        val isStable =
+                // Minimum evidence counts required before stable window can start
+                accelSampleCount >= 5 && gyroSampleCount >= 5 &&
+                // Fresh streams (both accelerometer and gyroscope)
+                accelAge <= streamFreshnessToleranceNanos &&
+                        gyroAge <= streamFreshnessToleranceNanos &&
+                        // No faults
+                        !accelFault && !gyroFault &&
+                        // Finite posture/energy guard
+                        pitchDeg.isFinite() && rollDeg.isFinite() && filteredLinearAccelEnergy.isFinite() &&
+                        // Valid orientation (upright enough)
+                        pitchDeg >= minPitchDegrees && pitchDeg <= maxPitchDegrees &&
+                                abs(rollDeg) <= maxRollDegrees &&
+                        // Low linear acceleration (stationary)
+                        filteredLinearAccelEnergy <= 0.45f &&
+                        // Full gyro vector magnitude below threshold (converted to deg/sec)
+                        Companion.gyroMagnitudeDegPerSec(rawGx, rawGy, rawGz) <= gyroDeadbandDegPerSec * 3 // Allow up to 3x deadband for stability
+
+        if (isStable) {
+            // If we haven't started tracking stability yet, set the start time
+            if (autoCalibrationReadyTimestampNanos == 0L) {
+                autoCalibrationReadyTimestampNanos = timestampNanos
+            }
+
+            // Check if we've had stable conditions for ~1 second
+            val stableDurationNanos = timestampNanos - autoCalibrationReadyTimestampNanos
+            if (stableDurationNanos >= 1_000_000_000L) { // 1 second
+                isAutoCalibrationReady = true
+            }
+        } else {
+            // Reset tracking if conditions are not stable
+            autoCalibrationReadyTimestampNanos = 0L
+            isAutoCalibrationReady = false
+        }
     }
 
     private fun pushSnapshotLocked(state: MotionState, accelNanos: Long, gyroNanos: Long) {
@@ -496,6 +655,7 @@ class MotionFusionEngine(
             if (accelFault || gyroFault) {
                 return bestEntry.state.copy(
                     timestampNanos = queryTimestampNanos,
+                    isCalibrated = false,
                     confidence = 0f,
                     degradedReason = MotionDegradedReason.NON_FINITE_DATA,
                 )
@@ -506,6 +666,7 @@ class MotionFusionEngine(
             if (accelAge > streamFreshnessToleranceNanos || gyroAge > streamFreshnessToleranceNanos) {
                 return bestEntry.state.copy(
                     timestampNanos = queryTimestampNanos,
+                    isCalibrated = false,
                     confidence = 0f,
                     degradedReason = MotionDegradedReason.SAMPLES_STALE,
                 )
@@ -528,6 +689,10 @@ class MotionFusionEngine(
                 Surface.ROTATION_270 -> Triple(y, -x, z)
                 else -> Triple(x, y, z)
             }
+        }
+
+        fun gyroMagnitudeDegPerSec(gx: Float, gy: Float, gz: Float): Float {
+            return Math.toDegrees(Math.sqrt((gx * gx + gy * gy + gz * gz).toDouble())).toFloat()
         }
     }
 }

@@ -2,8 +2,10 @@ package com.ariateam.aria.speech
 
 import android.content.ServiceConnection
 import android.os.IBinder
+import com.ariateam.aria.hazard.AlertSeverity
 import com.ariateam.aria.hazard.HazardAlertCoordinator
 import com.ariateam.aria.hazard.HazardAlertEvent
+import com.ariateam.aria.hazard.HazardCause
 import com.ariateam.aria.hazard.HazardLevel
 import com.ariateam.aria.runtime.AriaRuntimeStateBridge
 import org.junit.After
@@ -356,5 +358,68 @@ class HazardSpeechBridgeTest {
 
         bridge.close()
         assertNull(HazardAlertCoordinator.getSharedAlertSink())
+    }
+
+    @Test
+    fun onHazardAlert_warningPreemptsSpeechBeforePostHazardAlert_andCautionDoesNotPreempt() {
+        AriaRuntimeStateBridge.setVoiceActiveLocal(true)
+        val invocationLog = mutableListOf<String>()
+
+        val voiceService = Proxy.newProxyInstance(
+            IVoiceService::class.java.classLoader,
+            arrayOf(IVoiceService::class.java)
+        ) { _, method, _ ->
+            when (method.name) {
+                "preemptSpeech" -> invocationLog.add("preemptSpeech")
+                "postHazardAlert" -> invocationLog.add("postHazardAlert")
+            }
+            null
+        } as IVoiceService
+
+        val bridge = HazardSpeechBridge(
+            context = null,
+            voiceServiceProvider = { voiceService },
+        )
+        bridge.start()
+
+        // 1. WARNING event: MUST invoke preemptSpeech before postHazardAlert
+        val warningEvent = HazardAlertEvent(
+            session = 42L,
+            sequence = 1L,
+            timestampNanos = 100_000_000L,
+            message = "정지. 전방 차량 접근.",
+            level = HazardLevel.PATH_BLOCKED,
+            severity = AlertSeverity.WARNING,
+            cause = HazardCause.W1_VEHICLE_APPROACH,
+        )
+        bridge.onHazardAlert(warningEvent)
+
+        assertEquals(
+            "WARNING must preempt speech before posting hazard alert",
+            listOf("preemptSpeech", "postHazardAlert"),
+            invocationLog,
+        )
+
+        invocationLog.clear()
+
+        // 2. CAUTION event: MUST invoke only postHazardAlert without preemptSpeech
+        val cautionEvent = HazardAlertEvent(
+            session = 42L,
+            sequence = 2L,
+            timestampNanos = 200_000_000L,
+            message = "전방 경로 장애물 주의.",
+            level = HazardLevel.PATH_CAUTION,
+            severity = AlertSeverity.CAUTION,
+            cause = HazardCause.C1_OBJECT_IN_PATH,
+        )
+        bridge.onHazardAlert(cautionEvent)
+
+        assertEquals(
+            "CAUTION must not preempt speech",
+            listOf("postHazardAlert"),
+            invocationLog,
+        )
+
+        bridge.close()
     }
 }

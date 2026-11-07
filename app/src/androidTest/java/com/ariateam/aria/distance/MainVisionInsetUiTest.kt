@@ -3,10 +3,12 @@ package com.ariateam.aria.distance
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onChild
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -19,6 +21,7 @@ import com.ariateam.aria.vision.VisionModelMetadata
 import com.ariateam.aria.vision.VisionModelState
 import com.ariateam.aria.vision.VisionUiState
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -93,7 +96,7 @@ class MainVisionInsetUiTest {
     }
 
     @Test
-    fun unconfiguredProfileClickInvokesSetupCallback() {
+    fun unconfiguredProfileShowsReadOnlyPromptWithoutOverlayAction() {
         var setupOpened = false
 
         compose.setContent {
@@ -117,14 +120,24 @@ class MainVisionInsetUiTest {
             }
         }
 
-        // Badge shows unconfigured prompt and clicking it triggers setup callback
-        compose.onNodeWithTag("mainVisionDistanceBadge")
-            .assertIsDisplayed()
-            .assertTextContains("키·착용 위치 설정")
-            .performClick()
+        // Badge shows unconfigured prompt on descendant Text, strictly read-only
+        val badge = compose.onNodeWithTag("mainVisionDistanceBadge").assertIsDisplayed()
+        badge.onChild().assertIsDisplayed().assertTextContains("키·착용 위치 설정")
+        compose.onNodeWithText("키·착용 위치 설정").assertIsDisplayed()
+
+        // Ensure no OnClick anywhere in entire unmerged overlay subtree
+        val insetRoot = compose.onNodeWithTag("mainVisionInset").fetchSemanticsNode()
+        fun assertNoOnClickRecursive(node: androidx.compose.ui.semantics.SemanticsNode) {
+            assertFalse(
+                "Node in overlay subtree must have no OnClick action (read-only overlay policy)",
+                node.config.contains(SemanticsActions.OnClick),
+            )
+            node.children.forEach { assertNoOnClickRecursive(it) }
+        }
+        assertNoOnClickRecursive(insetRoot)
 
         compose.runOnIdle {
-            assertTrue(setupOpened)
+            assertFalse("Setup callback must not be invoked from vision overlay subtree", setupOpened)
         }
     }
 

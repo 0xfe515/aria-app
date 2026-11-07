@@ -546,6 +546,8 @@ fun MainVisionInset(
                         },
                         fillViewport = true,
                         overlayAlpha = 0.65f,
+                        odOverlay = if (isResultFresh) visionUiState.odOverlay else null,
+                        cameraStatus = visionUiState.cameraStatus,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }

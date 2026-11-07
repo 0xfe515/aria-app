@@ -50,6 +50,27 @@ class HazardAlertCoordinatorLifecycleTest {
         )
     }
 
+    private fun cautionAssessment(
+        timestampNanos: Long,
+        message: String = "전방 2m 장애물 주의",
+        cause: HazardCause = HazardCause.C1_OBJECT_IN_PATH,
+    ): HazardAssessment {
+        return HazardAssessment(
+            timestampNanos = timestampNanos,
+            level = HazardLevel.PATH_CAUTION,
+            activeCorridor = CorridorDirection.CENTER,
+            dominantNearClass = 1,
+            corridorWalkableRatio = 0.3f,
+            nearObstacleOccupancy = 0.4f,
+            motionConfidence = 0.9f,
+            messageKorean = message,
+            isAlertCandidate = true,
+            severity = AlertSeverity.CAUTION,
+            cause = cause,
+            trackId = 10,
+        )
+    }
+
     @Test
     fun testRejectsAssessmentOlderThanSessionStart() {
         // Start session at 10_000_000_000L
@@ -259,6 +280,47 @@ class HazardAlertCoordinatorLifecycleTest {
         assertEquals(1L, sharedLog[0].sequence)
 
         HazardAlertCoordinator.setSharedAlertSink(null)
+        coordinator.close()
+    }
+
+    @Test
+    fun testCautionAssessmentFiresVibrationAndAlertSinkWithCautionSeverity() {
+        val sinkEvents = mutableListOf<HazardAlertEvent>()
+        coordinator.setAlertSink { event -> sinkEvents.add(event) }
+        coordinator.start()
+
+        // Caution requires 3 consecutive frames
+        val ts1 = 10_050_000_000L
+        currentRealtimeMs = 10_050L
+        currentElapsedNanos = ts1
+        coordinator.processAssessment(cautionAssessment(ts1), ts1)
+        assertEquals(0, sinkEvents.size)
+        assertEquals(0, vibrationLog.size)
+
+        val ts2 = 10_100_000_000L
+        currentRealtimeMs = 10_100L
+        currentElapsedNanos = ts2
+        coordinator.processAssessment(cautionAssessment(ts2), ts2)
+        assertEquals(0, sinkEvents.size)
+        assertEquals(0, vibrationLog.size)
+
+        val ts3 = 10_150_000_000L
+        currentRealtimeMs = 10_150L
+        currentElapsedNanos = ts3
+        coordinator.processAssessment(cautionAssessment(ts3, message = "전방 2m 장애물 주의"), ts3)
+
+        assertEquals("Frame 3 should fire alert to sink", 1, sinkEvents.size)
+        val event = sinkEvents[0]
+        assertEquals(AlertSeverity.CAUTION, event.severity)
+        assertEquals(HazardCause.C1_OBJECT_IN_PATH, event.cause)
+        assertEquals("전방 2m 장애물 주의", event.message)
+        assertEquals(HazardLevel.PATH_CAUTION, event.level)
+
+        assertEquals("Frame 3 should fire vibration", 1, vibrationLog.size)
+        assertEquals(HazardLevel.PATH_CAUTION, vibrationLog[0])
+        assertEquals("Frame 3 should fire toast", 1, toastLog.size)
+        assertEquals("전방 2m 장애물 주의", toastLog[0])
+
         coordinator.close()
     }
 }

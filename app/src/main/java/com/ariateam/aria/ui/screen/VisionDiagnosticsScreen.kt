@@ -1,6 +1,7 @@
 package com.ariateam.aria.ui.screen
 
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.view.Surface
 import androidx.activity.compose.BackHandler
 import androidx.camera.core.Preview
@@ -68,7 +69,9 @@ import com.ariateam.aria.vision.VisionModelState
 import com.ariateam.aria.vision.VisionPipelineMode
 import com.ariateam.aria.vision.VisionPreprocessingStrategy
 import com.ariateam.aria.vision.VisionSegmentationSummary
+import com.ariateam.aria.vision.od.OdOverlaySnapshot
 import com.ariateam.aria.vision.VisionUiState
+import com.ariateam.aria.vision.od.OdTelemetry
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -271,6 +274,8 @@ fun VisionDiagnosticsScreen(
                         previewSurfaceProvider = provider
                         onSurfaceProviderUpdated(provider, displayRotation)
                     },
+                    odOverlay = uiState.odOverlay,
+                    cameraStatus = uiState.cameraStatus,
                 )
 
                 Row(
@@ -398,6 +403,20 @@ fun VisionDiagnosticsScreen(
                     ),
                     style = MaterialTheme.typography.bodySmall,
                 )
+                val distDisplay = hazard.distanceMeters?.let { String.format(Locale.US, "%.1fm", it) } ?: "-"
+                val kindDisplay = hazard.objectKind?.name ?: "-"
+                Text(
+                    text = String.format(
+                        Locale.US,
+                        "심각도: %s | 원인: %s | 객체: %s | 거리: %s | 위험 점수: %.2f",
+                        hazard.severity.name,
+                        hazard.cause.name,
+                        kindDisplay,
+                        distDisplay,
+                        hazard.riskScore,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -486,7 +505,10 @@ fun VisionDiagnosticsScreen(
             }
         }
 
-        // 6. Segmentation Output Summary Card
+        // 6. Auxiliary object-detection sidecar (read-only status mirror)
+        OdSidecarStatusCard(uiState.odTelemetry)
+
+        // 7. Segmentation Output Summary Card
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
@@ -522,6 +544,90 @@ fun VisionDiagnosticsScreen(
     }
 }
 
+/**
+ * Read-only mirror of the auxiliary object-detection sidecar telemetry.
+ *
+ * Purely informational: no buttons, toggles, navigation, or overlay elements are added. When
+ * [OdTelemetry.followsSegmentationCadence] is true, the card reflects frame-linked submission without
+ * a separate fixed frequency cap, avoiding false 0 Hz or 5 Hz actual FPS claims while clarifying that
+ * request cadence is linked to segmentation and actual completed FPS depends on device throughput.
+ */
+@Composable
+private fun OdSidecarStatusCard(telemetry: OdTelemetry) {
+    val hasCompletedResult = telemetry.completed > 0L
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "보조 객체 감지 상태 (읽기 전용)",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "상태: ${telemetry.status.koreanLabel}",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+            )
+            val cadenceLabel = if (telemetry.followsSegmentationCadence) {
+                "보조 감지 실행 주기: 세그멘테이션 프레임 연동 (매 프레임 요청 · 별도 상한 없음)"
+            } else {
+                "보조 감지 실행 상한: ${telemetry.rateHz} Hz (처리 FPS와 별도)"
+            }
+            Text(
+                text = cadenceLabel,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (telemetry.followsSegmentationCadence) {
+                Text(
+                    text = "요청 주기는 세그멘테이션 프레임과 연동되며 실제 완료 FPS는 하드웨어 처리 성능에 따라 다를 수 있습니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                text = "부하 조절: ${telemetry.backoffReason.koreanLabel}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (telemetry.detail.isNotBlank()) {
+                Text(
+                    text = "상세: ${telemetry.detail}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                text = if (hasCompletedResult) {
+                    "최근 감지 객체 수: ${telemetry.detectionCount}개"
+                } else {
+                    "최근 감지 객체 수: — (완료된 결과 없음)"
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                text = "추론 ${formatOdLatency(telemetry.inferenceMs, hasCompletedResult)} · " +
+                    "수신→완료 ${formatOdLatency(telemetry.endToEndMs, hasCompletedResult)} · " +
+                    "결과 경과 시간 ${formatOdLatency(telemetry.resultAgeMs, hasCompletedResult)}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                text = "완료 ${telemetry.completed} · 대체 ${telemetry.replaced} · " +
+                    "정체/만료 ${telemetry.staleDropped} · 오류 ${telemetry.errors}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                text = "제출 ${telemetry.submitted} · 작업 중 ${telemetry.busy} · " +
+                    "주기 제한 ${telemetry.rateLimited} · 순서 거부 ${telemetry.orderingRejected} · " +
+                    "무효 ${telemetry.invalidDropped}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                text = "보조 감지는 참고용이며 경로 차단·거리·횡단 가능 여부를 확정하지 않습니다.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+private fun formatOdLatency(valueMs: Long, hasCompletedResult: Boolean): String =
+    if (hasCompletedResult) "${valueMs}ms" else "—"
+
 @Composable
 internal fun VisionCameraPreviewBox(
     isCameraActive: Boolean,
@@ -534,6 +640,9 @@ internal fun VisionCameraPreviewBox(
     modifier: Modifier = Modifier,
     fillViewport: Boolean = false,
     overlayAlpha: Float = 0.55f,
+    odOverlay: OdOverlaySnapshot? = null,
+    cameraStatus: CameraSessionStatus = if (isCameraActive) CameraSessionStatus.Running else CameraSessionStatus.Stopped,
+    clockNanos: () -> Long = { SystemClock.elapsedRealtimeNanos() },
 ) {
     Box(
         modifier = modifier
@@ -591,6 +700,17 @@ internal fun VisionCameraPreviewBox(
                     )
                 }
             }
+            OdBoundingBoxesOverlay(
+                cropRect = cropRect,
+                previewUprightWidth = previewUprightWidth,
+                previewUprightHeight = previewUprightHeight,
+                modelLoaded = modelLoaded,
+                hasFreshImage = overlayBitmap != null,
+                odOverlay = odOverlay,
+                cameraStatus = cameraStatus,
+                clockNanos = clockNanos,
+                modifier = Modifier.fillMaxSize(),
+            )
         } else {
             Text(
                 text = "카메라가 중지되어 있습니다.\n시작 버튼을 누를 때만 카메라가 활성화됩니다.",

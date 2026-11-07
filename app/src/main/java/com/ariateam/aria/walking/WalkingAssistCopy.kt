@@ -2,6 +2,7 @@ package com.ariateam.aria.walking
 
 import androidx.annotation.StringRes
 import com.ariateam.aria.R
+import com.ariateam.aria.hazard.HazardCause
 import com.ariateam.aria.hazard.HazardLevel
 
 object WalkingAssistCopy {
@@ -43,6 +44,23 @@ object WalkingAssistCopy {
     fun hazardWarning(level: HazardLevel): Int? = when (level) {
         HazardLevel.NEAR_PATH_HAZARD -> R.string.walking_hazard_near
         HazardLevel.PATH_BLOCKED -> R.string.walking_hazard_blocked
+        HazardLevel.PATH_CAUTION -> R.string.walking_hazard_c4_narrow
         else -> null
+    }
+
+    @StringRes
+    fun hazardWarning(cause: HazardCause): Int? = when (cause) {
+        HazardCause.W1_VEHICLE_APPROACH -> R.string.walking_hazard_w1_vehicle
+        HazardCause.W2_OBJECT_IMMINENT -> R.string.walking_hazard_w2_imminent
+        HazardCause.W3_ROAD_UNDERFOOT -> R.string.walking_hazard_w3_road
+        HazardCause.W4_STATIC_IMMINENT -> R.string.walking_hazard_w4_static
+        HazardCause.W5_PATH_LOST -> R.string.walking_hazard_w5_path_lost
+        HazardCause.C1_OBJECT_IN_PATH -> R.string.walking_hazard_c1_object
+        HazardCause.C2_VEHICLE_NEARBY -> R.string.walking_hazard_c2_vehicle_near
+        HazardCause.C3_ROAD_EDGE -> R.string.walking_hazard_c3_road_edge
+        HazardCause.C4_PATH_NARROW -> R.string.walking_hazard_c4_narrow
+        HazardCause.C5_CROSSWALK_ENTRY -> R.string.walking_hazard_c5_crosswalk
+        HazardCause.NONE,
+        HazardCause.DEGRADED -> null
     }
 }

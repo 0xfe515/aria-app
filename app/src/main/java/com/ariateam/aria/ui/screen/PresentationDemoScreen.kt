@@ -159,6 +159,8 @@ fun PresentationDemoScreen(
                 if (previewSurfaceProvider !== provider) previewSurfaceProvider = provider
             },
             fillViewport = true,
+            odOverlay = visionUiState.odOverlay,
+            cameraStatus = visionUiState.cameraStatus,
             modifier = Modifier
                 .fillMaxSize()
                 .testTag("presentationCameraViewport"),

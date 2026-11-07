@@ -45,6 +45,7 @@ import com.ariateam.aria.command.CommandCoordinator
 import com.ariateam.aria.hazard.CorridorDirection
 import com.ariateam.aria.hazard.AlertDecision
 import com.ariateam.aria.hazard.AlertSuppressionReason
+import com.ariateam.aria.hazard.GroundPointProjector
 import com.ariateam.aria.hazard.HazardAlertCoordinator
 import com.ariateam.aria.hazard.HazardAssessment
 import com.ariateam.aria.hazard.HazardDetector
@@ -52,8 +53,16 @@ import com.ariateam.aria.hazard.HazardLevel
 import com.ariateam.aria.hazard.MotionDegradedReason
 import com.ariateam.aria.hazard.MotionState
 import com.ariateam.aria.hazard.MotionTracker
+import com.ariateam.aria.hazard.ObjectTracker
 import com.ariateam.aria.runtime.AriaRuntimeTimingTracker
 import com.ariateam.aria.speech.HazardSpeechBridge
+import com.ariateam.aria.vision.od.AuxiliaryObjectDetectionPipeline
+import com.ariateam.aria.vision.od.ObjectDetectionHazardFusion
+import com.ariateam.aria.vision.od.OdFusionRejection
+import com.ariateam.aria.vision.od.OdGeometryToken
+import com.ariateam.aria.vision.od.OdOverlaySnapshot
+import com.ariateam.aria.vision.od.OdSidecarStatus
+import com.ariateam.aria.vision.od.OdTelemetry
 import com.ariateam.aria.walking.WalkingAssistAction
 import com.ariateam.aria.walking.WalkingAssistAnnouncement
 import com.ariateam.aria.walking.WalkingAssistCause
@@ -114,6 +123,10 @@ data class VisionUiState(
         action = WalkingAssistAction.NONE,
     ),
     val walkingDiagnosticEvents: List<WalkingAssistDiagnosticEvent> = emptyList(),
+    /** Bounded auxiliary object-detection sidecar telemetry; purely diagnostic, no Home action. */
+    val odTelemetry: OdTelemetry = OdTelemetry.INACTIVE,
+    /** Bounded display-only object-detection overlay snapshot; null when inactive, empty, or expired. */
+    val odOverlay: OdOverlaySnapshot? = null,
 )
 
 data class VisionPipelineDiagnosticSnapshot(
@@ -153,6 +166,7 @@ data class VisionPipelineDiagnosticSnapshot(
     val isInvocationReady: Boolean = false,
     val isRebindInProgress: Boolean = false,
     val deviceErrorRecoveryAttempts: Int = 0,
+    val odTelemetry: OdTelemetry = OdTelemetry.INACTIVE,
 )
 
 /**
@@ -175,11 +189,23 @@ class VisionPipelineController(
     val bodyMountProfileStore: BodyMountProfileStore = BodyMountProfileStore(context.applicationContext),
     val groundContactMotionTracker: GroundContactMotionTracker = GroundContactMotionTracker(context),
     val groundContactDistanceEstimator: GroundContactDistanceEstimator = GroundContactDistanceEstimator(),
+    val objectTracker: ObjectTracker = ObjectTracker(),
+    val objectDetectionPipeline: AuxiliaryObjectDetectionPipeline = AuxiliaryObjectDetectionPipeline(
+        engineFactory = { com.ariateam.aria.vision.od.LiteRtObjectDetector(context.applicationContext) },
+        clockNanos = { SystemClock.elapsedRealtimeNanos() },
+        config = com.ariateam.aria.vision.od.OdSidecarConfig(
+            followSegmentationCadence = true,
+            holdOverlayUntilNextResult = true,
+        ),
+    ),
+    val objectDetectionFusion: ObjectDetectionHazardFusion = ObjectDetectionHazardFusion(),
     private val mutableUiState: MutableStateFlow<VisionUiState> = MutableStateFlow(VisionUiState()),
     analyzerExecutorOverride: ExecutorService? = null,
 ) : AutoCloseable {
     @Volatile
     private var analyzerThread: Thread? = null
+
+    private var lastTrackedGeometry: OdGeometryToken? = null
 
     val analyzerExecutor: ExecutorService = analyzerExecutorOverride ?: Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "AriaCameraAnalyzerThread").also { t ->
@@ -226,6 +252,18 @@ class VisionPipelineController(
         }
     }
     private val lastPublishedNanos = AtomicLong(0L)
+    private var lastOdLogElapsedNanos = 0L
+    private var lastOdLogStatus: OdSidecarStatus = OdSidecarStatus.DISABLED
+    private var lastOdLogRateHz = 0
+    private var lastOdLogFollowsCadence = false
+    /**
+     * Explicit native-order view over the preprocessor's populated RGB float array.
+     * Never derive this from `inputByteBuffer.duplicate().asFloatBuffer()`: a duplicated
+     * ByteBuffer defaults to BIG_ENDIAN and would hand the detector garbage floats.
+     */
+    private val odRgbView: java.nio.FloatBuffer by lazy {
+        java.nio.FloatBuffer.wrap(preprocessor.reusableFloatArray)
+    }
     private val analyzerEntries = AtomicLong(0L)
     private val pipelineInputs = AtomicLong(0L)
     private val inferenceCallEntries = AtomicLong(0L)
@@ -477,6 +515,7 @@ class VisionPipelineController(
             isInvocationReady = isInvocationReady,
             isRebindInProgress = isRebindInProgress.get(),
             deviceErrorRecoveryAttempts = deviceErrorRecoveryAttempts.get(),
+            odTelemetry = objectDetectionPipeline.telemetry(nowNanos),
         )
     }
 
@@ -494,8 +533,20 @@ class VisionPipelineController(
         activeEffectiveFov = null
         activeFullCameraModel = null
         groundContactDistanceEstimator.reset()
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.setEnabled(false)
+        objectDetectionPipeline.onSessionStopped("전처리 전략 변경")
         motionTracker.updateCameraGeometry(null)
-        mutableUiState.update { it.copy(preprocessingStrategy = strategy) }
+        mutableUiState.update {
+            it.copy(
+                preprocessingStrategy = strategy,
+                odTelemetry = objectDetectionPipeline.telemetry(),
+                odOverlay = null,
+            )
+        }
     }
 
     fun setPipelineMode(mode: VisionPipelineMode) {
@@ -505,6 +556,12 @@ class VisionPipelineController(
         AriaRuntimeTimingTracker.reset()
         lastPublishedNanos.set(0L)
         groundContactDistanceEstimator.reset()
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.setEnabled(false)
+        objectDetectionPipeline.onSessionStopped("파이프라인 모드 변경")
         val owner = activeLifecycleOwner
         if (running.get() && owner != null) {
             startCamera(owner, activeSurfaceProvider, mode, activeTargetRotation)
@@ -517,6 +574,8 @@ class VisionPipelineController(
                     latestSummary = null,
                     latestOverlayBitmap = null,
                     groundContactDistance = GroundContactDistance(),
+                    odTelemetry = objectDetectionPipeline.telemetry(),
+                    odOverlay = null,
                 )
             }
         }
@@ -668,11 +727,20 @@ class VisionPipelineController(
             )
         }
         mutableUiState.update {
-            if (ticket != walkingAssistTicket) it else it.copy(
-                walkingAssistState = transition.current,
-                computeTelemetry = telemetry,
-                walkingDiagnosticEvents = walkingAssistDiagnostics.snapshot(),
-            )
+            if (ticket != walkingAssistTicket) it else {
+                val keepOverlay = running.get() &&
+                    it.cameraStatus == CameraSessionStatus.Running &&
+                    currentMode != VisionPipelineMode.PREVIEW_ONLY &&
+                    !isFrameStalled.get() &&
+                    it.odOverlay != null &&
+                    it.odOverlay.isFreshAt(nowNanos)
+                it.copy(
+                    walkingAssistState = transition.current,
+                    computeTelemetry = telemetry,
+                    walkingDiagnosticEvents = walkingAssistDiagnostics.snapshot(),
+                    odOverlay = if (keepOverlay) it.odOverlay else null,
+                )
+            }
         }
         val statusSequence = walkingStatusSequence.incrementAndGet()
         val frameSequence = lastWalkingFrameSequence.get()
@@ -856,6 +924,12 @@ class VisionPipelineController(
         alertCoordinator.stop()
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.setEnabled(false)
+        objectDetectionPipeline.onSessionStopped("카메라 권한 거부")
         modelStore.cancelCameraStabilityGate()
         unbindUseCasesOnMain()
         mutableUiState.update {
@@ -868,6 +942,8 @@ class VisionPipelineController(
                 motionState = MotionState(),
                 computeTelemetry = VisionComputeTelemetry.INACTIVE,
                 groundContactDistance = GroundContactDistance(),
+                odTelemetry = objectDetectionPipeline.telemetry(),
+                odOverlay = null,
             )
         }
         startWalkingAssistSession(permissionTicket)
@@ -952,6 +1028,11 @@ class VisionPipelineController(
         groundContactDistanceEstimator.reset()
 
         val modelLoaded = modelStore.segmenter.isReady
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.setEnabled(false)
         mutableUiState.update {
             it.copy(
                 cameraStatus = CameraSessionStatus.Starting,
@@ -967,6 +1048,8 @@ class VisionPipelineController(
                 activeBackendDescription = modelStore.segmenter.activeBackendDescription,
                 isHazardAlertEnabled = alertCoordinator.isEnabled,
                 groundContactDistance = GroundContactDistance(),
+                odTelemetry = objectDetectionPipeline.telemetry(),
+                odOverlay = null,
             )
         }
 
@@ -1239,6 +1322,12 @@ class VisionPipelineController(
 
             if (isSessionLive(ticket)) {
                 val now = SystemClock.elapsedRealtimeNanos()
+                objectDetectionFusion.reset()
+                hazardDetector.reset()
+                objectTracker.reset()
+                lastTrackedGeometry = null
+                objectDetectionPipeline.setEnabled(false)
+                objectDetectionPipeline.onSessionStarted(ticket, now)
                 val modelLoaded = modelStore.segmenter.isReady
                 mutableUiState.update { current ->
                     val status = if (current.cameraStatus == CameraSessionStatus.Running) {
@@ -1259,6 +1348,8 @@ class VisionPipelineController(
                         configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
                         activeBackendType = modelStore.segmenter.activeBackendType,
                         activeBackendDescription = modelStore.segmenter.activeBackendDescription,
+                        odTelemetry = objectDetectionPipeline.telemetry(now),
+                        odOverlay = null,
                     )
                 }
             }
@@ -1542,6 +1633,18 @@ class VisionPipelineController(
                 )
                 continuousHealthyFrames.set(0L)
                 healthyStreamingStartNanos.set(0L)
+                objectDetectionFusion.reset()
+                hazardDetector.reset()
+                objectTracker.reset()
+                lastTrackedGeometry = null
+                objectDetectionPipeline.setEnabled(false)
+                objectDetectionPipeline.onSessionStopped("프레임 스트림 정체")
+                mutableUiState.update {
+                    it.copy(
+                        odTelemetry = objectDetectionPipeline.telemetry(),
+                        odOverlay = null,
+                    )
+                }
 
                 if (!canAttemptStallRecovery(attempts)) {
                     failCameraSession(
@@ -1608,6 +1711,12 @@ class VisionPipelineController(
         alertCoordinator.stop()
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.setEnabled(false)
+        objectDetectionPipeline.onSessionStopped("카메라 세션 종료")
         isTargetCameraAvailable = true
         modelStore.cancelCameraStabilityGate()
         unbindUseCasesOnMain()
@@ -1621,6 +1730,8 @@ class VisionPipelineController(
                 motionState = MotionState(),
                 computeTelemetry = VisionComputeTelemetry.INACTIVE,
                 groundContactDistance = GroundContactDistance(),
+                odTelemetry = objectDetectionPipeline.telemetry(),
+                odOverlay = null,
             )
         }
     }
@@ -1811,7 +1922,21 @@ class VisionPipelineController(
                     degradedReason = MotionDegradedReason.SENSORS_UNAVAILABLE,
                 )
             }
-            val assessment = if (inferenceOutput != null) {
+
+            val currentProfile = bodyMountProfileStore.profile.value
+            if (currentProfile != lastObservedProfile) {
+                lastObservedProfile = currentProfile
+                groundContactDistanceEstimator.reset()
+                objectTracker.reset()
+            }
+            val groundOrientation = groundContactMotionTracker.orientationAt(imageTimestampNanos)
+            val currentGeometry = OdGeometryToken.from(cropRect, rotation)
+            if (lastTrackedGeometry != null && lastTrackedGeometry != currentGeometry) {
+                objectTracker.reset()
+            }
+            lastTrackedGeometry = currentGeometry
+
+            val baseAssessment = if (inferenceOutput != null) {
                 if (!isClockRealtime) {
                     HazardAssessment(
                         timestampNanos = imageTimestampNanos,
@@ -1825,21 +1950,50 @@ class VisionPipelineController(
                         isAlertCandidate = false,
                     )
                 } else {
+                    val pointProjector = GroundPointProjector.bind(
+                        profile = currentProfile,
+                        orientation = groundOrientation,
+                        effectiveFov = activeEffectiveFov,
+                        fullCameraModel = activeFullCameraModel,
+                        cropLeftNorm = cropRect.normLeft,
+                        cropTopNorm = cropRect.normTop,
+                        cropWidthNorm = cropRect.normWidth,
+                        cropHeightNorm = cropRect.normHeight,
+                    )
+                    val gatedOd = objectDetectionFusion.evidenceGate.accept(
+                        evidence = objectDetectionPipeline.latestEvidence(),
+                        frameGeometry = currentGeometry,
+                        frameCaptureTimestampNanos = imageTimestampNanos,
+                        nowElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+                        sessionToken = ticket,
+                        isClockRealtime = isClockRealtime,
+                        motion = motion,
+                    )
+                    if (gatedOd.clearTemporal && gatedOd.rejection != OdFusionRejection.NO_EVIDENCE) {
+                        objectTracker.reset()
+                    }
+                    val odTracks = if (gatedOd.accepted != null) {
+                        objectTracker.update(
+                            detections = gatedOd.accepted.detections,
+                            captureNanos = gatedOd.accepted.captureTimestampNanos,
+                            corridor = motion.activeCorridor,
+                            classMask = modelStore.segmenter.reusableClassMask,
+                            maskWidth = VisionContract.MODEL_WIDTH,
+                            maskHeight = VisionContract.MODEL_HEIGHT,
+                            projector = pointProjector,
+                        )
+                    } else {
+                        emptyList()
+                    }
                     hazardDetector.assessHazard(
                         classMask = modelStore.segmenter.reusableClassMask,
                         motionState = motion,
                         timestampNanos = imageTimestampNanos,
-                    ).also { assessed ->
-                        val decision = alertCoordinator.processAssessment(assessed, imageTimestampNanos)
-                        if (decision is AlertDecision.Suppressed && diagnosticFrameSequence != null) {
-                            walkingAssistDiagnostics.recordSuppression(
-                                walkingAssistTicket,
-                                diagnosticFrameSequence,
-                                SystemClock.elapsedRealtimeNanos(),
-                                diagnosticReason(decision.reason),
-                            )
-                        }
-                    }
+                        tracks = odTracks,
+                        lumaOrRgb = preprocessor.reusableFloatArray,
+                        projector = pointProjector,
+                        applyRuleUpgrade = true,
+                    )
                 }
             } else {
                 HazardAssessment(
@@ -1858,15 +2012,34 @@ class VisionPipelineController(
                 )
             }
 
-            // Invalidate distance hysteresis if user modified profile in settings
-            val currentProfile = bodyMountProfileStore.profile.value
-            if (currentProfile != lastObservedProfile) {
-                lastObservedProfile = currentProfile
-                groundContactDistanceEstimator.reset()
+            // Conservative advisory fusion: only a copy of the base assessment may change, and the
+            // existing alert coordinator still receives exactly one assessment per analyzed frame.
+            val assessment = if (inferenceOutput != null && isClockRealtime) {
+                val odOutcome = objectDetectionFusion.fuse(
+                    base = baseAssessment,
+                    motion = motion,
+                    evidence = objectDetectionPipeline.latestEvidence(),
+                    frameGeometry = currentGeometry,
+                    frameCaptureTimestampNanos = imageTimestampNanos,
+                    nowElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+                    sessionToken = ticket,
+                    isClockRealtime = isClockRealtime,
+                )
+                val decision = alertCoordinator.processAssessment(odOutcome.assessment, imageTimestampNanos)
+                if (decision is AlertDecision.Suppressed && diagnosticFrameSequence != null) {
+                    walkingAssistDiagnostics.recordSuppression(
+                        walkingAssistTicket,
+                        diagnosticFrameSequence,
+                        SystemClock.elapsedRealtimeNanos(),
+                        diagnosticReason(decision.reason),
+                    )
+                }
+                odOutcome.assessment
+            } else {
+                baseAssessment
             }
 
             // Estimate monocular ground-contact distance
-            val groundOrientation = groundContactMotionTracker.orientationAt(imageTimestampNanos)
             val groundContactDist = if (inferenceOutput != null) {
                 groundContactDistanceEstimator.estimate(
                     classMask = modelStore.segmenter.reusableClassMask,
@@ -1922,6 +2095,36 @@ class VisionPipelineController(
             inferenceOutput?.postprocessDurationNanos?.let { AriaRuntimeTimingTracker.recordPost(it / 1_000_000.0) }
             completedFrames.incrementAndGet()
 
+            // Auxiliary object detection is advisory only: it is never awaited on this thread.
+            // Eligibility follows the actual segmentation run (preview-only and model-unready frames
+            // stay disabled); accepted frames are copied into the sidecar's bounded pending buffer.
+            val isOdEligible = inferenceOutput != null &&
+                currentMode != VisionPipelineMode.PREVIEW_ONLY &&
+                isSessionLive(ticket)
+            objectDetectionPipeline.setEnabled(isOdEligible)
+            if (isOdEligible) {
+                objectDetectionPipeline.trySubmit(
+                    rgb = odRgbView,
+                    transform = cropRect,
+                    rotationDegrees = rotation,
+                    captureTimestampNanos = imageTimestampNanos,
+                    arrivalElapsedNanos = analyzerStartNanos,
+                    nowElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+                )
+            }
+            // Pressure budget covers everything the helper adds to this analyzer frame (OD copy and
+            // the alert/fusion pass), while timingTracker keeps its original analyzer-only metric.
+            val helperInclusiveFrameNanos = (SystemClock.elapsedRealtimeNanos() - analyzerStartNanos).coerceAtLeast(0L)
+            objectDetectionPipeline.onPrimaryAnalyzerFrame(helperInclusiveFrameNanos)
+            val odNowNanos = SystemClock.elapsedRealtimeNanos()
+            val odTelemetry = objectDetectionPipeline.telemetry(odNowNanos)
+            val currentOdOverlay = if (isOdEligible) {
+                objectDetectionPipeline.latestOverlaySnapshot(ticket, currentGeometry, odNowNanos)
+            } else {
+                null
+            }
+            logOdTelemetryIfChanged(odTelemetry, odNowNanos)
+
             if (shouldPublishUi && isSessionLive(ticket)) {
                 lastPublishedNanos.set(analyzerEndNanos)
                 val initialSnap = timingTracker.snapshot(
@@ -1944,6 +2147,8 @@ class VisionPipelineController(
                         configuredCpuThreads = modelStore.segmenter.configuredCpuThreads,
                         activeBackendType = modelStore.segmenter.activeBackendType,
                         activeBackendDescription = modelStore.segmenter.activeBackendDescription,
+                        odTelemetry = odTelemetry,
+                        odOverlay = currentOdOverlay,
                     )
                 }
                 val publishCompletedNanos = SystemClock.elapsedRealtimeNanos()
@@ -1962,9 +2167,18 @@ class VisionPipelineController(
                     backendLabel = activeBackendLabel(currentMode, modelLoaded),
                     nowElapsedNanos = publishCompletedNanos,
                 )
+                val postPublishOverlay = if (isOdEligible) {
+                    objectDetectionPipeline.latestOverlaySnapshot(ticket, currentGeometry, publishCompletedNanos)
+                } else {
+                    null
+                }
                 mutableUiState.update { state ->
                     if (!isSessionLive(ticket)) return@update state
-                    state.copy(timing = updatedSnap)
+                    state.copy(
+                        timing = updatedSnap,
+                        odTelemetry = odTelemetry,
+                        odOverlay = postPublishOverlay,
+                    )
                 }
             }
         } catch (t: Throwable) {
@@ -1978,12 +2192,20 @@ class VisionPipelineController(
             alertCoordinator.stop()
             groundContactMotionTracker.stop()
             groundContactDistanceEstimator.reset()
+            objectDetectionFusion.reset()
+            hazardDetector.reset()
+            objectTracker.reset()
+            lastTrackedGeometry = null
+            objectDetectionPipeline.setEnabled(false)
+            objectDetectionPipeline.onSessionStopped("프레임 분석 오류")
             unbindUseCasesOnMain()
             mutableUiState.update { state ->
                 state.copy(
                     cameraStatus = CameraSessionStatus.Error,
                     cameraErrorDetail = "프레임 분석 중 오류가 발생하여 카메라 분석을 중지했습니다 (${t.javaClass.simpleName}).",
                     groundContactDistance = GroundContactDistance(),
+                    odTelemetry = objectDetectionPipeline.telemetry(),
+                    odOverlay = null,
                 )
             }
         } finally {
@@ -2000,9 +2222,27 @@ class VisionPipelineController(
         return prev == 0L || (nowNanos - prev) >= METRICS_PUBLISH_INTERVAL_NANOS
     }
 
+    private fun logOdTelemetryIfChanged(telemetry: OdTelemetry, nowElapsedNanos: Long) {
+        val changed = telemetry.status != lastOdLogStatus ||
+            telemetry.rateHz != lastOdLogRateHz ||
+            telemetry.followsSegmentationCadence != lastOdLogFollowsCadence
+        if (!changed && (nowElapsedNanos - lastOdLogElapsedNanos) < OD_TELEMETRY_LOG_INTERVAL_NANOS) return
+        lastOdLogStatus = telemetry.status
+        lastOdLogRateHz = telemetry.rateHz
+        lastOdLogFollowsCadence = telemetry.followsSegmentationCadence
+        lastOdLogElapsedNanos = nowElapsedNanos
+        val line = telemetry.structuredLogLine()
+        if (telemetry.status == OdSidecarStatus.UNAVAILABLE || telemetry.errors > 0L) {
+            Log.w(TAG, line)
+        } else {
+            Log.d(TAG, line)
+        }
+    }
+
     private fun publishPreviewOnlyMetricsThrottled(ticket: Long, nowNanos: Long) {
         if (!isSessionLive(ticket) || !shouldPublishNow(nowNanos)) return
         lastPublishedNanos.set(nowNanos)
+        objectDetectionPipeline.setEnabled(false)
         val modelLoaded = modelStore.segmenter.isReady
         val snap = timingTracker.snapshot(
             mode = currentMode,
@@ -2025,6 +2265,8 @@ class VisionPipelineController(
                     message = "미리보기 전용 (거리 분석 비활성)",
                     timestampNanos = nowNanos,
                 ),
+                odTelemetry = objectDetectionPipeline.telemetry(nowNanos),
+                odOverlay = null,
             )
         }
     }
@@ -2044,6 +2286,10 @@ class VisionPipelineController(
             activeEffectiveFov = null
             activeFullCameraModel = null
             groundContactDistanceEstimator.reset()
+            objectDetectionFusion.reset()
+            hazardDetector.reset()
+            objectTracker.reset()
+            lastTrackedGeometry = null
             // Invalidate camera geometry until next frame with new rotation arrives
             lastObservedGeomWidth = -1
             lastObservedGeomHeight = -1
@@ -2053,6 +2299,7 @@ class VisionPipelineController(
             motionTracker.updateCameraGeometry(null)
             boundPreview?.targetRotation = targetRotation
             boundAnalysis?.targetRotation = targetRotation
+            mutableUiState.update { it.copy(odOverlay = null) }
         }
 
         if (closed.get() || !running.get() || lifecycleOwner == null) {
@@ -2117,6 +2364,12 @@ class VisionPipelineController(
         alertCoordinator.stop()
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.setEnabled(false)
+        objectDetectionPipeline.onSessionStopped("카메라 세션 종료")
         isTargetCameraAvailable = true
         modelStore.cancelCameraStabilityGate()
         unbindUseCasesOnMain()
@@ -2141,6 +2394,8 @@ class VisionPipelineController(
                 motionState = MotionState(),
                 computeTelemetry = VisionComputeTelemetry.INACTIVE,
                 groundContactDistance = GroundContactDistance(),
+                odTelemetry = objectDetectionPipeline.telemetry(),
+                odOverlay = null,
             )
         }
     }
@@ -2225,6 +2480,18 @@ class VisionPipelineController(
 
         cancelPendingRebindWait()
         isRebindInProgress.set(true)
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.setEnabled(false)
+        objectDetectionPipeline.onSessionStopped("카메라 리바인드")
+        mutableUiState.update {
+            it.copy(
+                odTelemetry = objectDetectionPipeline.telemetry(),
+                odOverlay = null,
+            )
+        }
         ensureAvailabilityCallbackRegistered()
 
         val priorState = observedCameraState
@@ -2422,6 +2689,11 @@ class VisionPipelineController(
         bodyMountProfileStore.close()
         groundContactDistanceEstimator.reset()
         modelStore.close()
+        objectDetectionFusion.reset()
+        hazardDetector.reset()
+        objectTracker.reset()
+        lastTrackedGeometry = null
+        objectDetectionPipeline.close()
         if (terminalStatus == CameraSessionStatus.Error || terminalStatus == CameraSessionStatus.PermissionDenied) {
             mutableUiState.update {
                 it.copy(cameraStatus = terminalStatus, cameraErrorDetail = terminalDetail)
@@ -2435,6 +2707,7 @@ class VisionPipelineController(
     companion object {
         private const val WALKING_ASSIST_POLL_MS = 100L
         private const val METRICS_PUBLISH_INTERVAL_NANOS = 250_000_000L
+        private const val OD_TELEMETRY_LOG_INTERVAL_NANOS = 5_000_000_000L
         internal const val STARTUP_TIMEOUT_MS = 10_000L
         internal const val STREAMING_STALL_TIMEOUT_MS = 5_000L
         internal const val IN_FLIGHT_PROCESSING_TIMEOUT_MS = 15_000L

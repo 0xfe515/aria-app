@@ -13,12 +13,47 @@ class HazardDetector(
     private val height: Int = VisionContract.MODEL_HEIGHT,
     private val roiStartRow: Int = VisionContract.ROI_START_ROW,
     private val proximityStartRow: Int = 230,
+    private val featureExtractor: SegmentationFeatureExtractor = SegmentationFeatureExtractor(
+        width = width,
+        height = height,
+        roiStartRow = roiStartRow,
+        nearStartRow = proximityStartRow,
+    ),
+    private val ruleEngine: HazardRuleEngine = HazardRuleEngine(),
+    private val structuralEdgeExtractor: StructuralEdgeExtractor = StructuralEdgeExtractor(
+        width = width,
+        height = height,
+        roiStartRow = roiStartRow,
+    ),
 ) {
+
+    fun reset() {
+        ruleEngine.reset()
+        structuralEdgeExtractor.reset()
+    }
 
     fun assessHazard(
         classMask: ByteArray,
         motionState: MotionState,
         timestampNanos: Long,
+    ): HazardAssessment = assessHazard(
+        classMask = classMask,
+        motionState = motionState,
+        timestampNanos = timestampNanos,
+        tracks = emptyList(),
+        lumaOrRgb = null,
+        projector = null,
+        applyRuleUpgrade = false,
+    )
+
+    fun assessHazard(
+        classMask: ByteArray,
+        motionState: MotionState,
+        timestampNanos: Long,
+        tracks: List<ObjectTrack>,
+        lumaOrRgb: FloatArray? = null,
+        projector: PointProjector? = null,
+        applyRuleUpgrade: Boolean = true,
     ): HazardAssessment {
         require(classMask.size >= width * height) {
             "Mask buffer size ${classMask.size} is smaller than required ${width * height}"
@@ -41,6 +76,8 @@ class HazardDetector(
                 motionConfidence = motionState.confidence,
                 messageKorean = "방향·자세 확인 필요: $reasonMsg",
                 isAlertCandidate = false,
+                severity = AlertSeverity.DEGRADED,
+                cause = HazardCause.DEGRADED,
             )
         }
 
@@ -116,8 +153,34 @@ class HazardDetector(
             "근접 장애물"
         }
 
-        // Decision logic
-        return when {
+        // Compute segmentation features, structural edges, and rule decision
+        val rawFeatures = featureExtractor.extract(classMask, corridor)
+        val isWalking = motionState.activity == UserMovementActivity.WALKING ||
+            motionState.activity == UserMovementActivity.UNKNOWN
+
+        val edgeAnalysis = if (lumaOrRgb != null && lumaOrRgb.size >= width * height) {
+            structuralEdgeExtractor.analyze(
+                lumaOrRgb = lumaOrRgb,
+                classMask = classMask,
+                features = rawFeatures,
+                captureNanos = timestampNanos,
+                isWalking = isWalking,
+                projector = projector,
+            )
+        } else {
+            null
+        }
+
+        val effectiveFeatures = edgeAnalysis?.adjustedFeatures ?: rawFeatures
+        val combinedTracks = if (edgeAnalysis != null && edgeAnalysis.syntheticTracks.isNotEmpty()) {
+            tracks + edgeAnalysis.syntheticTracks
+        } else {
+            tracks
+        }
+
+        val decision = ruleEngine.evaluate(effectiveFeatures, combinedTracks, motionState, timestampNanos)
+
+        val baseAssessment = when {
             // Proximity heuristic: non-walkable ground > 35% in bottom 20% zone
             nearBlockedRatio > 0.35f -> {
                 HazardAssessment(
@@ -131,6 +194,13 @@ class HazardDetector(
                     motionConfidence = motionState.confidence,
                     messageKorean = "[주의] ${corridor.koreanLabel} 근접 경로 장애물 추정 ($dominantNearClassName)",
                     isAlertCandidate = true,
+                    severity = decision.severity,
+                    cause = decision.cause,
+                    trackId = decision.trackId,
+                    objectKind = decision.objectKind,
+                    distanceMeters = decision.distanceMeters,
+                    direction = decision.direction,
+                    riskScore = decision.riskScore,
                 )
             }
 
@@ -147,6 +217,13 @@ class HazardDetector(
                     motionConfidence = motionState.confidence,
                     messageKorean = "[위험] ${corridor.koreanLabel} 진행 경로 차단 ($dominantRoiClassName)",
                     isAlertCandidate = true,
+                    severity = decision.severity,
+                    cause = decision.cause,
+                    trackId = decision.trackId,
+                    objectKind = decision.objectKind,
+                    distanceMeters = decision.distanceMeters,
+                    direction = decision.direction,
+                    riskScore = decision.riskScore,
                 )
             }
 
@@ -163,6 +240,13 @@ class HazardDetector(
                     motionConfidence = motionState.confidence,
                     messageKorean = "[주의] ${corridor.koreanLabel} 진행 경로 협소 ($dominantRoiClassName 근접)",
                     isAlertCandidate = false,
+                    severity = decision.severity,
+                    cause = decision.cause,
+                    trackId = decision.trackId,
+                    objectKind = decision.objectKind,
+                    distanceMeters = decision.distanceMeters,
+                    direction = decision.direction,
+                    riskScore = decision.riskScore,
                 )
             }
 
@@ -178,8 +262,78 @@ class HazardDetector(
                     motionConfidence = motionState.confidence,
                     messageKorean = "${corridor.koreanLabel} 경고 조건 미감지 (보행 영역 ${(walkableRatio * 100).toInt()}%)",
                     isAlertCandidate = false,
+                    severity = decision.severity,
+                    cause = decision.cause,
+                    trackId = decision.trackId,
+                    objectKind = decision.objectKind,
+                    distanceMeters = decision.distanceMeters,
+                    direction = decision.direction,
+                    riskScore = decision.riskScore,
                 )
             }
+        }
+
+        if (!applyRuleUpgrade) {
+            return baseAssessment
+        }
+
+        return when (decision.severity) {
+            AlertSeverity.DEGRADED -> {
+                baseAssessment.copy(
+                    level = HazardLevel.UNKNOWN_DEGRADED,
+                    isAlertCandidate = false,
+                    messageKorean = decision.messageKorean,
+                    severity = AlertSeverity.DEGRADED,
+                    cause = HazardCause.DEGRADED,
+                )
+            }
+            AlertSeverity.WARNING -> {
+                val targetLevel = if (nearBlockedRatio > 0.35f || decision.cause in setOf(
+                        HazardCause.W1_VEHICLE_APPROACH,
+                        HazardCause.W2_OBJECT_IMMINENT,
+                        HazardCause.W4_STATIC_IMMINENT,
+                    )
+                ) {
+                    HazardLevel.NEAR_PATH_HAZARD
+                } else {
+                    HazardLevel.PATH_BLOCKED
+                }
+                val upgradedLevel = if (baseAssessment.level.priority > targetLevel.priority) {
+                    baseAssessment.level
+                } else {
+                    targetLevel
+                }
+                val upgradedMessage = if (baseAssessment.level.priority < HazardLevel.PATH_BLOCKED.priority) {
+                    decision.messageKorean
+                } else {
+                    baseAssessment.messageKorean
+                }
+                baseAssessment.copy(
+                    level = upgradedLevel,
+                    isAlertCandidate = true,
+                    messageKorean = upgradedMessage,
+                )
+            }
+            AlertSeverity.CAUTION -> {
+                val upgradedLevel = if (baseAssessment.level.priority < HazardLevel.PATH_CAUTION.priority) {
+                    HazardLevel.PATH_CAUTION
+                } else {
+                    baseAssessment.level
+                }
+                val upgradedMessage = if (baseAssessment.level == HazardLevel.CLEAR_UNWARNED ||
+                    baseAssessment.level == HazardLevel.PATH_CAUTION
+                ) {
+                    decision.messageKorean
+                } else {
+                    baseAssessment.messageKorean
+                }
+                baseAssessment.copy(
+                    level = upgradedLevel,
+                    isAlertCandidate = true,
+                    messageKorean = upgradedMessage,
+                )
+            }
+            else -> baseAssessment
         }
     }
 }

@@ -8,6 +8,7 @@ import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.RemoteException
 import android.util.Log
+import com.ariateam.aria.hazard.AlertSeverity
 import com.ariateam.aria.hazard.HazardAlertCoordinator
 import com.ariateam.aria.hazard.HazardAlertEvent
 import com.ariateam.aria.hazard.HazardAlertSink
@@ -183,6 +184,16 @@ class HazardSpeechBridge(
 
         if (service == null) {
             return
+        }
+
+        if (event.severity == AlertSeverity.WARNING) {
+            runCatching {
+                service.preemptSpeech()
+            }.onFailure { e ->
+                if (e is RemoteException) {
+                    Log.w(TAG, "RemoteException calling preemptSpeech", e)
+                }
+            }
         }
 
         // Binder IPC executed safely outside synchronization lock

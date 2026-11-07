@@ -17,7 +17,7 @@ import android.view.Surface
 class MotionTracker(
     context: Context? = null,
     private val sensorDelay: Int = SensorManager.SENSOR_DELAY_GAME,
-    val engine: MotionFusionEngine = MotionFusionEngine(),
+    val engine: MotionFusionEngine = MotionFusionEngine(autoCalibrationEnabled = true),
     private val clock: () -> Long = { SystemClock.elapsedRealtimeNanos() },
 ) : AutoCloseable {
 

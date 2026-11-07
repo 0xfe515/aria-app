@@ -16,6 +16,8 @@ enum class AlertSuppressionReason {
     COOLDOWN,
 }
 
+data class CandidateKey(val severity: AlertSeverity, val cause: HazardCause, val targetKey: Int)
+
 /**
  * Pure, deterministic alert policy implementing temporal hysteresis, cooldown, and staleness gating.
  * Decoupled from Android Context/Vibrator/Toast for 100% JVM unit testability.
@@ -25,6 +27,10 @@ class HazardAlertPolicy(
     val alertCooldownMs: Long = 2_500L,
     val staleResultExpiryMs: Long = 1_500L,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
+    val cautionConfirmationFramesRequired: Int = 3,
+    val cautionCooldownMs: Long = 6_000L,
+    val warningReleaseFrames: Int = 4,
+    val cautionReleaseFrames: Int = 6,
 ) {
     private var lastAssessmentTimestampNanos: Long = 0L
     private var consecutiveRiskCount: Int = 0
@@ -34,6 +40,11 @@ class HazardAlertPolicy(
     private var lastAlertRealtimeMs: Long = 0L
     private var lastAlertLevel: HazardLevel = HazardLevel.CLEAR_UNWARNED
     private var lastAlertCorridor: CorridorDirection? = null
+
+    private var lastCandidateKey: CandidateKey? = null
+    private var lastAlertSeverity: AlertSeverity = AlertSeverity.NONE
+    private var lastAlertKey: CandidateKey? = null
+    private var inactiveFrameCount: Int = 0
 
     private companion object {
         const val MAX_CONSECUTIVE_CAPTURE_GAP_NANOS = 500_000_000L
@@ -47,6 +58,11 @@ class HazardAlertPolicy(
         lastAlertRealtimeMs = 0L
         lastAlertLevel = HazardLevel.CLEAR_UNWARNED
         lastAlertCorridor = null
+
+        lastCandidateKey = null
+        lastAlertSeverity = AlertSeverity.NONE
+        lastAlertKey = null
+        inactiveFrameCount = 0
     }
 
     fun evaluate(
@@ -73,6 +89,7 @@ class HazardAlertPolicy(
             consecutiveRiskCount = 0
             lastCandidateLevel = null
             lastCandidateCorridor = null
+            lastCandidateKey = null
             lastAssessmentTimestampNanos = captureNanos
             return AlertDecision.Suppressed(AlertSuppressionReason.STALE_RESULT)
         }
@@ -85,47 +102,114 @@ class HazardAlertPolicy(
             consecutiveRiskCount = 0
             lastCandidateLevel = null
             lastCandidateCorridor = null
+            lastCandidateKey = null
         }
         lastAssessmentTimestampNanos = captureNanos
 
-        val level = assessment.level
-        if (!assessment.isAlertCandidate || level.priority < HazardLevel.PATH_BLOCKED.priority) {
+        val isStructuredMode = assessment.cause != HazardCause.DEGRADED ||
+            assessment.severity == AlertSeverity.WARNING ||
+            assessment.severity == AlertSeverity.CAUTION ||
+            assessment.severity == AlertSeverity.NONE
+
+        if (!isStructuredMode) {
+            val level = assessment.level
+            if (!assessment.isAlertCandidate || level.priority < HazardLevel.PATH_BLOCKED.priority) {
+                consecutiveRiskCount = 0
+                lastCandidateLevel = null
+                lastCandidateCorridor = null
+                return AlertDecision.Suppressed(AlertSuppressionReason.NOT_A_HAZARD_CANDIDATE)
+            }
+
+            // Confirmation hysteresis: require same level and corridor across consecutive frames
+            if (level == lastCandidateLevel && assessment.activeCorridor == lastCandidateCorridor) {
+                consecutiveRiskCount++
+            } else {
+                consecutiveRiskCount = 1
+                lastCandidateLevel = level
+                lastCandidateCorridor = assessment.activeCorridor
+            }
+
+            if (consecutiveRiskCount >= confirmationFramesRequired) {
+                val isEscalation = level.priority > lastAlertLevel.priority
+                val isCooldownElapsed = (nowRealtimeMs - lastAlertRealtimeMs) >= alertCooldownMs
+                val isCorridorChanged = assessment.activeCorridor != lastAlertCorridor
+
+                if (isEscalation || isCooldownElapsed || isCorridorChanged) {
+                    val reason = when {
+                        isEscalation -> "ESCALATION"
+                        isCorridorChanged -> "CORRIDOR_CHANGED"
+                        else -> "COOLDOWN_ELAPSED"
+                    }
+                    lastAlertRealtimeMs = nowRealtimeMs
+                    lastAlertLevel = level
+                    lastAlertCorridor = assessment.activeCorridor
+                    return AlertDecision.Fire(assessment, reason)
+                }
+            }
+
+            return AlertDecision.Suppressed(
+                if (consecutiveRiskCount >= confirmationFramesRequired) AlertSuppressionReason.COOLDOWN
+                else AlertSuppressionReason.CONFIRMATION_PENDING,
+            )
+        }
+
+        // Structured severity mode
+        if (assessment.severity.rank < AlertSeverity.CAUTION.rank) {
+            inactiveFrameCount++
+            val releaseThreshold = if (lastAlertSeverity == AlertSeverity.WARNING) {
+                warningReleaseFrames
+            } else {
+                cautionReleaseFrames
+            }
+            if (inactiveFrameCount >= releaseThreshold) {
+                lastAlertSeverity = AlertSeverity.NONE
+                lastAlertKey = null
+            }
             consecutiveRiskCount = 0
-            lastCandidateLevel = null
-            lastCandidateCorridor = null
+            lastCandidateKey = null
             return AlertDecision.Suppressed(AlertSuppressionReason.NOT_A_HAZARD_CANDIDATE)
         }
 
-        // Confirmation hysteresis: require same level and corridor across consecutive frames
-        if (level == lastCandidateLevel && assessment.activeCorridor == lastCandidateCorridor) {
+        inactiveFrameCount = 0
+        val targetKey = assessment.trackId ?: (assessment.direction ?: assessment.activeCorridor).ordinal
+        val key = CandidateKey(assessment.severity, assessment.cause, targetKey)
+
+        if (key == lastCandidateKey) {
             consecutiveRiskCount++
         } else {
             consecutiveRiskCount = 1
-            lastCandidateLevel = level
-            lastCandidateCorridor = assessment.activeCorridor
+            lastCandidateKey = key
         }
 
-        if (consecutiveRiskCount >= confirmationFramesRequired) {
-            val isEscalation = level.priority > lastAlertLevel.priority
-            val isCooldownElapsed = (nowRealtimeMs - lastAlertRealtimeMs) >= alertCooldownMs
-            val isCorridorChanged = assessment.activeCorridor != lastAlertCorridor
+        val requiredFrames = if (assessment.severity == AlertSeverity.WARNING) {
+            confirmationFramesRequired
+        } else {
+            cautionConfirmationFramesRequired
+        }
 
-            if (isEscalation || isCooldownElapsed || isCorridorChanged) {
+        if (consecutiveRiskCount >= requiredFrames) {
+            val isEscalation = assessment.severity.rank > lastAlertSeverity.rank
+            val cooldownForLevel = if (assessment.severity == AlertSeverity.WARNING) alertCooldownMs else cautionCooldownMs
+            val isCooldownElapsed = lastAlertRealtimeMs == 0L || (nowRealtimeMs - lastAlertRealtimeMs) >= cooldownForLevel
+            val isTargetChanged = key != lastAlertKey
+
+            if (isEscalation || isCooldownElapsed || isTargetChanged) {
                 val reason = when {
                     isEscalation -> "ESCALATION"
-                    isCorridorChanged -> "CORRIDOR_CHANGED"
+                    isTargetChanged -> "CORRIDOR_CHANGED"
                     else -> "COOLDOWN_ELAPSED"
                 }
                 lastAlertRealtimeMs = nowRealtimeMs
-                lastAlertLevel = level
+                lastAlertSeverity = assessment.severity
+                lastAlertKey = key
+                lastAlertLevel = assessment.level
                 lastAlertCorridor = assessment.activeCorridor
                 return AlertDecision.Fire(assessment, reason)
             }
-
         }
 
         return AlertDecision.Suppressed(
-            if (consecutiveRiskCount >= confirmationFramesRequired) AlertSuppressionReason.COOLDOWN
+            if (consecutiveRiskCount >= requiredFrames) AlertSuppressionReason.COOLDOWN
             else AlertSuppressionReason.CONFIRMATION_PENDING,
         )
     }

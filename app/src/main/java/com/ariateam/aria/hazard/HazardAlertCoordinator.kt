@@ -11,6 +11,7 @@ import android.os.VibratorManager
 import android.util.Log
 import android.widget.Toast
 import com.ariateam.aria.R
+import com.ariateam.aria.walking.WalkingAssistCopy
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -21,6 +22,8 @@ import java.util.concurrent.atomic.AtomicLong
  * @property timestampNanos Elapsed realtime nanoseconds of the frame that triggered the alert
  * @property message Korean announcement text to speak or display
  * @property level Hazard severity level
+ * @property severity Alert severity tier (WARNING or CAUTION)
+ * @property cause Specific root cause
  */
 data class HazardAlertEvent(
     val session: Long,
@@ -28,6 +31,8 @@ data class HazardAlertEvent(
     val timestampNanos: Long,
     val message: String,
     val level: HazardLevel = HazardLevel.NEAR_PATH_HAZARD,
+    val severity: AlertSeverity = AlertSeverity.WARNING,
+    val cause: HazardCause = HazardCause.NONE,
 )
 
 /**
@@ -128,11 +133,32 @@ class HazardAlertCoordinator(
                     if (isFresh && isSessionActive && isEnabled && generation.get() == ticket) {
                         fireAlertLocked(decision.assessment, ticket, captureTimestampNanos)
                         val seq = ++alertSequence
-                        eventToDispatch = HazardAlertEvent(
-                            session = ticket,
-                            sequence = seq,
-                            timestampNanos = captureTimestampNanos,
-                            message = context?.let { appContext ->
+                        val effectiveSeverity = when {
+                            decision.assessment.severity == AlertSeverity.WARNING || decision.assessment.severity == AlertSeverity.CAUTION -> {
+                                decision.assessment.severity
+                            }
+                            decision.assessment.level == HazardLevel.PATH_BLOCKED || decision.assessment.level == HazardLevel.NEAR_PATH_HAZARD -> {
+                                AlertSeverity.WARNING
+                            }
+                            decision.assessment.level == HazardLevel.PATH_CAUTION -> {
+                                AlertSeverity.CAUTION
+                            }
+                            else -> {
+                                AlertSeverity.DEGRADED
+                            }
+                        }
+                        val alertMessage = if (decision.assessment.cause != HazardCause.DEGRADED && decision.assessment.cause != HazardCause.NONE) {
+                            if (decision.assessment.messageKorean.isNotBlank()) {
+                                decision.assessment.messageKorean
+                            } else {
+                                context?.let { appContext ->
+                                    WalkingAssistCopy.hazardWarning(decision.assessment.cause)?.let { resId ->
+                                        appContext.getString(resId)
+                                    }
+                                } ?: decision.assessment.messageKorean
+                            }
+                        } else {
+                            context?.let { appContext ->
                                 val messageRes = when (decision.assessment.level) {
                                     HazardLevel.NEAR_PATH_HAZARD -> R.string.walking_hazard_near
                                     HazardLevel.PATH_BLOCKED -> R.string.walking_hazard_blocked
@@ -140,8 +166,16 @@ class HazardAlertCoordinator(
                                 }
                                 if (messageRes != 0) appContext.getString(messageRes)
                                 else decision.assessment.messageKorean
-                            } ?: decision.assessment.messageKorean,
+                            } ?: decision.assessment.messageKorean
+                        }
+                        eventToDispatch = HazardAlertEvent(
+                            session = ticket,
+                            sequence = seq,
+                            timestampNanos = captureTimestampNanos,
+                            message = alertMessage,
                             level = decision.assessment.level,
+                            severity = effectiveSeverity,
+                            cause = if (decision.assessment.cause != HazardCause.DEGRADED) decision.assessment.cause else HazardCause.NONE,
                         )
                         sinkToDispatch = this.alertSink ?: sharedAlertSink
                     }
@@ -179,18 +213,40 @@ class HazardAlertCoordinator(
             vibrator?.let { vib ->
                 if (vib.hasVibrator()) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        val effect = when (assessment.level) {
-                            HazardLevel.NEAR_PATH_HAZARD -> {
-                                // Double pulse for near hazard
-                                VibrationEffect.createWaveform(
-                                    longArrayOf(0, 160, 80, 160),
-                                    intArrayOf(0, 255, 0, 255),
-                                    -1,
-                                )
+                        val effectiveSeverity = when {
+                            assessment.severity == AlertSeverity.WARNING || assessment.severity == AlertSeverity.CAUTION -> {
+                                assessment.severity
                             }
-                            HazardLevel.PATH_BLOCKED -> {
-                                // Single strong buzz for path blocked
-                                VibrationEffect.createOneShot(200L, VibrationEffect.DEFAULT_AMPLITUDE)
+                            assessment.level == HazardLevel.PATH_BLOCKED || assessment.level == HazardLevel.NEAR_PATH_HAZARD -> {
+                                AlertSeverity.WARNING
+                            }
+                            assessment.level == HazardLevel.PATH_CAUTION -> {
+                                AlertSeverity.CAUTION
+                            }
+                            else -> {
+                                AlertSeverity.DEGRADED
+                            }
+                        }
+                        val effect = when (effectiveSeverity) {
+                            AlertSeverity.WARNING -> {
+                                if (assessment.cause == HazardCause.W1_VEHICLE_APPROACH ||
+                                    assessment.cause == HazardCause.W2_OBJECT_IMMINENT ||
+                                    assessment.level == HazardLevel.NEAR_PATH_HAZARD
+                                ) {
+                                    // Double/triple strong pulse
+                                    VibrationEffect.createWaveform(
+                                        longArrayOf(0, 160, 80, 160),
+                                        intArrayOf(0, 255, 0, 255),
+                                        -1,
+                                    )
+                                } else {
+                                    // Single strong buzz for other warnings (e.g. PATH_BLOCKED)
+                                    VibrationEffect.createOneShot(200L, VibrationEffect.DEFAULT_AMPLITUDE)
+                                }
+                            }
+                            AlertSeverity.CAUTION -> {
+                                // Weak single tap for CAUTION: simultaneous voice + weak vibration
+                                VibrationEffect.createOneShot(70L, 96)
                             }
                             else -> {
                                 VibrationEffect.createOneShot(80L, VibrationEffect.DEFAULT_AMPLITUDE)

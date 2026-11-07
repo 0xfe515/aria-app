@@ -67,4 +67,11 @@ data class HazardAssessment(
     val motionConfidence: Float = 0f,
     val messageKorean: String = "방향·자세 확인 필요 (보행 정면 캘리브레이션 대기)",
     val isAlertCandidate: Boolean = false,
+    val severity: AlertSeverity = AlertSeverity.DEGRADED,
+    val cause: HazardCause = HazardCause.DEGRADED,
+    val trackId: Int? = null,
+    val objectKind: ObjectKind? = null,
+    val distanceMeters: Float? = null,
+    val direction: CorridorDirection? = null,
+    val riskScore: Float = 0f,
 )

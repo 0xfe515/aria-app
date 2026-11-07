@@ -42,6 +42,9 @@ class ProductionPackageIntegrityTest {
             "walkable_seg_aria5.tflite" to (10_837_912L to "3944dce57cc161679525c3f4feb1f6b46c8e7519f8f10ba06155b3874c2c66b7"),
             "walkable_seg_aria5_unfused.tflite" to (10_839_936L to "84364b9730d200b00a65ebcbae6a13444c6f8eb9bbab0676adc30d57cfa24847"),
             "walkable_seg_aria5_portrait_unfused.tflite" to (10_839_936L to "312105f5a82fc2677337ca7c15867249b3ae255a983fb5ffa4a54dae2b6864c1"),
+            // Optional auxiliary OD helper (not a segmentation model); pinned in
+            // assets/models/efficientdet_lite0_provenance.md.
+            "efficientdet_lite0_int8.tflite" to (4_563_519L to "2e04c53bfeac0ac2a30c057c7e2a777594ce39baaac35a92f74fb1e8c4fc4e0b"),
         )
         assertEquals("Unexpected source model inventory", expected.keys, modelFiles.map { it.name }.toSet())
         for (model in modelFiles) {

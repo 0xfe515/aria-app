@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Onboarding Screen Strings -->
+    <string name="onboarding_welcome">안녕하세요? ARIA입니다. 앱을 사용하기 전에 몇 가지 설정하겠습니다.</string>
+    <string name="onboarding_ask_stature">당신의 키를 센티미터 단위로 말씀해 주세요.</string>
+    <string name="onboarding_confirm_stature">키가 %1f 센티미터가 맞습니까? 예 또는 아니오로 답변해 주세요.</string>
+    <string name="onboarding_ask_mount">카메라를 어깨에 부착하실 건가요, 가슴에 부착하실 건가요? 어깨 또는 가슴이라고 답변해 주세요.</string>
+    <string name="onboarding_confirm_mount">%s에 부착하신 것이 맞습니까? 예 또는 아니오로 답변해 주세요.</string>
+    <string name="onboarding_completed">설정이 완료되었습니다. 홈 화면으로 이동합니다.</string>
+    <string name="onboarding_error_tts">음성 안내를 준비할 수 없습니다. 수동 입력으로 계속해 주세요.</string>
+    <string name="onboarding_saving">설정을 저장하는 중입니다.</string>
+    <string name="onboarding_error_stature">키를 인식하지 못했습니다. 다시 말씀해 주세요.</string>
+    <string name="onboarding_error_stature_confirmation">응답을 이해하지 못했습니다. 예 또는 아니오로 답변해 주세요.</string>
+    <string name="onboarding_error_confirmation">응답을 이해하지 못했습니다. 예 또는 아니오로 답변해 주세요.</string>
+    <string name="onboarding_error_mount">위치를 인식하지 못했습니다. 어깨 또는 가슴이라고 다시 말씀해 주세요.</string>
+    <string name="onboarding_error_mount_confirmation">응답을 이해하지 못했습니다. 예 또는 아니오로 답변해 주세요.</string>
+    <string name="onboarding_error_save">프로필 저장에 실패했습니다. 다시 시도해 주세요.</string>
+    <string name="onboarding_retry">다시 시도</string>
+    <string name="mount_shoulder">어깨</string>
+    <string name="mount_chest">가슴</string>
+</resources>
