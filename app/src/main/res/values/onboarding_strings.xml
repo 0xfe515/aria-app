@@ -3,7 +3,7 @@
     <!-- Onboarding Screen Strings -->
     <string name="onboarding_welcome">안녕하세요? ARIA입니다. 앱을 사용하기 전에 몇 가지 설정하겠습니다.</string>
     <string name="onboarding_ask_stature">당신의 키를 센티미터 단위로 말씀해 주세요.</string>
-    <string name="onboarding_confirm_stature">키가 %1f 센티미터가 맞습니까? 예 또는 아니오로 답변해 주세요.</string>
+    <string name="onboarding_confirm_stature">키가 %1$.1f 센티미터가 맞습니까? 예 또는 아니오로 답변해 주세요.</string>
     <string name="onboarding_ask_mount">카메라를 어깨에 부착하실 건가요, 가슴에 부착하실 건가요? 어깨 또는 가슴이라고 답변해 주세요.</string>
     <string name="onboarding_confirm_mount">%s에 부착하신 것이 맞습니까? 예 또는 아니오로 답변해 주세요.</string>
     <string name="onboarding_completed">설정이 완료되었습니다. 홈 화면으로 이동합니다.</string>

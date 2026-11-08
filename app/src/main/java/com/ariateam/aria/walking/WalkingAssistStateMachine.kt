@@ -14,6 +14,7 @@ data class WalkingAssistInput(
     val motionReliable: Boolean,
     val resultCaptureTimestampNanos: Long?,
     val transientFault: WalkingAssistCause? = null,
+    val autoCalibrationActive: Boolean = false,
 )
 
 class WalkingAssistStateMachine(
@@ -61,7 +62,7 @@ class WalkingAssistStateMachine(
         transientFaultSinceMs = null
         validSinceMs = null
         recoveryPending = false
-        sensingExpectedSinceMs = nowElapsedMs
+        sensingExpectedSinceMs = null
         latestResultCaptureTimestampNanos = null
         lastNowMs = nowElapsedMs
         lastNowNanos = nowElapsedNanos
@@ -140,18 +141,32 @@ class WalkingAssistStateMachine(
             )
         }
 
+        if (!input.motionSensorsAvailable) {
+            return updateTransientFault(
+                previous = previous,
+                nowElapsedMs = nowElapsedMs,
+                cause = WalkingAssistCause.MOTION_UNAVAILABLE,
+                action = WalkingAssistAction.WAIT_FOR_MOTION,
+            )
+        }
+
+        // Auto-reanchor during active session is an explicit quiet exception (requires sensors available):
+        if (!input.motionCalibrated && input.autoCalibrationActive) {
+            clearTimers()
+            return transitionTo(previous, stateFor(
+                WalkingAssistPhase.PREPARING,
+                WalkingAssistCause.SESSION_STARTING,
+                WalkingAssistAction.WAIT_FOR_MOTION,
+            ))
+        }
+
+        // If prior results existed in this session and results stop arriving,
+        // it must eventually become LIMITED(RESULT_STALE) even if readiness was lost.
         val captureTimestampNanos = latestResultCaptureTimestampNanos
         val resultAgeNanos = captureTimestampNanos?.let { nowElapsedNanos - it }
-        val hasFreshResult = resultAgeNanos != null &&
-            resultAgeNanos >= 0L &&
-            resultAgeNanos < freshResultLimitMs * NANOS_PER_MILLI
-        val resultDeadlineReached = when {
-            resultAgeNanos != null -> resultAgeNanos >= freshResultLimitMs * NANOS_PER_MILLI
-            else -> sensingExpectedSinceMs?.let {
-                nowElapsedMs - it >= freshResultLimitMs
-            } ?: false
-        }
-        if (resultDeadlineReached) {
+        val priorResultStale = resultAgeNanos != null &&
+            resultAgeNanos >= freshResultLimitMs * NANOS_PER_MILLI
+        if (priorResultStale) {
             validSinceMs = null
             return transitionTo(
                 previous,
@@ -190,14 +205,6 @@ class WalkingAssistStateMachine(
             ))
         }
 
-        if (!input.motionSensorsAvailable) {
-            return updateTransientFault(
-                previous = previous,
-                nowElapsedMs = nowElapsedMs,
-                cause = WalkingAssistCause.MOTION_UNAVAILABLE,
-                action = WalkingAssistAction.WAIT_FOR_MOTION,
-            )
-        }
         if (!input.motionCalibrated) {
             clearTimers()
             return transitionTo(previous, stateFor(
@@ -215,6 +222,26 @@ class WalkingAssistStateMachine(
             )
         }
 
+        val hasFreshResult = resultAgeNanos != null &&
+            resultAgeNanos >= 0L &&
+            resultAgeNanos < freshResultLimitMs * NANOS_PER_MILLI
+        val firstResultDeadlineReached = when {
+            resultAgeNanos != null -> false
+            else -> {
+                val readySince = sensingExpectedSinceMs ?: nowElapsedMs.also {
+                    sensingExpectedSinceMs = it
+                }
+                nowElapsedMs - readySince >= freshResultLimitMs
+            }
+        }
+        if (firstResultDeadlineReached) {
+            validSinceMs = null
+            return transitionTo(
+                previous,
+                limited(WalkingAssistCause.RESULT_STALE, WalkingAssistAction.WAIT_FOR_RESULT),
+            )
+        }
+
         if (!hasFreshResult) {
             clearTransientFault()
             validSinceMs = null
@@ -229,6 +256,7 @@ class WalkingAssistStateMachine(
         }
 
         clearTransientFault()
+        sensingExpectedSinceMs = null
         if (state.phase == WalkingAssistPhase.LIMITED || recoveryPending) {
             val stableSince = validSinceMs ?: nowElapsedMs.also { validSinceMs = it }
             if (nowElapsedMs - stableSince < recoveryStabilityMs) {
@@ -263,6 +291,7 @@ class WalkingAssistStateMachine(
         action: WalkingAssistAction,
     ): WalkingAssistTransition {
         validSinceMs = null
+        sensingExpectedSinceMs = null
         transientFault = cause
         if (transientFaultSinceMs == null) {
             transientFaultSinceMs = nowElapsedMs
@@ -286,6 +315,7 @@ class WalkingAssistStateMachine(
     private fun clearTimers() {
         clearTransientFault()
         validSinceMs = null
+        sensingExpectedSinceMs = null
     }
 
     private fun transitionTo(

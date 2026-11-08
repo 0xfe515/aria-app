@@ -109,9 +109,10 @@ class VoiceListeningSessionTest {
         assertTrue(h.fatals.isEmpty())
     }
 
-    @Test fun transientErrorsBackOffAndStopAfterFiveRetriesEvenIfReadyIsReceived() {
+    @Test fun transientErrorsBackOffWithoutFatalTerminationAndStopCancelsRetry() {
         val h = Harness()
         h.start()
+        // Standby retries back off through bounded schedule: 1s, 2s, 4s, 8s, 15s
         listOf(1_000L, 2_000L, 4_000L, 8_000L, 15_000L).forEachIndexed { index, delay ->
             h.driver.current.failed(RecognitionFailure.Busy)
             assertEquals(index + 1, h.session.snapshot.retryCount)
@@ -120,11 +121,16 @@ class VoiceListeningSessionTest {
             h.time.advance(delay - 1)
             assertEquals(before, h.driver.starts)
             h.time.advance(1)
-            h.driver.current.ready() // Readiness alone must not reset failure history.
         }
+        // Beyond 5 consecutive transient errors in standby: does NOT fatally error; caps at 15s bounded backoff
         h.driver.current.failed(RecognitionFailure.Busy)
-        assertEquals(VoicePhase.Error, h.session.snapshot.phase)
-        assertEquals(listOf(VoiceError.RECOGNITION_FAILED), h.fatals)
+        assertEquals(VoicePhase.Reconnecting, h.session.snapshot.phase)
+        assertTrue("Standby transient errors must never fatally stop", h.fatals.isEmpty())
+        assertEquals(h.time.now() + 15_000L, h.session.snapshot.retryAtMillis)
+
+        // Calling stop cancels backoff and cleanly transitions to Stopped
+        h.session.stop()
+        assertEquals(VoicePhase.Stopped, h.session.snapshot.phase)
         val before = h.driver.starts
         h.time.advance(60_000)
         assertEquals(before, h.driver.starts)
@@ -376,7 +382,7 @@ class VoiceListeningSessionTest {
             override fun emptyInput() { empty++ }
             override fun fatal(errorCode: Int) { fatals += errorCode }
         })
-        fun start() { session.start(); driver.current.ready() }
+        fun start(manual: Boolean = false) { session.start(manual); driver.current.ready() }
     }
 
     private class FakeDriver : RecognitionDriver {

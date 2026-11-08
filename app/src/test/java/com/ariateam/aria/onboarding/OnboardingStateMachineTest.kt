@@ -301,26 +301,32 @@ class OnboardingStateMachineTest {
         assertNotNull(machine.uiState.value.error)
     }
 
-    // ---- mount parsing ----
+    // ---- mount parsing and simplified flow ----
 
     @Test
-    fun `submit shoulder mount transitions to confirm mount`() {
+    fun `fresh setup shoulder mount saves directly without redundant confirm mount`() {
         goToAskHeight()
         machine.submit("170")
         machine.submit("예")
+        assertEquals(OnboardingStateMachine.Step.AskMount, machine.uiState.value.step)
         machine.submit("어깨")
-        assertEquals(OnboardingStateMachine.Step.ConfirmMount, machine.uiState.value.step)
+        assertEquals(OnboardingStateMachine.Step.Done, machine.uiState.value.step)
         assertEquals(BodyMountPosition.SHOULDER, machine.uiState.value.mountPosition)
+        assertEquals(170f, store.profile.value!!.statureCm, 0.001f)
+        assertEquals(BodyMountPosition.SHOULDER, store.profile.value!!.position)
     }
 
     @Test
-    fun `submit chest mount transitions to confirm mount`() {
+    fun `fresh setup chest mount saves directly without redundant confirm mount`() {
         goToAskHeight()
         machine.submit("170")
         machine.submit("예")
+        assertEquals(OnboardingStateMachine.Step.AskMount, machine.uiState.value.step)
         machine.submit("가슴")
-        assertEquals(OnboardingStateMachine.Step.ConfirmMount, machine.uiState.value.step)
+        assertEquals(OnboardingStateMachine.Step.Done, machine.uiState.value.step)
         assertEquals(BodyMountPosition.CHEST, machine.uiState.value.mountPosition)
+        assertEquals(170f, store.profile.value!!.statureCm, 0.001f)
+        assertEquals(BodyMountPosition.CHEST, store.profile.value!!.position)
     }
 
     @Test
@@ -336,7 +342,7 @@ class OnboardingStateMachineTest {
     // ---- confirmation navigation ----
 
     @Test
-    fun `confirm yes on height advances to ask mount`() {
+    fun `confirm yes on height advances to ask mount for fresh user`() {
         goToAskHeight()
         machine.submit("170")
         machine.submit("예")
@@ -351,41 +357,61 @@ class OnboardingStateMachineTest {
         assertEquals(OnboardingStateMachine.Step.AskHeight, machine.uiState.value.step)
     }
 
-    @Test
-    fun `confirm no on mount returns to ask mount`() {
-        goToAskHeight()
-        machine.submit("170")
-        machine.submit("예")
-        machine.submit("어깨")
-        machine.submit("아니오")
-        assertEquals(OnboardingStateMachine.Step.AskMount, machine.uiState.value.step)
-    }
-
     // ---- persistence gating ----
 
     @Test
-    fun `confirm yes on mount completes only when save succeeds`() {
+    fun `mount selection completes only when save succeeds`() {
         goToAskHeight()
         machine.submit("170")
         machine.submit("예")
         machine.submit("어깨")
-        machine.submit("예")
         // Save is synchronous: saving is transient and the machine ends in Done.
         assertEquals(OnboardingStateMachine.Step.Done, machine.uiState.value.step)
         assertNull(machine.uiState.value.error)
     }
 
     @Test
-    fun `save failure does not complete and stays in ask mount`() {
+    fun `save failure preserves mount and retry does not re-ask mount`() {
         prefs.commitShouldFail = true
         goToAskHeight()
-        machine.submit("170")
+        machine.submit("170.0")
         machine.submit("예")
         machine.submit("어깨")
-        machine.submit("예")
-        // Save failed: not Done, back to ask mount with an error
-        assertEquals(OnboardingStateMachine.Step.AskMount, machine.uiState.value.step)
+        // Save failed: not Done, stays in Saving with error without re-asking mount
+        assertEquals(OnboardingStateMachine.Step.Saving, machine.uiState.value.step)
         assertNotNull(machine.uiState.value.error)
+        assertEquals(BodyMountPosition.SHOULDER, machine.uiState.value.mountPosition)
+
+        // Clear failure and retry
+        prefs.commitShouldFail = false
+        machine.retry()
+        // Save succeeded without going back to AskMount
+        assertEquals(OnboardingStateMachine.Step.Done, machine.uiState.value.step)
+        assertNull(machine.uiState.value.error)
+        assertEquals(170f, store.profile.value!!.statureCm, 0.001f)
+        assertEquals(BodyMountPosition.SHOULDER, store.profile.value!!.position)
+    }
+
+    @Test
+    fun `saved mount save failure preserves saved mount and retry does not re-ask mount`() {
+        store.save(com.ariateam.aria.distance.BodyMountProfile(165f, BodyMountPosition.CHEST))
+        val failMachine = OnboardingStateMachine(store) { key -> key }
+        failMachine.onPromptFinished()
+        failMachine.submit("173")
+        prefs.commitShouldFail = true
+        failMachine.submit("예")
+
+        assertEquals(OnboardingStateMachine.Step.Saving, failMachine.uiState.value.step)
+        assertNotNull(failMachine.uiState.value.error)
+        assertEquals(BodyMountPosition.CHEST, failMachine.uiState.value.mountPosition)
+
+        // Clear failure and retry
+        prefs.commitShouldFail = false
+        failMachine.retry()
+        assertEquals(OnboardingStateMachine.Step.Done, failMachine.uiState.value.step)
+        assertNull(failMachine.uiState.value.error)
+        assertEquals(173f, store.profile.value!!.statureCm, 0.001f)
+        assertEquals(BodyMountPosition.CHEST, store.profile.value!!.position)
     }
 
     @Test
@@ -489,13 +515,18 @@ class OnboardingStateMachineTest {
         machine.submit("170")
         machine.submit("예")
         machine.submit("어깨")
-        machine.submit("예")
         assertEquals(OnboardingStateMachine.Step.Done, machine.uiState.value.step)
 
         machine.reset()
         assertEquals(OnboardingStateMachine.Step.Welcome, machine.uiState.value.step)
         assertNull(machine.uiState.value.error)
         assertNull(machine.uiState.value.statureCm)
+        // Saved profile in store has SHOULDER, so reset re-reads the valid saved mount
+        assertEquals(BodyMountPosition.SHOULDER, machine.uiState.value.mountPosition)
+
+        // If store is cleared, reset has no mount assumption
+        store.clear()
+        machine.reset()
         assertNull(machine.uiState.value.mountPosition)
     }
 
@@ -513,25 +544,142 @@ class OnboardingStateMachineTest {
     }
 
     @Test
-    fun `completion only after explicit yes on both confirmations`() {
-        // No to height -> stays in ask height (no premature completion)
+    fun `saved shoulder mount flow is height-only and skips mount question`() {
+        store.save(com.ariateam.aria.distance.BodyMountProfile(165f, BodyMountPosition.SHOULDER))
+        val reenteredMachine = OnboardingStateMachine(store) { key -> key }
+        reenteredMachine.onPromptFinished()
+        assertEquals(OnboardingStateMachine.Step.AskHeight, reenteredMachine.uiState.value.step)
+        reenteredMachine.submit("172")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, reenteredMachine.uiState.value.step)
+        reenteredMachine.submit("예")
+        assertEquals(OnboardingStateMachine.Step.Done, reenteredMachine.uiState.value.step)
+        assertEquals(172f, store.profile.value!!.statureCm, 0.001f)
+        assertEquals(BodyMountPosition.SHOULDER, store.profile.value!!.position)
+    }
+
+    @Test
+    fun `saved chest mount flow is height-only and skips mount question`() {
+        store.save(com.ariateam.aria.distance.BodyMountProfile(160f, BodyMountPosition.CHEST))
+        val reenteredMachine = OnboardingStateMachine(store) { key -> key }
+        reenteredMachine.onPromptFinished()
+        assertEquals(OnboardingStateMachine.Step.AskHeight, reenteredMachine.uiState.value.step)
+        reenteredMachine.submit("168.5")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, reenteredMachine.uiState.value.step)
+        reenteredMachine.submit("예")
+        assertEquals(OnboardingStateMachine.Step.Done, reenteredMachine.uiState.value.step)
+        assertEquals(168.5f, store.profile.value!!.statureCm, 0.001f)
+        assertEquals(BodyMountPosition.CHEST, store.profile.value!!.position)
+    }
+
+    @Test
+    fun `rejecting height keeps mount`() {
+        store.save(com.ariateam.aria.distance.BodyMountProfile(160f, BodyMountPosition.CHEST))
+        val reenteredMachine = OnboardingStateMachine(store) { key -> key }
+        reenteredMachine.onPromptFinished()
+        reenteredMachine.submit("170")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, reenteredMachine.uiState.value.step)
+        // User rejects height
+        reenteredMachine.submit("아니오")
+        assertEquals(OnboardingStateMachine.Step.AskHeight, reenteredMachine.uiState.value.step)
+        assertEquals(BodyMountPosition.CHEST, reenteredMachine.uiState.value.mountPosition)
+
+        // Enter new height and confirm
+        reenteredMachine.submit("175.5")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, reenteredMachine.uiState.value.step)
+        reenteredMachine.submit("예")
+        assertEquals(OnboardingStateMachine.Step.Done, reenteredMachine.uiState.value.step)
+        assertEquals(175.5f, store.profile.value!!.statureCm, 0.001f)
+        assertEquals(BodyMountPosition.CHEST, store.profile.value!!.position)
+    }
+
+    @Test
+    fun `no mount assumption on no saved data`() {
+        assertNull(store.profile.value)
+        assertNull(machine.uiState.value.mountPosition)
+    }
+
+    @Test
+    fun `reset rereads valid saved mount`() {
+        assertNull(machine.uiState.value.mountPosition)
+        store.save(com.ariateam.aria.distance.BodyMountProfile(165f, BodyMountPosition.CHEST))
+        machine.reset()
+        assertEquals(BodyMountPosition.CHEST, machine.uiState.value.mountPosition)
+    }
+
+    @Test
+    fun `submit decimal numeric heights 170_0 and 170_5`() {
         goToAskHeight()
-        machine.submit("170")
-        machine.submit("아니오")
-        assertEquals(OnboardingStateMachine.Step.AskHeight, machine.uiState.value.step)
+        machine.submit("170.0")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, machine.uiState.value.step)
+        assertEquals(170.0f, machine.uiState.value.statureCm!!, 0.001f)
 
-        // Yes to height, no to mount -> back to ask mount, not Done
-        machine.submit("170")
-        machine.submit("예")
-        machine.submit("어깨")
         machine.submit("아니오")
-        assertEquals(OnboardingStateMachine.Step.AskMount, machine.uiState.value.step)
+        machine.submit("170.5")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, machine.uiState.value.step)
+        assertEquals(170.5f, machine.uiState.value.statureCm!!, 0.001f)
 
-        // Yes to both -> Done
-        machine.submit("170")
-        machine.submit("예")
-        machine.submit("어깨")
-        machine.submit("예")
-        assertEquals(OnboardingStateMachine.Step.Done, machine.uiState.value.step)
+        machine.submit("아니오")
+        machine.submit("170.5cm")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, machine.uiState.value.step)
+        assertEquals(170.5f, machine.uiState.value.statureCm!!, 0.001f)
+
+        machine.submit("아니오")
+        machine.submit("170.5 센티미터")
+        assertEquals(OnboardingStateMachine.Step.ConfirmHeight, machine.uiState.value.step)
+        assertEquals(170.5f, machine.uiState.value.statureCm!!, 0.001f)
+    }
+
+    @Test
+    fun `production onboarding_confirm_stature resource formats single decimal without six decimals`() {
+        val candidates = listOf(
+            java.io.File("app/src/main/res/values/onboarding_strings.xml"),
+            java.io.File("src/main/res/values/onboarding_strings.xml"),
+        )
+        val stringsXml = candidates.firstOrNull { it.exists() }
+        assertNotNull("onboarding_strings.xml must exist at relative path", stringsXml)
+        val content = stringsXml!!.readText()
+        val match = Regex("""<string\s+name="onboarding_confirm_stature">(.*?)</string>""").find(content)
+        assertNotNull("onboarding_confirm_stature resource must exist", match)
+        val template = match!!.groupValues[1]
+
+        assertTrue("Template must contain %1$.1f", template.contains("%1$.1f"))
+        org.junit.Assert.assertFalse("Template must not contain %1f", template.contains("%1f"))
+
+        val formatted170_0 = String.format(java.util.Locale.KOREAN, template, 170.0f)
+        val formatted170_5 = String.format(java.util.Locale.KOREAN, template, 170.5f)
+
+        assertEquals("키가 170.0 센티미터가 맞습니까? 예 또는 아니오로 답변해 주세요.", formatted170_0)
+        assertEquals("키가 170.5 센티미터가 맞습니까? 예 또는 아니오로 답변해 주세요.", formatted170_5)
+        org.junit.Assert.assertFalse("Must not contain six decimals", formatted170_0.contains("170.000000"))
+    }
+
+    @Test
+    fun `production walking strings have safety suffix removed from ready recovered and active`() {
+        val candidates = listOf(
+            java.io.File("app/src/main/res/values/walking_strings.xml"),
+            java.io.File("src/main/res/values/walking_strings.xml"),
+        )
+        val stringsXml = candidates.firstOrNull { it.exists() }
+        assertNotNull("walking_strings.xml must exist at relative path", stringsXml)
+        val content = stringsXml!!.readText()
+
+        fun extract(name: String): String {
+            val m = Regex("""<string\s+name="$name">(.*?)</string>""").find(content)
+            assertNotNull("$name must exist", m)
+            return m!!.groupValues[1]
+        }
+
+        val ready = extract("walking_assist_ready")
+        val recovered = extract("walking_assist_recovered")
+        val active = extract("walking_assist_status_active")
+
+        assertEquals("보행 보조가 활성화되었습니다.", ready)
+        assertEquals("보행 보조 상태가 복구되었습니다.", recovered)
+        assertEquals("보행 보조가 활성입니다.", active)
+
+        val forbidden = "안전을 보장하지 않습니다"
+        org.junit.Assert.assertFalse(ready.contains(forbidden))
+        org.junit.Assert.assertFalse(recovered.contains(forbidden))
+        org.junit.Assert.assertFalse(active.contains(forbidden))
     }
 }

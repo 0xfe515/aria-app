@@ -228,6 +228,8 @@ class VisionPipelineController(
     private var walkingAssistTicket = -1L
     @Volatile
     private var walkingCameraTicket = -1L
+    private var lastAnnouncedLimitedCause: WalkingAssistCause? = null
+    private var lastAnnouncedLimitedNanos: Long = 0L
     private var walkingAssistTickRunnable: Runnable? = null
     private var calibrationReceiverRegistered = false
     private val calibrationReceiver = object : BroadcastReceiver() {
@@ -618,6 +620,8 @@ class VisionPipelineController(
         walkingStatusSequence.set(0L)
         lastWalkingFrameSequence.set(0L)
         latestWalkingResultCaptureNanos.set(0L)
+        lastAnnouncedLimitedCause = null
+        lastAnnouncedLimitedNanos = 0L
         synchronized(walkingAnnouncementFrameSequences) {
             walkingAnnouncementFrameSequences.clear()
         }
@@ -701,6 +705,7 @@ class VisionPipelineController(
                 } else {
                     null
                 },
+                autoCalibrationActive = true,
             ),
             nowMs,
             nowNanos,
@@ -751,17 +756,37 @@ class VisionPipelineController(
                 walkingAnnouncementFrameSequences.remove(walkingAnnouncementFrameSequences.keys.first())
             }
         }
+        val shouldAnnounce = determineAnnouncementEligibility(announcement, transition.current, nowNanos)
         hazardSpeechBridge.updateWalkingAssistState(
             ticket,
             statusSequence,
             context.getString(WalkingAssistCopy.status(transition.current)),
-            announce = announcement != null,
+            announce = shouldAnnounce,
             stopped = transition.current.phase == WalkingAssistPhase.STOPPED,
         )
-        if (announcement != null) {
+        if (shouldAnnounce) {
             walkingAssistDiagnostics.recordDispatch(ticket, frameSequence, nowNanos)
             mutableUiState.update { it.copy(walkingDiagnosticEvents = walkingAssistDiagnostics.snapshot()) }
         }
+    }
+
+    internal fun determineAnnouncementEligibility(
+        announcement: WalkingAssistAnnouncement?,
+        currentState: WalkingAssistState,
+        nowNanos: Long,
+    ): Boolean {
+        val (eligible, nextSession) = CameraAnnouncementPolicy.evaluateTransition(
+            session = CameraAnnouncementPolicy.SessionState(
+                lastAnnouncedCause = lastAnnouncedLimitedCause,
+                lastAnnouncedNanos = lastAnnouncedLimitedNanos,
+            ),
+            announcement = announcement,
+            currentState = currentState,
+            nowNanos = nowNanos,
+        )
+        lastAnnouncedLimitedCause = nextSession.lastAnnouncedCause
+        lastAnnouncedLimitedNanos = nextSession.lastAnnouncedNanos
+        return eligible
     }
 
     private fun scheduleWalkingAssistTick(ticket: Long) {
@@ -794,6 +819,8 @@ class VisionPipelineController(
     private fun stopWalkingAssist(cameraTicket: Long, announceStopped: Boolean = true) {
         if (cameraTicket != walkingCameraTicket) return
         cancelWalkingAssistTick()
+        lastAnnouncedLimitedCause = null
+        lastAnnouncedLimitedNanos = 0L
         val nowNanos = SystemClock.elapsedRealtimeNanos()
         val assistGeneration = walkingAssistTicket
         val transition = walkingAssistStateMachine.stopSession(assistGeneration)
@@ -1071,7 +1098,10 @@ class VisionPipelineController(
         }
         val existing = cameraProvider
         if (existing != null) {
-            bindUseCases(existing, lifecycleOwner, ticket)
+            val succeeded = bindUseCases(existing, lifecycleOwner, ticket)
+            if (succeeded) {
+                reconcileSurfaceAfterSuccessfulBind(existing, lifecycleOwner, ticket)
+            }
             return
         }
         val future = ProcessCameraProvider.getInstance(context)
@@ -1088,7 +1118,10 @@ class VisionPipelineController(
                         return@addListener
                     }
                     cameraProvider = provider
-                    bindUseCases(provider, lifecycleOwner, ticket)
+                    val succeeded = bindUseCases(provider, lifecycleOwner, ticket)
+                    if (succeeded) {
+                        reconcileSurfaceAfterSuccessfulBind(provider, lifecycleOwner, ticket)
+                    }
                 } catch (t: Throwable) {
                     isBindingInFlight.set(false)
                     if (!isSessionLive(ticket)) return@addListener
@@ -1108,12 +1141,13 @@ class VisionPipelineController(
         provider: ProcessCameraProvider,
         lifecycleOwner: LifecycleOwner,
         ticket: Long,
-    ) {
+    ): Boolean {
         if (!isSessionLive(ticket)) {
             isBindingInFlight.set(false)
-            return
+            return false
         }
         val surfaceProvider = activeSurfaceProvider
+        var bindSucceeded = false
         try {
             lastBoundTicket.set(ticket)
             val mode = currentMode
@@ -1354,26 +1388,48 @@ class VisionPipelineController(
                     )
                 }
             }
+            bindSucceeded = true
         } catch (t: Throwable) {
             val classified = CameraErrorClassifier.classifyException(t)
             handleCameraFailure(ticket, classified)
         } finally {
             isBindingInFlight.set(false)
         }
+        return bindSucceeded
+    }
 
-        if (isSessionLive(ticket)) {
-            val latestProvider = activeSurfaceProvider
-            val isPreviewBound = boundPreview != null
-            val shouldPreviewBeBound = latestProvider != null
-            if (isPreviewBound != shouldPreviewBeBound) {
-                Log.i(TAG, "activeSurfaceProvider changed while binding (bound=$isPreviewBound, target=$shouldPreviewBeBound); coalescing rebind")
+    private fun reconcileSurfaceAfterSuccessfulBind(
+        provider: ProcessCameraProvider,
+        lifecycleOwner: LifecycleOwner,
+        ticket: Long,
+    ) {
+        if (!isSessionLive(ticket)) return
+        val latestProvider = activeSurfaceProvider
+        val isPreviewBound = boundPreview != null
+        val shouldPreviewBeBound = latestProvider != null
+        val action = VisionSurfaceReconciliationPolicy.evaluate(
+            isPreviewBound = isPreviewBound,
+            hasSurfaceProvider = shouldPreviewBeBound,
+            isSameProvider = true,
+            isBindingInFlight = isBindingInFlight.get(),
+            isRebindInProgress = isRebindInProgress.get(),
+            isSessionLive = isSessionLive(ticket),
+            bindSucceeded = true,
+        )
+        when (action) {
+            VisionSurfaceReconciliationPolicy.Action.TRIGGER_REBIND -> {
+                Log.i(TAG, "reconcileSurfaceAfterSuccessfulBind: activeSurfaceProvider changed while binding (bound=$isPreviewBound, target=$shouldPreviewBeBound); coalescing rebind")
                 mainHandler.post {
                     if (isSessionLive(ticket) && !isRebindInProgress.get() && isBindingInFlight.compareAndSet(false, true)) {
                         unbindAndRebindUseCases(provider, lifecycleOwner, ticket)
                     }
                 }
-            } else if (isPreviewBound && latestProvider != null && latestProvider !== surfaceProvider) {
-                boundPreview?.setSurfaceProvider(latestProvider)
+            }
+            VisionSurfaceReconciliationPolicy.Action.UPDATE_BOUND_SURFACE,
+            VisionSurfaceReconciliationPolicy.Action.NONE -> {
+                if (isPreviewBound && latestProvider != null) {
+                    boundPreview?.setSurfaceProvider(latestProvider)
+                }
             }
         }
     }
@@ -2322,30 +2378,64 @@ class VisionPipelineController(
         val ticket = sessionGeneration.get()
         if (!isSessionLive(ticket)) return
 
-        if (isBindingInFlight.get() || isRebindInProgress.get()) {
-            Log.i(TAG, "updateSurfaceProvider: binding/rebind is in flight; coalesced target (desiredPreview=${surfaceProvider != null})")
-            return
-        }
+        val action = VisionSurfaceReconciliationPolicy.evaluate(
+            isPreviewBound = boundPreview != null,
+            hasSurfaceProvider = surfaceProvider != null,
+            isSameProvider = previousProvider === surfaceProvider,
+            isBindingInFlight = isBindingInFlight.get(),
+            isRebindInProgress = isRebindInProgress.get(),
+            isSessionLive = isSessionLive(ticket),
+        )
 
-        val isPreviewBound = boundPreview != null
-        val shouldPreviewBeBound = surfaceProvider != null
-
-        if (isPreviewBound == shouldPreviewBeBound) {
-            if (isPreviewBound && previousProvider !== surfaceProvider) {
-                boundPreview?.setSurfaceProvider(surfaceProvider)
+        when (action) {
+            VisionSurfaceReconciliationPolicy.Action.NONE -> {
+                if (isBindingInFlight.get() || isRebindInProgress.get()) {
+                    Log.i(TAG, "updateSurfaceProvider: binding/rebind is in flight; coalesced target (desiredPreview=${surfaceProvider != null})")
+                }
+                return
             }
+            VisionSurfaceReconciliationPolicy.Action.UPDATE_BOUND_SURFACE -> {
+                boundPreview?.setSurfaceProvider(surfaceProvider)
+                return
+            }
+            VisionSurfaceReconciliationPolicy.Action.TRIGGER_REBIND -> {
+                Log.i(TAG, "updateSurfaceProvider: rebinding for preview change (wasBound=${boundPreview != null}, nowNeeds=${surfaceProvider != null})")
+                val provider = cameraProvider
+                if (provider != null) {
+                    isBindingInFlight.set(true)
+                    unbindAndRebindUseCases(provider, lifecycleOwner, ticket)
+                } else {
+                    isBindingInFlight.set(true)
+                    scheduleStartupWatchdog(ticket)
+                    startCameraInternal(lifecycleOwner, ticket)
+                }
+            }
+        }
+    }
+
+    fun rebindCoalescedIfPending() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { rebindCoalescedIfPending() }
             return
         }
-
-        Log.i(TAG, "updateSurfaceProvider: rebinding for preview change (wasBound=$isPreviewBound, nowNeeds=$shouldPreviewBeBound)")
-        val provider = cameraProvider
-        if (provider != null) {
+        if (closed.get() || !running.get()) return
+        val lifecycleOwner = activeLifecycleOwner ?: return
+        val ticket = sessionGeneration.get()
+        if (!isSessionLive(ticket)) return
+        val latestProvider = activeSurfaceProvider
+        val action = VisionSurfaceReconciliationPolicy.evaluate(
+            isPreviewBound = boundPreview != null,
+            hasSurfaceProvider = latestProvider != null,
+            isSameProvider = true,
+            isBindingInFlight = isBindingInFlight.get(),
+            isRebindInProgress = isRebindInProgress.get(),
+            isSessionLive = isSessionLive(ticket),
+        )
+        if (action == VisionSurfaceReconciliationPolicy.Action.TRIGGER_REBIND) {
+            val provider = cameraProvider ?: return
+            Log.i(TAG, "rebindCoalescedIfPending: rebinding for state difference (bound=${boundPreview != null}, target=${latestProvider != null})")
             isBindingInFlight.set(true)
             unbindAndRebindUseCases(provider, lifecycleOwner, ticket)
-        } else {
-            isBindingInFlight.set(true)
-            scheduleStartupWatchdog(ticket)
-            startCameraInternal(lifecycleOwner, ticket)
         }
     }
 
@@ -2542,7 +2632,11 @@ class VisionPipelineController(
                     Log.i(TAG, "Recovery gate satisfied (prior closed & camera available); rebinding for ticket $ticket")
                     cancelPendingRebindWait(retainRebindFlag = true)
                     try {
-                        bindUseCases(provider, lifecycleOwner, ticket)
+                        val succeeded = bindUseCases(provider, lifecycleOwner, ticket)
+                        isRebindInProgress.set(false)
+                        if (succeeded) {
+                            reconcileSurfaceAfterSuccessfulBind(provider, lifecycleOwner, ticket)
+                        }
                     } finally {
                         isRebindInProgress.set(false)
                     }
@@ -2734,6 +2828,7 @@ class VisionPipelineController(
         internal const val SUSTAINED_WARMUP_HEALTHY_WINDOW_MS = 5_000L
         internal const val REBIND_CLOSE_DEADLINE_MS = 1_000L
         internal const val REBIND_AVAILABILITY_DEADLINE_MS = 10_000L
+        internal const val ACTIONABLE_FAILURE_RATE_LIMIT_NANOS = 10_000_000_000L
         internal const val MAX_RETRY_COUNT = 5
         internal val BACKOFF_DELAYS_MS = longArrayOf(500L, 1000L, 2000L, 4000L, 8000L)
         private const val TAG = "AriaVisionPipeline"
@@ -2762,6 +2857,139 @@ class VisionPipelineController(
                 state.javaClass.simpleName
             }
         }
+
+        internal fun shouldAnnounce(
+            lastAnnouncedCause: WalkingAssistCause?,
+            lastAnnouncedNanos: Long,
+            announcement: WalkingAssistAnnouncement?,
+            currentState: WalkingAssistState,
+            nowNanos: Long,
+            rateLimitNanos: Long = ACTIONABLE_FAILURE_RATE_LIMIT_NANOS,
+        ): Pair<Boolean, WalkingAssistCause?> = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause,
+            lastAnnouncedNanos,
+            announcement,
+            currentState,
+            nowNanos,
+            rateLimitNanos,
+        )
+    }
+}
+
+internal object CameraAnnouncementPolicy {
+    data class SessionState(
+        val lastAnnouncedCause: WalkingAssistCause? = null,
+        val lastAnnouncedNanos: Long = 0L,
+    )
+
+    fun evaluateTransition(
+        session: SessionState,
+        announcement: WalkingAssistAnnouncement?,
+        currentState: WalkingAssistState,
+        nowNanos: Long,
+        rateLimitNanos: Long = VisionPipelineController.ACTIONABLE_FAILURE_RATE_LIMIT_NANOS,
+    ): Pair<Boolean, SessionState> {
+        val (eligible, updatedCause) = shouldAnnounce(
+            lastAnnouncedCause = session.lastAnnouncedCause,
+            lastAnnouncedNanos = session.lastAnnouncedNanos,
+            announcement = announcement,
+            currentState = currentState,
+            nowNanos = nowNanos,
+            rateLimitNanos = rateLimitNanos,
+        )
+        val nextSession = if (eligible && announcement == WalkingAssistAnnouncement.LIMITED) {
+            SessionState(lastAnnouncedCause = updatedCause, lastAnnouncedNanos = nowNanos)
+        } else if (updatedCause == null) {
+            SessionState(lastAnnouncedCause = null, lastAnnouncedNanos = 0L)
+        } else {
+            session
+        }
+        return eligible to nextSession
+    }
+
+    fun shouldAnnounce(
+        lastAnnouncedCause: WalkingAssistCause?,
+        lastAnnouncedNanos: Long,
+        announcement: WalkingAssistAnnouncement?,
+        currentState: WalkingAssistState,
+        nowNanos: Long,
+        rateLimitNanos: Long = VisionPipelineController.ACTIONABLE_FAILURE_RATE_LIMIT_NANOS,
+    ): Pair<Boolean, WalkingAssistCause?> {
+        if (announcement == null) return false to lastAnnouncedCause
+        return when (announcement) {
+            WalkingAssistAnnouncement.READY,
+            WalkingAssistAnnouncement.RECOVERED -> {
+                // Suppress automatic activation/recovery TTS announcements to eliminate startup flapping chatter;
+                // preserve lastAnnouncedCause so transient recovery does not reset actionable failure rate-limiting.
+                false to lastAnnouncedCause
+            }
+            WalkingAssistAnnouncement.STOPPED -> {
+                true to null
+            }
+            WalkingAssistAnnouncement.CALIBRATION_REQUIRED -> {
+                true to lastAnnouncedCause
+            }
+            WalkingAssistAnnouncement.LIMITED -> {
+                if (currentState.cause == WalkingAssistCause.CAMERA_STARTING ||
+                    currentState.cause == WalkingAssistCause.RESULT_STALE
+                ) {
+                    // Suppress transient camera starting and result stale chatter, preserving prior failure cooldown.
+                    false to lastAnnouncedCause
+                } else {
+                    val sameCause = lastAnnouncedCause == currentState.cause
+                    val elapsed = nowNanos - lastAnnouncedNanos
+                    if (sameCause && elapsed < rateLimitNanos) {
+                        false to lastAnnouncedCause
+                    } else {
+                        true to currentState.cause
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal object VisionSurfaceReconciliationPolicy {
+    enum class Action {
+        NONE,
+        UPDATE_BOUND_SURFACE,
+        TRIGGER_REBIND,
+    }
+
+    fun evaluate(
+        isPreviewBound: Boolean,
+        hasSurfaceProvider: Boolean,
+        isSameProvider: Boolean,
+        isBindingInFlight: Boolean,
+        isRebindInProgress: Boolean,
+        isSessionLive: Boolean,
+        bindSucceeded: Boolean = true,
+    ): Action {
+        if (!isSessionLive) return Action.NONE
+        if (!bindSucceeded) return Action.NONE
+        if (isBindingInFlight || isRebindInProgress) return Action.NONE
+        val shouldPreviewBeBound = hasSurfaceProvider
+        return when {
+            isPreviewBound != shouldPreviewBeBound -> Action.TRIGGER_REBIND
+            isPreviewBound && !isSameProvider -> Action.UPDATE_BOUND_SURFACE
+            else -> Action.NONE
+        }
+    }
+}
+
+internal object VisionCameraResumePolicy {
+    fun canResumeOnForeground(
+        isScreenEligible: Boolean,
+        isDistanceModeForeground: Boolean,
+        hasCameraPermission: Boolean,
+        requiresExplicitRestart: Boolean,
+        hasBeenAdmitted: Boolean,
+    ): Boolean {
+        if (!hasBeenAdmitted) return false
+        if (!hasCameraPermission) return false
+        if (requiresExplicitRestart) return false
+        if (isDistanceModeForeground) return false
+        return isScreenEligible
     }
 }
 

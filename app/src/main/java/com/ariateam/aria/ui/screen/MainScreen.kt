@@ -80,9 +80,11 @@ import com.ariateam.aria.ui.navigation.FloatingTabBarBottomMargin
 import com.ariateam.aria.ui.navigation.FloatingTabBarHeight
 import com.ariateam.aria.ui.navigation.calculateFloatingNavSafeBottomPadding
 import com.ariateam.aria.vision.CameraSessionStatus
+import com.ariateam.aria.vision.VisionCameraResumePolicy
 import com.ariateam.aria.vision.VisionForegroundService
 import com.ariateam.aria.vision.VisionModelState
 import com.ariateam.aria.vision.VisionPipelineMode
+import com.ariateam.aria.vision.VisionSession
 import com.ariateam.aria.vision.VisionViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -353,6 +355,24 @@ fun MainScreen(
                     startupModel.enterPermissionRecovery()
                     if (StartupPermissionInventory.RECORD_AUDIO in lostPermissions) model.stop()
                     invalidatePendingAndStopCamera()
+                } else {
+                    val canResume = VisionCameraResumePolicy.canResumeOnForeground(
+                        isScreenEligible = PendingCameraStartGate.isCameraEligibleScreen(
+                            selectedTab = selectedTab,
+                            debugDestination = debugDestination,
+                            showLicenses = showLicenses,
+                            hasBeenAdmitted = startupModel.hasBeenAdmitted,
+                            isStartupSettingsVisible = startupModel.isStartupSettingsVisible,
+                            permissionLossDetected = permissionLossDetected,
+                        ),
+                        isDistanceModeForeground = isDistanceModeForeground,
+                        hasCameraPermission = StartupPermissionInventory.CAMERA !in missingPermissions,
+                        requiresExplicitRestart = VisionSession.requiresExplicitRestart(context),
+                        hasBeenAdmitted = startupModel.hasBeenAdmitted,
+                    )
+                    if (canResume) {
+                        visionModel.ensureController().rebindCoalescedIfPending()
+                    }
                 }
             }
         }

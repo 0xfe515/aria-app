@@ -2,11 +2,11 @@
     <string name="walking_assist_preparing">보행 보조를 준비하고 있습니다.</string>
     <string name="walking_assist_preparing_camera">카메라 연결을 기다리고 있습니다.</string>
     <string name="walking_assist_preparing_model">비전 모델을 준비하고 있습니다.</string>
-    <string name="walking_assist_ready">보행 보조가 활성화되었습니다. 안전을 보장하지 않습니다.</string>
-    <string name="walking_assist_recovered">보행 보조 상태가 복구되었습니다. 안전을 보장하지 않습니다.</string>
+    <string name="walking_assist_ready">보행 보조가 활성화되었습니다.</string>
+    <string name="walking_assist_recovered">보행 보조 상태가 복구되었습니다.</string>
     <string name="walking_assist_calibration_required">정면 보정이 필요합니다. 안정된 자세에서 정면 보정을 말해 주세요.</string>
     <string name="walking_assist_stopped">보행 보조가 중지되었습니다.</string>
-    <string name="walking_assist_status_active">보행 보조가 활성입니다. 안전을 보장하지 않습니다.</string>
+    <string name="walking_assist_status_active">보행 보조가 활성입니다.</string>
     <string name="walking_assist_limited_permission">보행 보조 제한: 카메라 권한이 필요합니다. 앱 설정에서 권한을 복구해 주세요.</string>
     <string name="walking_assist_limited_camera">보행 보조 제한: 카메라를 사용할 수 없습니다. 설정에서 다시 시작해 주세요.</string>
     <string name="walking_assist_limited_model">보행 보조 제한: 비전 모델을 사용할 수 없습니다. 설정에서 다시 준비해 주세요.</string>

@@ -19,6 +19,7 @@ internal class VoiceListeningSession(
     private val listener: Listener,
     private val wakeDetector: WakeWordDetector? = null,
     private val wakeCooldownMillis: Long = DEFAULT_WAKE_COOLDOWN_MILLIS,
+    private val kwsRetryCooldownMillis: Long = DEFAULT_KWS_RETRY_COOLDOWN_MILLIS,
 ) {
     interface Listener {
         fun state(snapshot: ListeningSnapshot)
@@ -55,6 +56,7 @@ internal class VoiceListeningSession(
     private var wakeTicket = 0L
     private var lastWakeDetectedAt: Long? = null
     private var wakeFallback = (wakeDetector == null || !wakeDetector.isAvailable)
+    private var kwsRetryNotBefore = 0L
 
     var snapshot = ListeningSnapshot()
         private set
@@ -84,6 +86,10 @@ internal class VoiceListeningSession(
         speaking = false
         failures = 0
         retryNotBefore = 0
+        if (wakeDetector != null && wakeDetector.isAvailable) {
+            wakeFallback = false
+            kwsRetryNotBefore = 0L
+        }
         resetInput(if (manual) Mode.Manual else Mode.Wake)
         if (manual) announceInput()
         beginAttempt(initial = true)
@@ -112,7 +118,12 @@ internal class VoiceListeningSession(
 
     fun cancelInput() {
         if (!running) return
+        WakeDiagnostics.emit(WakeDiagnostics.Event.STOPPED_WAITING, "CANCEL_INPUT")
         invalidate()
+        if (wakeDetector != null && wakeDetector.isAvailable) {
+            wakeFallback = false
+            kwsRetryNotBefore = 0L
+        }
         resetInput(Mode.Wake)
         if (speaking) publish(VoicePhase.Speaking) else scheduleAttempt(VoiceLimits.RESTART_MILLIS)
     }
@@ -127,21 +138,29 @@ internal class VoiceListeningSession(
         if (!running || value == speaking) return
         speaking = value
         if (value) {
+            WakeDiagnostics.emit(WakeDiagnostics.Event.STOPPED_WAITING, "PLAYBACK_START")
             invalidate()
             resetInput(Mode.Wake)
             publish(VoicePhase.Speaking)
         } else {
+            WakeDiagnostics.emit(WakeDiagnostics.Event.RESTARTING, "PLAYBACK_END")
+            if (wakeDetector != null && wakeDetector.isAvailable) {
+                wakeFallback = false
+                kwsRetryNotBefore = 0L
+            }
             scheduleAttempt(VoiceLimits.RESTART_MILLIS)
         }
     }
 
     fun stop() {
+        WakeDiagnostics.emit(WakeDiagnostics.Event.STOPPED_WAITING, "STOP")
         running = false
         speaking = false
         invalidate()
         resetInput(Mode.Wake)
         failures = 0
         retryNotBefore = 0
+        kwsRetryNotBefore = 0L
         publish(VoicePhase.Stopped)
     }
 
@@ -209,8 +228,20 @@ internal class VoiceListeningSession(
         }
     }
 
-    private fun shouldUseWakeDetector(): Boolean =
-        mode == Mode.Wake && wakeDetector != null && wakeDetector.isAvailable && !wakeFallback
+    private fun shouldUseWakeDetector(): Boolean {
+        if (mode != Mode.Wake || wakeDetector == null || !wakeDetector.isAvailable) {
+            return false
+        }
+        if (wakeFallback) {
+            if (scheduler.now() >= kwsRetryNotBefore) {
+                wakeFallback = false
+                kwsRetryNotBefore = 0L
+                return true
+            }
+            return false
+        }
+        return true
+    }
 
     private fun startWakeListening() {
         if (!running || speaking || mode != Mode.Wake) return
@@ -232,6 +263,7 @@ internal class VoiceListeningSession(
                         return
                     }
                     lastWakeDetectedAt = now
+                    WakeDiagnostics.emit(WakeDiagnostics.Event.WAKE_DETECTED, "KWS_HIT")
                     stopWakeDetector()
                     resetInput(Mode.Command)
                     activated = true
@@ -243,8 +275,10 @@ internal class VoiceListeningSession(
                 override fun onError(error: Throwable) {
                     if (!running || !wakeDetectorActive || wakeTicket != ticket) return
                     logWarn("WakeWordDetector error; falling back to Android SpeechRecognizer wake path", error)
+                    WakeDiagnostics.emit(WakeDiagnostics.Event.NO_AUDIO, error.javaClass.simpleName)
                     stopWakeDetector()
                     wakeFallback = true
+                    kwsRetryNotBefore = scheduler.now() + kwsRetryCooldownMillis
                     if (mode == Mode.Wake) {
                         scheduleAttempt(VoiceLimits.RESTART_MILLIS)
                     }
@@ -252,8 +286,10 @@ internal class VoiceListeningSession(
             })
         } catch (e: Throwable) {
             logWarn("Failed to start WakeWordDetector; falling back to Android SpeechRecognizer wake path", e)
+            WakeDiagnostics.emit(WakeDiagnostics.Event.NO_AUDIO, e.javaClass.simpleName)
             stopWakeDetector()
             wakeFallback = true
+            kwsRetryNotBefore = scheduler.now() + kwsRetryCooldownMillis
             scheduleAttempt(VoiceLimits.RESTART_MILLIS)
         }
     }
@@ -289,6 +325,8 @@ internal class VoiceListeningSession(
             override fun ready() {
                 if (!live() || isReady) return
                 isReady = true
+                failures = 0 // Successfully reached ready; reset retry failure accumulation!
+                retryNotBefore = 0
                 timers.forEach { it.cancel() }
                 timers.clear()
                 if (inputReadyAt == null && mode != Mode.Wake) inputReadyAt = scheduler.now()
@@ -314,6 +352,7 @@ internal class VoiceListeningSession(
                     if (!activated) {
                         activated = true
                         announceInput()
+                        WakeDiagnostics.emit(WakeDiagnostics.Event.WAKE_DETECTED, "ASR_PARTIAL")
                         listener.wakeDetected()
                     }
                     draft = after.take(VoiceLimits.MAX_TEXT_CHARS)
@@ -357,12 +396,14 @@ internal class VoiceListeningSession(
         if (mode == Mode.Wake) {
             val afterWake = matcher.selectWakeAfterPhrase(candidates)
             if (afterWake == null) {
+                WakeDiagnostics.emit(WakeDiagnostics.Event.NO_KEYWORD, "ASR_FINAL_NO_MATCH")
                 normalWakeRestart() // A partial wake may have been withdrawn in the final result.
                 return
             }
             if (!activated) {
                 activated = true
                 announceInput()
+                WakeDiagnostics.emit(WakeDiagnostics.Event.WAKE_DETECTED, "ASR_FINAL")
                 listener.wakeDetected()
             }
             if (afterWake.isBlank()) {
@@ -394,6 +435,10 @@ internal class VoiceListeningSession(
         closeAttempt()
         failures = 0
         retryNotBefore = 0
+        if (wakeDetector != null && wakeDetector.isAvailable) {
+            wakeFallback = false
+            kwsRetryNotBefore = 0L
+        }
         resetInput(Mode.Wake)
         // Schedule first: command feedback may synchronously cancel recognition for TTS.
         scheduleAttempt(VoiceLimits.RESTART_MILLIS)
@@ -404,6 +449,10 @@ internal class VoiceListeningSession(
         closeAttempt()
         failures = 0
         retryNotBefore = 0
+        if (wakeDetector != null && wakeDetector.isAvailable) {
+            wakeFallback = false
+            kwsRetryNotBefore = 0L
+        }
         resetInput(Mode.Wake)
         scheduleAttempt(VoiceLimits.RESTART_MILLIS)
     }
@@ -425,12 +474,36 @@ internal class VoiceListeningSession(
 
     private fun failure(failure: RecognitionFailure) {
         if (failure == RecognitionFailure.NoMatch || failure == RecognitionFailure.NoSpeech) {
-            if (mode == Mode.Wake) normalWakeRestart() else normalEmptyResult()
+            if (mode == Mode.Wake) {
+                WakeDiagnostics.emit(WakeDiagnostics.Event.NO_KEYWORD, failure.name)
+                normalWakeRestart()
+            } else {
+                normalEmptyResult()
+            }
             return
         }
         closeAttempt()
         if (mode == Mode.Wake) resetInput(Mode.Wake)
-        if (!failure.retryable || failures >= RETRY_DELAYS.size) {
+
+        if (!failure.retryable) {
+            running = false
+            invalidate()
+            WakeDiagnostics.emit(WakeDiagnostics.Event.MODEL_NOT_READY, failure.name)
+            publish(VoicePhase.Error, failure.errorCode)
+            listener.fatal(failure.errorCode)
+            return
+        }
+
+        // In Mode.Wake: never fatally terminate the VoiceService on transient background/audio errors.
+        // Back off up to RETRY_DELAYS.last() and continue waiting for the mic to become free again.
+        if (mode == Mode.Wake) {
+            val delay = if (failures < RETRY_DELAYS.size) RETRY_DELAYS[failures++] else RETRY_DELAYS.last()
+            WakeDiagnostics.emit(WakeDiagnostics.Event.NO_AUDIO, failure.name)
+            scheduleAttempt(delay, failure.errorCode)
+            return
+        }
+
+        if (failures >= RETRY_DELAYS.size) {
             running = false
             invalidate()
             publish(VoicePhase.Error, failure.errorCode)
@@ -443,6 +516,7 @@ internal class VoiceListeningSession(
 
     companion object {
         const val DEFAULT_WAKE_COOLDOWN_MILLIS = 1_500L
+        const val DEFAULT_KWS_RETRY_COOLDOWN_MILLIS = 10_000L
         private const val TAG = "VoiceListeningSession"
         private val RETRY_DELAYS = longArrayOf(1_000, 2_000, 4_000, 8_000, 15_000)
     }

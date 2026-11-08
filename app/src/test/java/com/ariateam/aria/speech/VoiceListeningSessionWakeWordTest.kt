@@ -375,4 +375,151 @@ class VoiceListeningSessionWakeWordTest {
         assertEquals(1, h.driver.shutdowns)
         assertEquals(VoicePhase.Stopped, h.session.snapshot.phase)
     }
+
+    @Test
+    fun fallbackResetsToDetectorOnPlaybackEnd() {
+        val h = Harness()
+        h.start()
+
+        // Transient error causes fallback to Android driver
+        h.detector?.triggerError(RuntimeException("AudioRecord collision"))
+        assertTrue(h.session.snapshot.wakeFallback)
+        h.time.advance(300)
+        assertEquals(1, h.driver.starts)
+
+        // Command spoken and TTS plays
+        h.driver.current.ready()
+        h.driver.current.result("헤이 아리아 설정 열어")
+        assertEquals(listOf("설정 열어"), h.commands)
+
+        // TTS finishes
+        h.session.playbackChanged(true)
+        assertEquals(VoicePhase.Speaking, h.session.snapshot.phase)
+        h.session.playbackChanged(false)
+
+        // wakeFallback is reset to false, rearming on-device KWS
+        assertFalse(h.session.snapshot.wakeFallback)
+        h.time.advance(300)
+        assertEquals(2, h.detector?.starts)
+        assertEquals(VoicePhase.Waiting, h.session.snapshot.phase)
+    }
+
+    @Test
+    fun modeWakeDoesNotFatallyStopOnRepeatedErrors() {
+        val h = Harness(detector = null) // Fallback Android driver wake path
+        h.start()
+
+        // 6 consecutive transient/busy errors in Mode.Wake
+        for (i in 1..6) {
+            h.time.advance(300)
+            h.driver.current.failed(RecognitionFailure.Busy)
+            h.time.advance(15_000)
+        }
+
+        // Must NOT terminate the service with fatal error; remains running with backoff
+        assertTrue("Session must not be fatally killed in Mode.Wake", h.fatals.isEmpty())
+        assertTrue("Snapshot phase must remain reconnecting or waiting, not Error", h.session.snapshot.phase != VoicePhase.Error)
+    }
+
+    @Test
+    fun readyResetsFailureAccumulator() {
+        val h = Harness(detector = null)
+        h.start()
+
+        // 2 failures
+        h.time.advance(300)
+        h.driver.current.failed(RecognitionFailure.Busy)
+        h.time.advance(1_000)
+        h.driver.current.failed(RecognitionFailure.Client)
+
+        assertEquals(2, h.session.snapshot.retryCount)
+
+        // Successful ready resets retryCount
+        h.time.advance(2_000)
+        h.driver.current.ready()
+        assertEquals(0, h.session.snapshot.retryCount)
+    }
+
+    @Test
+    fun safeDiagnosticsEmittedOnWakeEvents() {
+        val events = mutableListOf<WakeDiagnostics.Event>()
+        WakeDiagnostics.diagnosticListener = { event, _ -> events += event }
+
+        val h = Harness()
+        h.start()
+        h.detector?.triggerWakeHit("헤이아리아")
+        h.session.playbackChanged(true)
+        h.session.playbackChanged(false)
+        h.session.stop()
+
+        assertTrue(events.contains(WakeDiagnostics.Event.WAKE_DETECTED))
+        assertTrue(events.contains(WakeDiagnostics.Event.STOPPED_WAITING))
+        assertTrue(events.contains(WakeDiagnostics.Event.RESTARTING))
+
+        WakeDiagnostics.diagnosticListener = null
+    }
+
+    @Test
+    fun repeatedAsrBusyRetriesAvailableKwsAfterBoundedCooldown() {
+        val h = Harness(cooldownMillis = 1_500L)
+        h.start()
+        assertEquals(1, h.detector?.starts)
+        assertEquals(0, h.driver.starts)
+
+        // KWS fails with transient audio error; falls back to ASR driver
+        h.detector?.triggerError(RuntimeException("AudioRecord resource conflict"))
+        assertTrue("wakeFallback should be true after detector error", h.session.snapshot.wakeFallback)
+
+        // Advance to ASR attempt
+        h.time.advance(VoiceLimits.RESTART_MILLIS)
+        assertEquals(1, h.driver.starts)
+
+        // Fallback ASR returns Busy repeatedly before reaching ready
+        h.driver.current.failed(RecognitionFailure.Busy)
+        h.time.advance(1_000)
+        assertEquals(2, h.driver.starts)
+        assertTrue("Still in fallback while cooldown has not elapsed", h.session.snapshot.wakeFallback)
+
+        h.driver.current.failed(RecognitionFailure.Busy)
+        h.time.advance(2_000)
+        assertEquals(3, h.driver.starts)
+
+        h.driver.current.failed(RecognitionFailure.Busy)
+        h.time.advance(4_000)
+        assertEquals(4, h.driver.starts)
+
+        h.driver.current.failed(RecognitionFailure.Busy)
+        // Advance past bounded KWS retry cooldown (total elapsed > 10_000ms: 300 + 1000 + 2000 + 4000 + 8000 = 15300ms)
+        h.time.advance(8_000)
+
+        // Next attempt must retry available on-device KWS detector
+        assertEquals("Available KWS should be retried after bounded cooldown", 2, h.detector?.starts)
+        assertFalse("wakeFallback must reset to false upon retrying KWS", h.session.snapshot.wakeFallback)
+        assertEquals(VoicePhase.Waiting, h.session.snapshot.phase)
+
+        // Retried KWS functions properly
+        h.detector?.triggerWakeHit("헤이아리아")
+        assertEquals(1, h.wakes)
+    }
+
+    @Test
+    fun stopCancelsCooldownAndPreventsKwsResurrection() {
+        val h = Harness()
+        h.start()
+        h.detector?.triggerError(RuntimeException("Mic collision"))
+        assertTrue(h.session.snapshot.wakeFallback)
+
+        // Call stop while cooldown is active
+        h.session.stop()
+        assertEquals(VoicePhase.Stopped, h.session.snapshot.phase)
+        val initialDetectorStarts = h.detector?.starts ?: 0
+        val initialDriverStarts = h.driver.starts
+
+        // Advance past all cooldowns and retry delays
+        h.time.advance(30_000)
+
+        assertEquals("Session must remain stopped", VoicePhase.Stopped, h.session.snapshot.phase)
+        assertEquals("No new detector starts after stop", initialDetectorStarts, h.detector?.starts)
+        assertEquals("No new driver starts after stop", initialDriverStarts, h.driver.starts)
+    }
 }

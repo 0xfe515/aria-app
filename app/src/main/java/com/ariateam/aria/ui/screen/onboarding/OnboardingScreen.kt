@@ -96,11 +96,12 @@ fun OnboardingScreen(
             step == Step.ConfirmHeight || step == Step.ConfirmMount
 
     fun isPromptStep(step: Step) =
-        step != Step.Saving && step != Step.Done
+        step != Step.Done && (step != Step.Saving || uiState.error != null)
 
     fun errorStringForStep(step: Step): String = when (step) {
         Step.AskHeight, Step.ConfirmHeight -> applicationContext.getString(R.string.onboarding_error_stature)
         Step.AskMount, Step.ConfirmMount -> applicationContext.getString(R.string.onboarding_error_mount)
+        Step.Saving -> applicationContext.getString(R.string.onboarding_error_save)
         else -> applicationContext.getString(R.string.onboarding_error_confirmation)
     }
 
@@ -224,7 +225,7 @@ fun OnboardingScreen(
         if (currentPrompt.isBlank()) return
         voiceError = null
         controller.speak(currentPrompt) {
-            if (isResumed && permissionGranted) {
+            if (isInputStep(uiState.step) && isResumed && permissionGranted) {
                 controller.startListening()
             }
         }
@@ -254,7 +255,7 @@ fun OnboardingScreen(
     // Speak the prompt for the current step. Re-runs when the step, prompt revision, resumption or
     // permission state changes. On real TTS completion (onDone on the main handler) advance the state
     // machine and, for input/confirm steps, start listening only when permitted and resumed.
-    LaunchedEffect(uiState.step, promptRevision, isResumed, permissionGranted) {
+    LaunchedEffect(uiState.step, uiState.error, promptRevision, isResumed, permissionGranted) {
         val step = uiState.step
         val prompt: String? = when (step) {
             Step.Welcome -> applicationContext.getString(R.string.onboarding_welcome)
@@ -269,7 +270,14 @@ fun OnboardingScreen(
                 }} ?: ""
                 applicationContext.getString(R.string.onboarding_confirm_mount, positionText)
             }
-            else -> null
+            Step.Saving -> {
+                if (uiState.error != null) {
+                    applicationContext.getString(R.string.onboarding_error_save)
+                } else {
+                    null
+                }
+            }
+            Step.Done -> null
         }
         currentPrompt = prompt.orEmpty()
         voiceError = null
@@ -277,7 +285,7 @@ fun OnboardingScreen(
             controller.speak(prompt) {
                 // Real TTS completion callback: Welcome -> AskHeight; no-op otherwise.
                 stateMachine.onPromptFinished()
-                if (step != Step.Welcome && isResumed && permissionGranted) {
+                if (isInputStep(step) && isResumed && permissionGranted) {
                     controller.startListening()
                 }
             }
@@ -369,7 +377,15 @@ fun OnboardingScreen(
                 )
             }
             Step.Saving -> {
-                SavingIndicator(context = context)
+                SavingIndicator(
+                    context = context,
+                    error = uiState.error,
+                    onRetry = {
+                        voiceError = null
+                        repromptCount = 0
+                        stateMachine.retry()
+                    }
+                )
             }
             Step.Done -> {
                 CompletedMessage(
@@ -685,7 +701,11 @@ private fun ConfirmMount(
 }
 
 @Composable
-private fun SavingIndicator(context: Context) {
+private fun SavingIndicator(
+    context: Context,
+    error: String? = null,
+    onRetry: () -> Unit = {},
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -693,16 +713,29 @@ private fun SavingIndicator(context: Context) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        CircularProgressIndicator(
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(48.dp)
-        )
-        Text(
-            text = context.getString(R.string.onboarding_saving),
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-            textAlign = TextAlign.Center
-        )
+        if (error != null) {
+            Text(
+                text = error,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(8.dp)
+            )
+            Button(onClick = onRetry) {
+                Text(context.getString(R.string.onboarding_retry))
+            }
+        } else {
+            CircularProgressIndicator(
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(48.dp)
+            )
+            Text(
+                text = context.getString(R.string.onboarding_saving),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }
 

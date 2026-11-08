@@ -61,6 +61,7 @@ internal interface KwsEngine : AutoCloseable {
 internal class AndroidAudioRecordCaptureSource(
     private val context: Context,
 ) : AudioCaptureSource {
+
     @SuppressLint("MissingPermission")
     override fun open(sampleRate: Int, chunkSamples: Int): AudioCaptureSession {
         val granted = ContextCompat.checkSelfPermission(
@@ -81,6 +82,7 @@ internal class AndroidAudioRecordCaptureSource(
         }
         val minRingBufferBytes = sampleRate * 2 * 2
         val targetBufferBytes = maxOf(minBufferBytes * 2, minRingBufferBytes, chunkSamples * 2 * 4)
+
         val record = createAudioRecord(sampleRate, targetBufferBytes)
             ?: throw AudioCaptureException("Unable to initialize AudioRecord at ${sampleRate}Hz")
 
@@ -171,40 +173,41 @@ internal class SherpaKwsEngine(
 ) : KwsEngine {
     private val spotter: KeywordSpotter
     private val closed = AtomicBoolean(false)
+    private val nativeLock = Any()
 
     init {
         SherpaWakeWordDetector.verifyBundledModelAssets(assetManager)
         spotter = KeywordSpotter(assetManager = assetManager, config = config)
     }
 
-    override fun createStream(): KwsStream {
+    override fun createStream(): KwsStream = synchronized(nativeLock) {
         check(!closed.get()) { "SherpaKwsEngine is closed" }
         val stream = spotter.createStream()
         return object : KwsStream {
             private val streamClosed = AtomicBoolean(false)
             private fun usable(): Boolean = !streamClosed.get() && !closed.get()
 
-            override fun acceptWaveform(samples: FloatArray, sampleRate: Int) {
+            override fun acceptWaveform(samples: FloatArray, sampleRate: Int) = synchronized(nativeLock) {
                 if (usable()) stream.acceptWaveform(samples, sampleRate)
             }
 
-            override fun isReady(): Boolean = usable() && spotter.isReady(stream)
+            override fun isReady(): Boolean = synchronized(nativeLock) {
+                if (usable()) spotter.isReady(stream) else false
+            }
 
-            override fun decode() {
+            override fun decode() = synchronized(nativeLock) {
                 if (usable()) spotter.decode(stream)
             }
 
-            override fun getKeyword(): String {
-                if (!usable()) return ""
-                val res = spotter.getResult(stream)
-                return res.keyword
+            override fun getKeyword(): String = synchronized(nativeLock) {
+                if (!usable()) "" else spotter.getResult(stream).keyword
             }
 
-            override fun reset() {
+            override fun reset() = synchronized(nativeLock) {
                 if (usable()) spotter.reset(stream)
             }
 
-            override fun close() {
+            override fun close() = synchronized(nativeLock) {
                 if (streamClosed.compareAndSet(false, true)) {
                     runCatching { stream.release() }
                 }
@@ -212,7 +215,7 @@ internal class SherpaKwsEngine(
         }
     }
 
-    override fun close() {
+    override fun close() = synchronized(nativeLock) {
         if (closed.compareAndSet(false, true)) {
             runCatching { spotter.release() }
         }
@@ -244,8 +247,12 @@ internal class SherpaWakeWordDetector internal constructor(
     )
 
     private val activeAttempt = AtomicLong(0)
+    private val stopGeneration = AtomicLong(0)
     private val released = AtomicBoolean(false)
+    private val startLock = Any()
+    private val sessionLock = Any()
     @Volatile private var currentAudioSession: AudioCaptureSession? = null
+    private var currentSessionAttempt: Long = 0L
 
     override val isAvailable: Boolean
         get() = !released.get()
@@ -255,78 +262,185 @@ internal class SherpaWakeWordDetector internal constructor(
             listener.onError(IllegalStateException("SherpaWakeWordDetector is already released"))
             return
         }
-        stop()
 
-        val attemptId = activeAttempt.incrementAndGet()
-        val audioSession = try {
-            audioSource.open(SAMPLE_RATE, CHUNK_SAMPLES)
-        } catch (t: Throwable) {
-            listener.onError(t)
-            return
-        }
-        currentAudioSession = audioSession
+        // Serialize open attempts; stop() does not wait on startLock, ensuring prompt mic release.
+        synchronized(startLock) {
+            if (released.get()) {
+                listener.onError(IllegalStateException("SherpaWakeWordDetector is already released"))
+                return
+            }
+            stop()
 
-        val stream = try {
-            engine.createStream()
-        } catch (t: Throwable) {
-            audioSession.close()
-            currentAudioSession = null
-            listener.onError(t)
-            return
-        }
+            val attemptId = activeAttempt.incrementAndGet()
+            val attemptGeneration = stopGeneration.get()
 
-        executor.execute {
-            val floatBuffer = FloatArray(CHUNK_SAMPLES)
-            try {
-                while (activeAttempt.get() == attemptId && !released.get()) {
-                    val read = audioSession.read(floatBuffer)
-                    if (read < 0) break
-                    if (read == 0) continue
+            val audioSession = try {
+                audioSource.open(SAMPLE_RATE, CHUNK_SAMPLES)
+            } catch (t: Throwable) {
+                WakeDiagnostics.emit(WakeDiagnostics.Event.NO_AUDIO, t.javaClass.simpleName)
+                if (activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                    listener.onError(t)
+                }
+                return
+            }
 
-                    val samplesToFeed = if (read == floatBuffer.size) floatBuffer else floatBuffer.copyOf(read)
-                    stream.acceptWaveform(samplesToFeed, SAMPLE_RATE)
+            // Guard before native creation: release/stop during open must not call engine.createStream
+            val canProceed = synchronized(sessionLock) {
+                activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration
+            }
+            if (!canProceed) {
+                audioSession.stopCapture()
+                audioSession.close()
+                return
+            }
 
-                    while (stream.isReady() && activeAttempt.get() == attemptId && !released.get()) {
-                        stream.decode()
-                        val keyword = stream.getKeyword()
-                        if (keyword.isNotBlank()) {
-                            stream.reset()
-                            // Immediately stop and release microphone before triggering callback
+            val stream = try {
+                engine.createStream()
+            } catch (t: Throwable) {
+                audioSession.stopCapture()
+                audioSession.close()
+                WakeDiagnostics.emit(WakeDiagnostics.Event.MODEL_NOT_READY, t.javaClass.simpleName)
+                if (activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                    listener.onError(t)
+                }
+                return
+            }
+
+            val published = synchronized(sessionLock) {
+                if (activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                    currentAudioSession = audioSession
+                    currentSessionAttempt = attemptId
+                    true
+                } else {
+                    false
+                }
+            }
+
+            if (!published) {
+                runCatching { stream.close() }
+                audioSession.stopCapture()
+                audioSession.close()
+                return
+            }
+
+            executor.execute {
+                val floatBuffer = FloatArray(CHUNK_SAMPLES)
+                try {
+                    while (activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                        val read = audioSession.read(floatBuffer)
+                        if (read < 0) {
+                            // EOF or stream termination on live attempt must notify listener, not silently stall in Waiting
+                            val shouldNotify = synchronized(sessionLock) {
+                                if (activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                                    activeAttempt.incrementAndGet()
+                                    if (currentSessionAttempt == attemptId) {
+                                        currentAudioSession = null
+                                        currentSessionAttempt = 0L
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
                             audioSession.stopCapture()
                             audioSession.close()
-                            if (activeAttempt.compareAndSet(attemptId, 0)) {
-                                currentAudioSession = null
+                            if (shouldNotify) {
+                                WakeDiagnostics.emit(WakeDiagnostics.Event.NO_AUDIO, "STREAM_EOF")
                                 mainPoster(Runnable {
-                                    listener.onWakeWordDetected(keyword)
+                                    if (stopGeneration.get() == attemptGeneration && !released.get()) {
+                                        listener.onError(AudioCaptureException("Audio stream terminated prematurely"))
+                                    }
                                 })
                             }
                             return@execute
                         }
+                        if (read == 0) continue
+
+                        val samplesToFeed = if (read == floatBuffer.size) floatBuffer else floatBuffer.copyOf(read)
+                        stream.acceptWaveform(samplesToFeed, SAMPLE_RATE)
+
+                        while (stream.isReady() && activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                            stream.decode()
+                            val keyword = stream.getKeyword()
+                            if (keyword.isNotBlank()) {
+                                stream.reset()
+                                WakeDiagnostics.emit(WakeDiagnostics.Event.WAKE_DETECTED, "KEYWORD_DETECTED")
+                                val shouldNotify = synchronized(sessionLock) {
+                                    if (activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                                        activeAttempt.incrementAndGet()
+                                        if (currentSessionAttempt == attemptId) {
+                                            currentAudioSession = null
+                                            currentSessionAttempt = 0L
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                // Immediately stop and release microphone before triggering callback
+                                audioSession.stopCapture()
+                                audioSession.close()
+                                if (shouldNotify) {
+                                    mainPoster(Runnable {
+                                        if (stopGeneration.get() == attemptGeneration && !released.get()) {
+                                            listener.onWakeWordDetected(keyword)
+                                        }
+                                    })
+                                }
+                                return@execute
+                            }
+                        }
                     }
-                }
-            } catch (t: Throwable) {
-                if (activeAttempt.get() == attemptId && !released.get()) {
+                } catch (t: Throwable) {
+                    val shouldNotify = synchronized(sessionLock) {
+                        if (activeAttempt.get() == attemptId && !released.get() && stopGeneration.get() == attemptGeneration) {
+                            activeAttempt.incrementAndGet()
+                            if (currentSessionAttempt == attemptId) {
+                                currentAudioSession = null
+                                currentSessionAttempt = 0L
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    audioSession.stopCapture()
                     audioSession.close()
-                    if (activeAttempt.compareAndSet(attemptId, 0)) {
-                        currentAudioSession = null
+                    if (shouldNotify) {
+                        WakeDiagnostics.emit(WakeDiagnostics.Event.NO_AUDIO, t.javaClass.simpleName)
                         mainPoster(Runnable {
-                            listener.onError(t)
+                            if (stopGeneration.get() == attemptGeneration && !released.get()) {
+                                listener.onError(t)
+                            }
                         })
                     }
+                } finally {
+                    runCatching { stream.close() }
+                    runCatching { audioSession.stopCapture() }
+                    runCatching { audioSession.close() }
+                    synchronized(sessionLock) {
+                        if (currentSessionAttempt == attemptId) {
+                            currentAudioSession = null
+                            currentSessionAttempt = 0L
+                        }
+                    }
                 }
-            } finally {
-                runCatching { stream.close() }
-                runCatching { audioSession.close() }
             }
         }
     }
 
     override fun stop() {
-        activeAttempt.incrementAndGet()
-        val session = currentAudioSession
-        currentAudioSession = null
-        session?.stopCapture()
-        session?.close()
+        stopGeneration.incrementAndGet()
+        val sessionToClose: AudioCaptureSession? = synchronized(sessionLock) {
+            activeAttempt.incrementAndGet()
+            val s = currentAudioSession
+            currentAudioSession = null
+            currentSessionAttempt = 0L
+            s
+        }
+        WakeDiagnostics.emit(WakeDiagnostics.Event.STOPPED_WAITING, "STOP")
+        sessionToClose?.stopCapture()
+        sessionToClose?.close()
     }
 
     override fun release() {
@@ -410,6 +524,7 @@ internal class SherpaWakeWordDetector internal constructor(
                     assetManager.open(assetPath).close()
                 } catch (_: Exception) {
                     Log.i(TAG, "Bundled KWS asset missing ($assetPath); falling back to default Android recognizer")
+                    WakeDiagnostics.emit(WakeDiagnostics.Event.MODEL_NOT_READY, "ASSETS_MISSING")
                     return null
                 }
             }
@@ -419,6 +534,7 @@ internal class SherpaWakeWordDetector internal constructor(
                 SherpaWakeWordDetector(context, config)
             } catch (t: Throwable) {
                 Log.w(TAG, "Failed to instantiate Sherpa KeywordSpotter: ${t.message}; falling back to default Android recognizer", t)
+                WakeDiagnostics.emit(WakeDiagnostics.Event.MODEL_NOT_READY, t.javaClass.simpleName)
                 null
             }
         }

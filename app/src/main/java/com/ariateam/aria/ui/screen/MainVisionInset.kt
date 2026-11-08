@@ -399,9 +399,11 @@ fun MainVisionInset(
     ) {
         if (isHomeVisible && hasCameraPermission) {
             onStartCamera(previewSurfaceProvider, displayRotation)
+            previewSurfaceProvider?.let { provider ->
+                onSurfaceProviderUpdated(provider, displayRotation)
+            }
         } else if (isCameraActive) {
             onSurfaceProviderUpdated(null, displayRotation)
-            previewSurfaceProvider = null
         }
     }
 

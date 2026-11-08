@@ -5,6 +5,11 @@ import com.ariateam.aria.runtime.AriaRuntimeStateBridge
 import com.ariateam.aria.runtime.AriaRuntimeTimingTracker
 import com.ariateam.aria.runtime.AriaUnifiedNotificationCoordinator
 import com.ariateam.aria.runtime.NotificationStateTuple
+import com.ariateam.aria.walking.WalkingAssistAction
+import com.ariateam.aria.walking.WalkingAssistAnnouncement
+import com.ariateam.aria.walking.WalkingAssistCause
+import com.ariateam.aria.walking.WalkingAssistPhase
+import com.ariateam.aria.walking.WalkingAssistState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -847,5 +852,478 @@ class CameraRecoveryAndNotificationTest {
             "Custom attempt limit reached",
             CameraRecoverySequencingPolicy.canAttemptStallRecovery(currentAttempts = 2, maxAttempts = 2),
         )
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_suppressesTransientCameraStartingNoise() {
+        val startingState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_STARTING,
+            action = WalkingAssistAction.WAIT_FOR_CAMERA,
+        )
+
+        // Transient camera starting must not emit voice announcements, even if marked LIMITED
+        val (shouldAnnounce, _) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = null,
+            lastAnnouncedNanos = 0L,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = startingState,
+            nowNanos = 1_000_000_000L,
+        )
+        assertFalse("Transient camera starting must not trigger TTS announcement", shouldAnnounce)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_rateLimitsRepeatedActionableFailures() {
+        val unavailableState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_UNAVAILABLE,
+            action = WalkingAssistAction.RESTORE_CAMERA,
+        )
+        val t0 = 10_000_000_000L
+
+        // First occurrence: must announce
+        val (firstAnnounce, cause1) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = null,
+            lastAnnouncedNanos = 0L,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = unavailableState,
+            nowNanos = t0,
+        )
+        assertTrue("First actionable failure must announce", firstAnnounce)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, cause1)
+
+        // Repeated occurrence within 10s rate limit window: must be suppressed
+        val t1 = t0 + 5_000_000_000L // 5 seconds later
+        val (repeatAnnounce, _) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = cause1,
+            lastAnnouncedNanos = t0,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = unavailableState,
+            nowNanos = t1,
+        )
+        assertFalse("Duplicate actionable failure within 10s cooldown must be rate-limited", repeatAnnounce)
+
+        // Occurrence after 10s cooldown: must announce again
+        val t2 = t0 + 10_000_000_000L // exactly 10s later
+        val (cooldownAnnounce, cause2) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = cause1,
+            lastAnnouncedNanos = t0,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = unavailableState,
+            nowNanos = t2,
+        )
+        assertTrue("Actionable failure after cooldown window must announce", cooldownAnnounce)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, cause2)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_differentActionableFailureAnnouncesImmediately() {
+        val unavailableState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_UNAVAILABLE,
+            action = WalkingAssistAction.RESTORE_CAMERA,
+        )
+        val permissionState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_PERMISSION_REQUIRED,
+            action = WalkingAssistAction.GRANT_CAMERA_PERMISSION,
+        )
+        val t0 = 10_000_000_000L
+
+        // First occurrence is CAMERA_UNAVAILABLE
+        val (firstAnnounce, cause1) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = null,
+            lastAnnouncedNanos = 0L,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = unavailableState,
+            nowNanos = t0,
+        )
+        assertTrue(firstAnnounce)
+
+        // Different failure cause (CAMERA_PERMISSION_REQUIRED) occurs 1s later: must announce immediately
+        val t1 = t0 + 1_000_000_000L
+        val (diffAnnounce, cause2) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = cause1,
+            lastAnnouncedNanos = t0,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = permissionState,
+            nowNanos = t1,
+        )
+        assertTrue("Different failure cause must announce immediately despite recent prior failure", diffAnnounce)
+        assertEquals(WalkingAssistCause.CAMERA_PERMISSION_REQUIRED, cause2)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_recoveryPreservesActionableFailureTimestampAndSuppressesFlapping() {
+        val unavailableState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_UNAVAILABLE,
+            action = WalkingAssistAction.RESTORE_CAMERA,
+        )
+        val activeState = WalkingAssistState(
+            phase = WalkingAssistPhase.ACTIVE,
+            cause = WalkingAssistCause.READY,
+            action = WalkingAssistAction.NONE,
+        )
+        val t0 = 10_000_000_000L
+
+        // Initial failure is announced
+        val (firstAnnounce, cause1) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = null,
+            lastAnnouncedNanos = 0L,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = unavailableState,
+            nowNanos = t0,
+        )
+        assertTrue("First actionable failure must announce", firstAnnounce)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, cause1)
+
+        // Brief transient recovery occurs 2s later: must NOT speak TTS, but preserves failure cause
+        val t1 = t0 + 2_000_000_000L
+        val (recoveredAnnounce, preservedCause) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = cause1,
+            lastAnnouncedNanos = t0,
+            announcement = WalkingAssistAnnouncement.RECOVERED,
+            currentState = activeState,
+            nowNanos = t1,
+        )
+        assertFalse("Recovery transition must not trigger TTS announcement (quiet recovery)", recoveredAnnounce)
+        assertEquals("Actionable failure cause must be preserved across brief recovery to fence flapping", cause1, preservedCause)
+
+        // Flapping: same failure recurs 1s after brief recovery (3s after t0, well within 10s cooldown):
+        val t2 = t1 + 1_000_000_000L // 3s after t0
+        val (flappingAnnounce, _) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = preservedCause,
+            lastAnnouncedNanos = t0,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = unavailableState,
+            nowNanos = t2,
+        )
+        assertFalse("Flapping duplicate failure within 10s cooldown must NOT re-announce", flappingAnnounce)
+
+        // Failure persists after full 10s cooldown (t0 + 10s):
+        val t3 = t0 + 10_000_000_000L
+        val (afterCooldownAnnounce, _) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = preservedCause,
+            lastAnnouncedNanos = t0,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = unavailableState,
+            nowNanos = t3,
+        )
+        assertTrue("Persistent failure after full cooldown must announce again", afterCooldownAnnounce)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_quietWhenNoAnnouncement() {
+        val preparingState = WalkingAssistState(
+            phase = WalkingAssistPhase.PREPARING,
+            cause = WalkingAssistCause.SESSION_STARTING,
+            action = WalkingAssistAction.WAIT_FOR_MOTION,
+        )
+        val (shouldAnnounce, _) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = null,
+            lastAnnouncedNanos = 0L,
+            announcement = null,
+            currentState = preparingState,
+            nowNanos = 1_000_000_000L,
+        )
+        assertFalse("Null announcement (quiet preparation) must return false", shouldAnnounce)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_suppressesResultStaleNoise() {
+        val staleState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.RESULT_STALE,
+            action = WalkingAssistAction.WAIT_FOR_RESULT,
+        )
+
+        // Result stale must not emit voice announcement, preserving any previous actionable failure
+        val (shouldAnnounce, preservedCause) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = WalkingAssistCause.CAMERA_UNAVAILABLE,
+            lastAnnouncedNanos = 1_000_000_000L,
+            announcement = WalkingAssistAnnouncement.LIMITED,
+            currentState = staleState,
+            nowNanos = 2_000_000_000L,
+        )
+        assertFalse("RESULT_STALE must not trigger automatic TTS announcement", shouldAnnounce)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, preservedCause)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_suppressesAutomaticReadyAndRecoveredAnnouncements() {
+        val readyState = WalkingAssistState(
+            phase = WalkingAssistPhase.ACTIVE,
+            cause = WalkingAssistCause.READY,
+            action = WalkingAssistAction.NONE,
+        )
+
+        // READY announcement must be suppressed
+        val (readyAnnounce, readyCause) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = WalkingAssistCause.PIPELINE_STALLED,
+            lastAnnouncedNanos = 5_000_000_000L,
+            announcement = WalkingAssistAnnouncement.READY,
+            currentState = readyState,
+            nowNanos = 7_000_000_000L,
+        )
+        assertFalse("READY must not trigger automatic TTS announcement", readyAnnounce)
+        assertEquals(WalkingAssistCause.PIPELINE_STALLED, readyCause)
+
+        // RECOVERED announcement must also be suppressed
+        val (recoveredAnnounce, recoveredCause) = CameraAnnouncementPolicy.shouldAnnounce(
+            lastAnnouncedCause = WalkingAssistCause.PIPELINE_STALLED,
+            lastAnnouncedNanos = 5_000_000_000L,
+            announcement = WalkingAssistAnnouncement.RECOVERED,
+            currentState = readyState,
+            nowNanos = 8_000_000_000L,
+        )
+        assertFalse("RECOVERED must not trigger automatic TTS announcement", recoveredAnnounce)
+        assertEquals(WalkingAssistCause.PIPELINE_STALLED, recoveredCause)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_repeatedFlappingCyclesProduceZeroAutomaticAnnouncements() {
+        var session = CameraAnnouncementPolicy.SessionState()
+
+        val startingState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_STARTING,
+            action = WalkingAssistAction.WAIT_FOR_CAMERA,
+        )
+        val staleState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.RESULT_STALE,
+            action = WalkingAssistAction.WAIT_FOR_RESULT,
+        )
+        val activeState = WalkingAssistState(
+            phase = WalkingAssistPhase.ACTIVE,
+            cause = WalkingAssistCause.READY,
+            action = WalkingAssistAction.NONE,
+        )
+
+        var timeNanos = 1_000_000_000L
+
+        // Step 1: Startup starting phase
+        val (a1, s1) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, startingState, timeNanos,
+        )
+        assertFalse("Starting must not announce", a1)
+        session = s1
+
+        // Step 2: Result stale (first-result delay)
+        timeNanos += 1_500_000_000L
+        val (a2, s2) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, staleState, timeNanos,
+        )
+        assertFalse("Cold startup result stale must not announce", a2)
+        session = s2
+
+        // Step 3: First result arrives (READY)
+        timeNanos += 500_000_000L
+        val (a3, s3) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.READY, activeState, timeNanos,
+        )
+        assertFalse("Automatic READY must not announce", a3)
+        session = s3
+
+        // Step 4: Flap cycle 1 - stale again
+        timeNanos += 1_600_000_000L
+        val (a4, s4) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, staleState, timeNanos,
+        )
+        assertFalse("Flapping result stale cycle 1 must not announce", a4)
+        session = s4
+
+        // Step 5: Flap cycle 1 - recovered
+        timeNanos += 400_000_000L
+        val (a5, s5) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.RECOVERED, activeState, timeNanos,
+        )
+        assertFalse("Flapping RECOVERED cycle 1 must not announce", a5)
+        session = s5
+
+        // Step 6: Flap cycle 2 - stale again
+        timeNanos += 1_600_000_000L
+        val (a6, s6) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, staleState, timeNanos,
+        )
+        assertFalse("Flapping result stale cycle 2 must not announce", a6)
+        session = s6
+
+        // Step 7: Flap cycle 2 - recovered
+        timeNanos += 400_000_000L
+        val (a7, s7) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.RECOVERED, activeState, timeNanos,
+        )
+        assertFalse("Flapping RECOVERED cycle 2 must not announce", a7)
+        session = s7
+
+        assertNull("Flapping sequence without actionable failure must keep null lastAnnouncedCause", session.lastAnnouncedCause)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_suppressedFlappingPreservesActionableFailureRateLimit() {
+        val unavailableState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_UNAVAILABLE,
+            action = WalkingAssistAction.RESTORE_CAMERA,
+        )
+        val staleState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.RESULT_STALE,
+            action = WalkingAssistAction.WAIT_FOR_RESULT,
+        )
+        val activeState = WalkingAssistState(
+            phase = WalkingAssistPhase.ACTIVE,
+            cause = WalkingAssistCause.READY,
+            action = WalkingAssistAction.NONE,
+        )
+
+        var session = CameraAnnouncementPolicy.SessionState()
+        val t0 = 10_000_000_000L
+
+        // Initial real actionable failure: must announce
+        val (a0, s0) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, unavailableState, t0,
+        )
+        assertTrue("Actionable failure must announce on first occurrence", a0)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, s0.lastAnnouncedCause)
+        assertEquals(t0, s0.lastAnnouncedNanos)
+        session = s0
+
+        // Flapping through suppressed states while in cooldown:
+        // t0 + 1s: RESULT_STALE
+        val (a1, s1) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, staleState, t0 + 1_000_000_000L,
+        )
+        assertFalse("RESULT_STALE must not announce", a1)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, s1.lastAnnouncedCause)
+        assertEquals(t0, s1.lastAnnouncedNanos)
+        session = s1
+
+        // t0 + 2s: RECOVERED
+        val (a2, s2) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.RECOVERED, activeState, t0 + 2_000_000_000L,
+        )
+        assertFalse("RECOVERED must not announce", a2)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, s2.lastAnnouncedCause)
+        assertEquals(t0, s2.lastAnnouncedNanos)
+        session = s2
+
+        // t0 + 3s: RESULT_STALE
+        val (a3, s3) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, staleState, t0 + 3_000_000_000L,
+        )
+        assertFalse("RESULT_STALE must not announce", a3)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, s3.lastAnnouncedCause)
+        assertEquals(t0, s3.lastAnnouncedNanos)
+        session = s3
+
+        // t0 + 4s: RECOVERED
+        val (a4, s4) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.RECOVERED, activeState, t0 + 4_000_000_000L,
+        )
+        assertFalse("RECOVERED must not announce", a4)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, s4.lastAnnouncedCause)
+        assertEquals(t0, s4.lastAnnouncedNanos)
+        session = s4
+
+        // t0 + 5s: CAMERA_UNAVAILABLE recurs (5s into 10s cooldown): must NOT re-announce
+        val (a5, s5) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, unavailableState, t0 + 5_000_000_000L,
+        )
+        assertFalse("Failure recurrence within cooldown must NOT announce despite intervening flaps", a5)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, s5.lastAnnouncedCause)
+        assertEquals(t0, s5.lastAnnouncedNanos)
+        session = s5
+
+        // t0 + 10s: CAMERA_UNAVAILABLE persists after full 10s cooldown: must announce again
+        val (a6, s6) = CameraAnnouncementPolicy.evaluateTransition(
+            session, WalkingAssistAnnouncement.LIMITED, unavailableState, t0 + 10_000_000_000L,
+        )
+        assertTrue("Actionable failure after cooldown must announce again", a6)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, s6.lastAnnouncedCause)
+        assertEquals(t0 + 10_000_000_000L, s6.lastAnnouncedNanos)
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_allRealActionableFailuresAnnounceWithCooldown() {
+        val actionableCauses = listOf(
+            WalkingAssistCause.CAMERA_PERMISSION_REQUIRED to WalkingAssistAction.GRANT_CAMERA_PERMISSION,
+            WalkingAssistCause.CAMERA_UNAVAILABLE to WalkingAssistAction.RESTORE_CAMERA,
+            WalkingAssistCause.PIPELINE_STALLED to WalkingAssistAction.RETRY_PIPELINE,
+            WalkingAssistCause.MOTION_UNAVAILABLE to WalkingAssistAction.NONE,
+            WalkingAssistCause.MODEL_UNAVAILABLE to WalkingAssistAction.RETRY_MODEL,
+            WalkingAssistCause.PIPELINE_ERROR to WalkingAssistAction.RETRY_PIPELINE,
+        )
+
+        for ((cause, action) in actionableCauses) {
+            val state = WalkingAssistState(
+                phase = WalkingAssistPhase.LIMITED,
+                cause = cause,
+                action = action,
+            )
+            val t0 = 100_000_000_000L
+            var session = CameraAnnouncementPolicy.SessionState()
+
+            // First occurrence: must announce
+            val (a1, s1) = CameraAnnouncementPolicy.evaluateTransition(
+                session, WalkingAssistAnnouncement.LIMITED, state, t0,
+            )
+            assertTrue("Actionable failure $cause must announce on first occurrence", a1)
+            assertEquals(cause, s1.lastAnnouncedCause)
+            session = s1
+
+            // Recurrence within cooldown (t0 + 5s): must be suppressed
+            val (a2, s2) = CameraAnnouncementPolicy.evaluateTransition(
+                session, WalkingAssistAnnouncement.LIMITED, state, t0 + 5_000_000_000L,
+            )
+            assertFalse("Actionable failure $cause must be suppressed within 10s cooldown", a2)
+            assertEquals(cause, s2.lastAnnouncedCause)
+            session = s2
+
+            // Recurrence after cooldown (t0 + 10s): must announce again
+            val (a3, s3) = CameraAnnouncementPolicy.evaluateTransition(
+                session, WalkingAssistAnnouncement.LIMITED, state, t0 + 10_000_000_000L,
+            )
+            assertTrue("Actionable failure $cause must announce again after 10s cooldown", a3)
+            assertEquals(cause, s3.lastAnnouncedCause)
+        }
+    }
+
+    @Test
+    fun cameraAnnouncementPolicy_stoppedAnnouncementClearsFailureHistoryAndAnnounces() {
+        val stoppedState = WalkingAssistState(
+            phase = WalkingAssistPhase.STOPPED,
+            cause = WalkingAssistCause.SESSION_STOPPED,
+            action = WalkingAssistAction.NONE,
+        )
+        val unavailableState = WalkingAssistState(
+            phase = WalkingAssistPhase.LIMITED,
+            cause = WalkingAssistCause.CAMERA_UNAVAILABLE,
+            action = WalkingAssistAction.RESTORE_CAMERA,
+        )
+
+        // Session had an active failure
+        val activeSession = CameraAnnouncementPolicy.SessionState(
+            lastAnnouncedCause = WalkingAssistCause.CAMERA_UNAVAILABLE,
+            lastAnnouncedNanos = 10_000_000_000L,
+        )
+
+        // STOPPED occurs: must announce and reset session
+        val (stoppedAnnounce, resetSession) = CameraAnnouncementPolicy.evaluateTransition(
+            activeSession, WalkingAssistAnnouncement.STOPPED, stoppedState, 12_000_000_000L,
+        )
+        assertTrue("STOPPED announcement must be spoken", stoppedAnnounce)
+        assertNull("STOPPED must reset lastAnnouncedCause to null", resetSession.lastAnnouncedCause)
+        assertEquals(0L, resetSession.lastAnnouncedNanos)
+
+        // Subsequent failure in new session starts fresh without cooldown suppression
+        val (nextAnnounce, nextSession) = CameraAnnouncementPolicy.evaluateTransition(
+            resetSession, WalkingAssistAnnouncement.LIMITED, unavailableState, 13_000_000_000L,
+        )
+        assertTrue("New failure after STOPPED must announce immediately", nextAnnounce)
+        assertEquals(WalkingAssistCause.CAMERA_UNAVAILABLE, nextSession.lastAnnouncedCause)
     }
 }

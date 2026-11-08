@@ -13,8 +13,12 @@ import kotlinx.coroutines.flow.update
 /**
  * Pure onboarding state machine.
  *
- * Owns the first-run flow steps Welcome -> AskHeight -> ConfirmHeight -> AskMount ->
- * ConfirmMount -> Saving -> Done, together with the parsed stature/mount candidates.
+ * Owns the first-run flow steps Welcome -> AskHeight -> ConfirmHeight -> AskMount (if fresh) ->
+ * Saving -> Done, together with the parsed stature/mount candidates.
+ *
+ * Mount is accepted once without redundant confirmation; stature is confirmed with single-decimal
+ * formatting. If a valid profile was previously saved, mount is preserved and skipped upon stature
+ * confirmation; save errors preserve mount and allow coherent retry without re-asking.
  *
  * Public actions:
  *   - [submit]: parse recognized or manually entered text and advance based on the
@@ -46,7 +50,10 @@ class OnboardingStateMachine(
         val retryCount: Int = 0,
     )
 
-    private val _uiState = MutableStateFlow(UiState())
+    private fun initialMountPosition(): BodyMountPosition? =
+        profileStore.profile.value?.takeIf { it.isValid }?.position
+
+    private val _uiState = MutableStateFlow(UiState(mountPosition = initialMountPosition()))
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     /** Submit recognized or manually entered text for the current step. */
@@ -56,24 +63,35 @@ class OnboardingStateMachine(
             Step.Welcome -> Unit
             Step.AskHeight -> submitHeight(input)
             Step.AskMount -> submitMount(input)
-            Step.ConfirmHeight -> submitConfirmation(input, yesStep = Step.AskMount, noStep = Step.AskHeight)
+            Step.ConfirmHeight -> {
+                val nextStep = if (_uiState.value.mountPosition != null) Step.Saving else Step.AskMount
+                submitConfirmation(input, yesStep = nextStep, noStep = Step.AskHeight)
+            }
             Step.ConfirmMount -> submitConfirmation(input, yesStep = Step.Saving, noStep = Step.AskMount)
-            Step.Saving, Step.Done -> Unit
+            Step.Saving -> {
+                if (_uiState.value.error != null) {
+                    retry()
+                }
+            }
+            Step.Done -> Unit
         }
     }
 
     /** Clear the current error, reset the current step inputs and offer another attempt. */
     fun retry() {
-        _uiState.update { current ->
-            when (current.step) {
-                Step.AskHeight -> current.copy(error = null, retryCount = 0, heightInput = "")
-                Step.AskMount -> current.copy(error = null, retryCount = 0, mountInput = "")
-                Step.ConfirmHeight ->
-                    current.copy(step = Step.AskHeight, error = null, retryCount = 0, heightInput = "")
-                Step.ConfirmMount ->
-                    current.copy(step = Step.AskMount, error = null, retryCount = 0, mountInput = "")
-                else -> current
+        val current = _uiState.value
+        when (current.step) {
+            Step.AskHeight -> _uiState.update { it.copy(error = null, retryCount = 0, heightInput = "") }
+            Step.AskMount -> _uiState.update { it.copy(error = null, retryCount = 0, mountInput = "") }
+            Step.ConfirmHeight ->
+                _uiState.update { it.copy(step = Step.AskHeight, error = null, retryCount = 0, heightInput = "") }
+            Step.ConfirmMount ->
+                _uiState.update { it.copy(step = Step.AskMount, error = null, retryCount = 0, mountInput = "") }
+            Step.Saving -> {
+                _uiState.update { it.copy(error = null) }
+                attemptSave()
             }
+            Step.Welcome, Step.Done -> Unit
         }
     }
 
@@ -90,7 +108,7 @@ class OnboardingStateMachine(
 
     /** Reset to a fresh Welcome state (used when onboarding is (re)started, never mid-flow). */
     fun reset() {
-        _uiState.value = UiState()
+        _uiState.value = UiState(mountPosition = initialMountPosition())
     }
 
     // ---- private actions ----
@@ -117,13 +135,14 @@ class OnboardingStateMachine(
         if (parsed != null) {
             _uiState.update {
                 it.copy(
-                    step = Step.ConfirmMount,
+                    step = Step.Saving,
                     mountPosition = parsed,
                     mountInput = input,
                     error = null,
                     retryCount = 0,
                 )
             }
+            attemptSave()
         } else {
             failCurrent(Step.AskMount, "onboarding_error_mount", mountInput = input)
         }
@@ -146,17 +165,27 @@ class OnboardingStateMachine(
     /** Synchronously persist the confirmed profile; Done only if save returns true. */
     private fun attemptSave() {
         val current = _uiState.value
-        val stature = current.statureCm ?: return
-        val position = current.mountPosition ?: return
+        val stature = current.statureCm
+        val position = current.mountPosition
+        if (stature == null || position == null) {
+            _uiState.update {
+                it.copy(
+                    step = if (stature == null) Step.AskHeight else Step.AskMount,
+                    error = stringProvider("onboarding_error_save"),
+                    retryCount = it.retryCount + 1,
+                )
+            }
+            return
+        }
         val success = profileStore.save(BodyMountProfile(statureCm = stature, position = position))
         _uiState.update {
             if (success) {
                 it.copy(step = Step.Done, error = null)
             } else {
                 it.copy(
-                    step = Step.AskMount,
+                    step = Step.Saving,
                     error = stringProvider("onboarding_error_save"),
-                    retryCount = 0,
+                    retryCount = it.retryCount + 1,
                 )
             }
         }
