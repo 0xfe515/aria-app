@@ -48,6 +48,7 @@ import com.ariateam.aria.hazard.AlertSuppressionReason
 import com.ariateam.aria.hazard.GroundPointProjector
 import com.ariateam.aria.hazard.HazardAlertCoordinator
 import com.ariateam.aria.hazard.HazardAssessment
+import com.ariateam.aria.hazard.HazardCause
 import com.ariateam.aria.hazard.HazardDetector
 import com.ariateam.aria.hazard.HazardLevel
 import com.ariateam.aria.hazard.MotionDegradedReason
@@ -200,6 +201,7 @@ class VisionPipelineController(
         ),
     ),
     val objectDetectionFusion: ObjectDetectionHazardFusion = ObjectDetectionHazardFusion(),
+    val crosswalkSignalAdvisory: CrosswalkSignalAdvisory = CrosswalkSignalAdvisory(),
     private val mutableUiState: MutableStateFlow<VisionUiState> = MutableStateFlow(VisionUiState()),
     analyzerExecutorOverride: ExecutorService? = null,
 ) : AutoCloseable {
@@ -537,6 +539,7 @@ class VisionPipelineController(
         activeFullCameraModel = null
         groundContactDistanceEstimator.reset()
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null
@@ -560,6 +563,7 @@ class VisionPipelineController(
         lastPublishedNanos.set(0L)
         groundContactDistanceEstimator.reset()
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null
@@ -953,6 +957,7 @@ class VisionPipelineController(
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null
@@ -1057,6 +1062,7 @@ class VisionPipelineController(
 
         val modelLoaded = modelStore.segmenter.isReady
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null
@@ -1358,6 +1364,7 @@ class VisionPipelineController(
             if (isSessionLive(ticket)) {
                 val now = SystemClock.elapsedRealtimeNanos()
                 objectDetectionFusion.reset()
+                crosswalkSignalAdvisory.reset()
                 hazardDetector.reset()
                 objectTracker.reset()
                 lastTrackedGeometry = null
@@ -1691,6 +1698,7 @@ class VisionPipelineController(
                 continuousHealthyFrames.set(0L)
                 healthyStreamingStartNanos.set(0L)
                 objectDetectionFusion.reset()
+                crosswalkSignalAdvisory.reset()
                 hazardDetector.reset()
                 objectTracker.reset()
                 lastTrackedGeometry = null
@@ -1769,6 +1777,7 @@ class VisionPipelineController(
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null
@@ -2002,8 +2011,26 @@ class VisionPipelineController(
             val currentGeometry = OdGeometryToken.from(cropRect, rotation)
             if (lastTrackedGeometry != null && lastTrackedGeometry != currentGeometry) {
                 objectTracker.reset()
+                crosswalkSignalAdvisory.onGeometryChange(currentGeometry.hashCode().toLong())
             }
             lastTrackedGeometry = currentGeometry
+
+            // Snapshot auxiliary OD evidence once per analyzed frame so tracker, fusion, and distance agree.
+            val odEvidenceSnapshot = objectDetectionPipeline.latestEvidence()
+            val frameNowElapsedNanos = SystemClock.elapsedRealtimeNanos()
+            val gatedOd = if (inferenceOutput != null && isClockRealtime) {
+                objectDetectionFusion.evidenceGate.accept(
+                    evidence = odEvidenceSnapshot,
+                    frameGeometry = currentGeometry,
+                    frameCaptureTimestampNanos = imageTimestampNanos,
+                    nowElapsedNanos = frameNowElapsedNanos,
+                    sessionToken = ticket,
+                    isClockRealtime = isClockRealtime,
+                    motion = motion,
+                )
+            } else {
+                null
+            }
 
             val baseAssessment = if (inferenceOutput != null) {
                 if (!isClockRealtime) {
@@ -2029,19 +2056,10 @@ class VisionPipelineController(
                         cropWidthNorm = cropRect.normWidth,
                         cropHeightNorm = cropRect.normHeight,
                     )
-                    val gatedOd = objectDetectionFusion.evidenceGate.accept(
-                        evidence = objectDetectionPipeline.latestEvidence(),
-                        frameGeometry = currentGeometry,
-                        frameCaptureTimestampNanos = imageTimestampNanos,
-                        nowElapsedNanos = SystemClock.elapsedRealtimeNanos(),
-                        sessionToken = ticket,
-                        isClockRealtime = isClockRealtime,
-                        motion = motion,
-                    )
-                    if (gatedOd.clearTemporal && gatedOd.rejection != OdFusionRejection.NO_EVIDENCE) {
+                    if (gatedOd != null && gatedOd.clearTemporal && gatedOd.rejection != OdFusionRejection.NO_EVIDENCE) {
                         objectTracker.reset()
                     }
-                    val odTracks = if (gatedOd.accepted != null) {
+                    val odTracks = if (gatedOd?.accepted != null) {
                         objectTracker.update(
                             detections = gatedOd.accepted.detections,
                             captureNanos = gatedOd.accepted.captureTimestampNanos,
@@ -2087,14 +2105,28 @@ class VisionPipelineController(
                 val odOutcome = objectDetectionFusion.fuse(
                     base = baseAssessment,
                     motion = motion,
-                    evidence = objectDetectionPipeline.latestEvidence(),
+                    evidence = odEvidenceSnapshot,
                     frameGeometry = currentGeometry,
                     frameCaptureTimestampNanos = imageTimestampNanos,
-                    nowElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+                    nowElapsedNanos = frameNowElapsedNanos,
                     sessionToken = ticket,
                     isClockRealtime = isClockRealtime,
                 )
-                val decision = alertCoordinator.processAssessment(odOutcome.assessment, imageTimestampNanos)
+                val advisoryResult = crosswalkSignalAdvisory.evaluateAndFuse(
+                    baseAssessment = odOutcome.assessment,
+                    odEvidence = odEvidenceSnapshot,
+                    classMask = modelStore.segmenter.reusableClassMask,
+                    motion = motion,
+                    currentGeometry = currentGeometry,
+                    sessionToken = ticket,
+                    frameCaptureTimestampNanos = imageTimestampNanos,
+                    nowElapsedNanos = frameNowElapsedNanos,
+                    isClockRealtime = isClockRealtime,
+                )
+                val decision = alertCoordinator.processAssessment(advisoryResult.assessment, imageTimestampNanos)
+                if (decision is AlertDecision.Fire && decision.assessment.cause == HazardCause.C6_CROSSWALK_SIGNAL_PRESENCE) {
+                    crosswalkSignalAdvisory.acknowledgeDelivered(decision.assessment)
+                }
                 if (decision is AlertDecision.Suppressed && diagnosticFrameSequence != null) {
                     walkingAssistDiagnostics.recordSuppression(
                         walkingAssistTicket,
@@ -2103,8 +2135,9 @@ class VisionPipelineController(
                         diagnosticReason(decision.reason),
                     )
                 }
-                odOutcome.assessment
+                advisoryResult.assessment
             } else {
+                crosswalkSignalAdvisory.reset()
                 baseAssessment
             }
 
@@ -2124,6 +2157,7 @@ class VisionPipelineController(
                     cropTopNorm = cropRect.normTop,
                     cropWidthNorm = cropRect.normWidth,
                     cropHeightNorm = cropRect.normHeight,
+                    detections = gatedOd?.accepted?.detections,
                 )
             } else {
                 groundContactDistanceEstimator.reset()
@@ -2262,6 +2296,7 @@ class VisionPipelineController(
             groundContactMotionTracker.stop()
             groundContactDistanceEstimator.reset()
             objectDetectionFusion.reset()
+            crosswalkSignalAdvisory.reset()
             hazardDetector.reset()
             objectTracker.reset()
             lastTrackedGeometry = null
@@ -2356,6 +2391,7 @@ class VisionPipelineController(
             activeFullCameraModel = null
             groundContactDistanceEstimator.reset()
             objectDetectionFusion.reset()
+            crosswalkSignalAdvisory.reset()
             hazardDetector.reset()
             objectTracker.reset()
             lastTrackedGeometry = null
@@ -2468,6 +2504,7 @@ class VisionPipelineController(
         groundContactMotionTracker.stop()
         groundContactDistanceEstimator.reset()
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null
@@ -2584,6 +2621,7 @@ class VisionPipelineController(
         cancelPendingRebindWait()
         isRebindInProgress.set(true)
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null
@@ -2797,6 +2835,7 @@ class VisionPipelineController(
         groundContactDistanceEstimator.reset()
         modelStore.close()
         objectDetectionFusion.reset()
+        crosswalkSignalAdvisory.reset()
         hazardDetector.reset()
         objectTracker.reset()
         lastTrackedGeometry = null

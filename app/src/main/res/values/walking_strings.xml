@@ -30,4 +30,5 @@
     <string name="walking_hazard_c3_road_edge">차도 경계 주의.</string>
     <string name="walking_hazard_c4_narrow">보행 경로가 좁아집니다.</string>
     <string name="walking_hazard_c5_crosswalk">횡단보도 앞입니다. 신호는 확인할 수 없습니다.</string>
+    <string name="walking_hazard_c6_crosswalk_signal">횡단보도 앞 신호등을 확인하세요.</string>
 </resources>

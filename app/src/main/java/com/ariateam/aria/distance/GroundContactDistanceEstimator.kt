@@ -5,6 +5,7 @@ import com.ariateam.aria.hazard.EffectiveFov
 import com.ariateam.aria.hazard.FullUprightCameraModel
 import com.ariateam.aria.hazard.GroundIntersection
 import com.ariateam.aria.hazard.Vector3D
+import com.ariateam.aria.vision.od.DetectedObject
 import java.util.Locale
 import kotlin.math.abs
 
@@ -22,6 +23,7 @@ data class GroundContactCandidate(
     val isFloatingUnsupported: Boolean,
     val groundSupportPixels: Int = 0,
     val intersection: GroundIntersection? = null,
+    val associatedDetection: DetectedObject? = null,
 )
 
 /**
@@ -39,6 +41,7 @@ class GroundContactDistanceEstimator(
     val minClusterPixels: Int = MIN_CLUSTER_PIXELS,
 ) {
     private var lastSmoothedDistance: Float? = null
+    private val matcher = OdMaskMatcher(minClusterPixels = minClusterPixels)
 
     fun reset() {
         lastSmoothedDistance = null
@@ -62,6 +65,7 @@ class GroundContactDistanceEstimator(
         cropTopNorm: Float = 0f,
         cropWidthNorm: Float = 1f,
         cropHeightNorm: Float = 1f,
+        detections: List<DetectedObject>? = null,
     ): GroundContactDistance {
         if (!isClockRealtime) {
             reset()
@@ -137,6 +141,7 @@ class GroundContactDistanceEstimator(
             cropTopNorm = cropTopNorm,
             cropWidthNorm = cropWidthNorm,
             cropHeightNorm = cropHeightNorm,
+            detections = detections,
         )
 
         if (candidates.isEmpty()) {
@@ -222,7 +227,11 @@ class GroundContactDistanceEstimator(
 
     /**
      * Extracts ground contact candidates for target classes (4=person, 5=vehicle, 6=pole).
-     * Discards road/sidewalk/crosswalk surfaces and tiny noise components.
+     *
+     * When [detections] is provided (non-null), associates qualified OD detections with segmentation
+     * components, enforcing lower-boundary agreement, ground support, and clipping checks.
+     * Retains pole (6) as explicit fallback from segmentation.
+     * When [detections] is null, falls back to pure segmentation-only extraction.
      */
     fun extractCandidates(
         classMask: ByteArray,
@@ -236,173 +245,54 @@ class GroundContactDistanceEstimator(
         cropTopNorm: Float = 0f,
         cropWidthNorm: Float = 1f,
         cropHeightNorm: Float = 1f,
+        detections: List<DetectedObject>? = null,
     ): List<GroundContactCandidate> {
         val pixelCount = width * height
         if (classMask.size < pixelCount || width <= 0 || height <= 0) return emptyList()
 
-        val visited = BooleanArray(pixelCount)
+        val contactPoints = matcher.matchAndExtract(
+            classMask = classMask,
+            width = width,
+            height = height,
+            detections = detections,
+        )
+
         val candidates = mutableListOf<GroundContactCandidate>()
+        for (cp in contactPoints) {
+            val xNorm = (cp.contactX + 0.5f) / width.toFloat()
+            val yNorm = (cp.contactY + 0.5f) / height.toFloat()
 
-        val queueX = IntArray(pixelCount)
-        val queueY = IntArray(pixelCount)
+            // Map to full uncropped upright coordinate space
+            val fullUNorm = (cropLeftNorm + xNorm * cropWidthNorm).coerceIn(0f, 1f)
+            val fullVNorm = (cropTopNorm + yNorm * cropHeightNorm).coerceIn(0f, 1f)
 
-        val minSupportedY = (height * 0.35f).toInt() // Reject objects floating in upper 35% of frame
-
-        for (y in 0 until height) {
-            val rowOffset = y * width
-            for (x in 0 until width) {
-                val index = rowOffset + x
-                if (visited[index]) continue
-
-                val classId = classMask[index].toInt()
-                if (classId !in TARGET_CLASSES) {
-                    visited[index] = true
-                    continue
-                }
-
-                var head = 0
-                var tail = 0
-                queueX[tail] = x
-                queueY[tail] = y
-                tail++
-                visited[index] = true
-
-                var minX = x
-                var maxX = x
-                var minY = y
-                var maxY = y
-                var count = 0
-
-                while (head < tail) {
-                    val cx = queueX[head]
-                    val cy = queueY[head]
-                    head++
-                    count++
-
-                    if (cx < minX) minX = cx
-                    if (cx > maxX) maxX = cx
-                    if (cy < minY) minY = cy
-                    if (cy > maxY) maxY = cy
-
-                    // 4-way neighbors
-                    if (cy > 0) {
-                        val upIdx = (cy - 1) * width + cx
-                        if (!visited[upIdx] && classMask[upIdx].toInt() == classId) {
-                            visited[upIdx] = true
-                            queueX[tail] = cx
-                            queueY[tail] = cy - 1
-                            tail++
-                        }
-                    }
-                    if (cy < height - 1) {
-                        val downIdx = (cy + 1) * width + cx
-                        if (!visited[downIdx] && classMask[downIdx].toInt() == classId) {
-                            visited[downIdx] = true
-                            queueX[tail] = cx
-                            queueY[tail] = cy + 1
-                            tail++
-                        }
-                    }
-                    if (cx > 0) {
-                        val leftIdx = cy * width + (cx - 1)
-                        if (!visited[leftIdx] && classMask[leftIdx].toInt() == classId) {
-                            visited[leftIdx] = true
-                            queueX[tail] = cx - 1
-                            queueY[tail] = cy
-                            tail++
-                        }
-                    }
-                    if (cx < width - 1) {
-                        val rightIdx = cy * width + (cx + 1)
-                        if (!visited[rightIdx] && classMask[rightIdx].toInt() == classId) {
-                            visited[rightIdx] = true
-                            queueX[tail] = cx + 1
-                            queueY[tail] = cy
-                            tail++
-                        }
-                    }
-                }
-
-                if (count < minClusterPixels) {
-                    continue
-                }
-
-                // Check if frame-bottom clipped: touches within 2 pixels of bottom edge
-                val isBottomClipped = maxY >= height - 2
-
-                // Robust bottom-center contact proxy:
-                // Average X of pixels in the lowest 3 rows of this component
-                var bottomSumX = 0L
-                var bottomCount = 0
-                val bottomThresholdY = (maxY - 2).coerceAtLeast(minY)
-                for (i in 0 until count) {
-                    val px = queueX[i]
-                    val py = queueY[i]
-                    if (py >= bottomThresholdY) {
-                        bottomSumX += px
-                        bottomCount++
-                    }
-                }
-
-                val contactX = if (bottomCount > 0) bottomSumX.toFloat() / bottomCount else (minX + maxX) / 2.0f
-                val contactY = maxY.toFloat()
-
-                // Check local semantic walkable support (road=1, sidewalk=2, crosswalk=3)
-                // immediately below actual component bottom (maxY + 1 .. min(height - 1, maxY + depth))
-                var groundSupportPixels = 0
-                if (!isBottomClipped) {
-                    val searchTop = maxY + 1
-                    val searchBottom = minOf(height - 1, maxY + SUPPORT_SEARCH_DEPTH_PIXELS)
-                    val searchLeft = minX.coerceIn(0, width - 1)
-                    val searchRight = maxX.coerceIn(0, width - 1)
-
-                    for (sy in searchTop..searchBottom) {
-                        val rowOff = sy * width
-                        for (sx in searchLeft..searchRight) {
-                            if (classMask[rowOff + sx].toInt() in GROUND_CLASSES) {
-                                groundSupportPixels++
-                            }
-                        }
-                    }
-                }
-
-                val hasGroundSupport = groundSupportPixels >= MIN_GROUND_SUPPORT_PIXELS
-                val isFloatingUnsupported = (maxY < minSupportedY) || !hasGroundSupport
-
-                val xNorm = (contactX + 0.5f) / width.toFloat()
-                val yNorm = (contactY + 0.5f) / height.toFloat()
-
-                // Map to full uncropped upright coordinate space
-                val fullUNorm = (cropLeftNorm + xNorm * cropWidthNorm).coerceIn(0f, 1f)
-                val fullVNorm = (cropTopNorm + yNorm * cropHeightNorm).coerceIn(0f, 1f)
-
-                val intersection = if (cameraHeightMeters != null && upVector != null && !isBottomClipped && !isFloatingUnsupported) {
-                    val ray = if (fullCameraModel != null) {
-                        CameraGeometry.computeRayFromFullUprightNorm(fullUNorm, fullVNorm, fullCameraModel)
-                    } else if (effectiveFov != null) {
-                        CameraGeometry.computeCameraRay(xNorm, yNorm, effectiveFov.hfovDegrees, effectiveFov.vfovDegrees)
-                    } else null
-
-                    if (ray != null) {
-                        CameraGeometry.intersectGroundPlane(ray, cameraHeightMeters, upVector)
-                    } else null
+            val intersection = if (cameraHeightMeters != null && upVector != null && !cp.isBottomClipped && !cp.isFloatingUnsupported) {
+                val ray = if (fullCameraModel != null) {
+                    CameraGeometry.computeRayFromFullUprightNorm(fullUNorm, fullVNorm, fullCameraModel)
+                } else if (effectiveFov != null) {
+                    CameraGeometry.computeCameraRay(xNorm, yNorm, effectiveFov.hfovDegrees, effectiveFov.vfovDegrees)
                 } else null
 
-                candidates.add(
-                    GroundContactCandidate(
-                        classId = classId,
-                        pixelCount = count,
-                        xNorm = xNorm,
-                        yNorm = yNorm,
-                        fullUNorm = fullUNorm,
-                        fullVNorm = fullVNorm,
-                        isBottomClipped = isBottomClipped,
-                        isFloatingUnsupported = isFloatingUnsupported,
-                        groundSupportPixels = groundSupportPixels,
-                        intersection = intersection,
-                    )
+                if (ray != null) {
+                    CameraGeometry.intersectGroundPlane(ray, cameraHeightMeters, upVector)
+                } else null
+            } else null
+
+            candidates.add(
+                GroundContactCandidate(
+                    classId = cp.classId,
+                    pixelCount = cp.pixelCount,
+                    xNorm = xNorm,
+                    yNorm = yNorm,
+                    fullUNorm = fullUNorm,
+                    fullVNorm = fullVNorm,
+                    isBottomClipped = cp.isBottomClipped,
+                    isFloatingUnsupported = cp.isFloatingUnsupported,
+                    groundSupportPixels = cp.groundSupportPixels,
+                    intersection = intersection,
+                    associatedDetection = cp.associatedDetection,
                 )
-            }
+            )
         }
 
         return candidates

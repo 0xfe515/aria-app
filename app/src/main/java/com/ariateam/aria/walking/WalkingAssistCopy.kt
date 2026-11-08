@@ -60,6 +60,7 @@ object WalkingAssistCopy {
         HazardCause.C3_ROAD_EDGE -> R.string.walking_hazard_c3_road_edge
         HazardCause.C4_PATH_NARROW -> R.string.walking_hazard_c4_narrow
         HazardCause.C5_CROSSWALK_ENTRY -> R.string.walking_hazard_c5_crosswalk
+        HazardCause.C6_CROSSWALK_SIGNAL_PRESENCE -> R.string.walking_hazard_c6_crosswalk_signal
         HazardCause.NONE,
         HazardCause.DEGRADED -> null
     }

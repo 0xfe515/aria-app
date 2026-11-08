@@ -14,6 +14,7 @@ enum class HazardCause(val severity: AlertSeverity) {
     C3_ROAD_EDGE(AlertSeverity.CAUTION),
     C4_PATH_NARROW(AlertSeverity.CAUTION),
     C5_CROSSWALK_ENTRY(AlertSeverity.CAUTION),
+    C6_CROSSWALK_SIGNAL_PRESENCE(AlertSeverity.CAUTION),
     DEGRADED(AlertSeverity.DEGRADED),
 }
 

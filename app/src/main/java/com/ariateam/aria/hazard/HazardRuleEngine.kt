@@ -496,6 +496,9 @@ class HazardRuleEngine(
             HazardCause.C5_CROSSWALK_ENTRY -> {
                 "횡단보도 앞입니다. 신호는 확인할 수 없습니다"
             }
+            HazardCause.C6_CROSSWALK_SIGNAL_PRESENCE -> {
+                "횡단보도 앞 신호등을 확인하세요"
+            }
             HazardCause.DEGRADED -> {
                 "주변 인식이 어렵습니다"
             }
