@@ -43,7 +43,10 @@ class RuleCommandInterpreter : CommandInterpreter {
             .any(value::contains)
         if (visualCue) {
             val visualInterpretation = com.ariateam.aria.cloud.CloudCommandParser.parse(text, context, now)
-            if (visualInterpretation is Interpretation.CloudPhotoQuestion || visualInterpretation is Interpretation.Clarify) {
+            if (visualInterpretation is Interpretation.CloudPhotoQuestion ||
+                visualInterpretation is Interpretation.Clarify ||
+                visualInterpretation is Interpretation.Execute
+            ) {
                 val secondCommandAfterHago = Regex(
                     "하고(?:홈|설정|소리|안내|효과음|화면|네이버|카카오|길찾|중지|종료|취소|닫아|열어|꺼줘|켜줘)",
                 ).containsMatchIn(value)

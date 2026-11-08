@@ -94,4 +94,56 @@ class RuleCommandInterpreterTest {
             assertTrue(utterance, parse(utterance) is Interpretation.Clarify)
         }
     }
+
+    @Test fun visualNegationAndCancelFormsDoNotRouteToPhotoQuestion() {
+        // Static reproduction cases
+        assertTrue(parse("앞에 글씨 읽으면 안 돼") is Interpretation.Clarify)
+        assertTrue(parse("앞에 사진 안 찍어줘") is Interpretation.Clarify)
+        assertEquals(Interpretation.Execute(AppCommand.Cancel), parse("앞에 글씨 읽기 취소"))
+
+        // Additional negative action forms
+        listOf(
+            "앞에 사진 안 찍어",
+            "앞에 사진 안 찍을래",
+            "앞에 글씨 안 읽어줘",
+            "사진 안 보낼래",
+            "사진 촬영하면 안 돼",
+            "사진 찍으면 안 됩니다",
+        ).forEach { utterance ->
+            assertTrue("Expected Clarify for '$utterance'", parse(utterance) is Interpretation.Clarify)
+        }
+
+        // Direct cancel and question stop forms return Execute(Cancel)
+        listOf(
+            "사진 취소",
+            "사진 촬영 취소",
+            "사진 찍기 취소",
+            "질문 취소",
+            "글씨 읽기 취소",
+            "사진 중지",
+            "촬영 중지",
+            "질문 중지",
+        ).forEach { utterance ->
+            assertEquals("Expected Execute(Cancel) for '$utterance'", Interpretation.Execute(AppCommand.Cancel), parse(utterance))
+        }
+
+        // Positives with 안내판 / 금지 / inability phrasing remain photo
+        listOf(
+            "앞에 있는 안내판 읽어줘",
+            "앞에 출입 금지 표지판 읽어줘",
+            "앞에 글씨 못 읽겠어 읽어줘",
+        ).forEach { utterance ->
+            assertTrue("Expected CloudPhotoQuestion for '$utterance'", parse(utterance) is Interpretation.CloudPhotoQuestion)
+        }
+
+        // Whole session stop aliases preserved
+        listOf(
+            "듣기 중지",
+            "그만 들어",
+            "음성인식 꺼",
+            "전체 중지",
+        ).forEach { utterance ->
+            assertEquals("Expected Stop for '$utterance'", Interpretation.Execute(AppCommand.Stop), parse(utterance))
+        }
+    }
 }

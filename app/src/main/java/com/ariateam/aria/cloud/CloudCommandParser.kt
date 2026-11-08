@@ -1,5 +1,6 @@
 package com.ariateam.aria.cloud
 
+import com.ariateam.aria.command.AppCommand
 import com.ariateam.aria.command.CommandContext
 import com.ariateam.aria.command.Interpretation
 import com.ariateam.aria.command.RuleCommandInterpreter
@@ -13,21 +14,14 @@ object CloudCommandParser {
         val normalized = RuleCommandInterpreter.normalize(text)
         if (normalized.isEmpty()) return null
 
-        // 1. Negation handling: negative intent with question, photo, or provider keywords
-        val negationKeywords = listOf(
-            "하지마", "하지말", "찍지마", "찍지말", "묻지마", "묻지말", "물어보지마", "보내지마", "보내지말",
-            "보내면안돼", "전송하지마", "올리지마", "보지마", "보지말", "읽지마", "읽지말",
-            "읽어주지마", "읽어주지말", "촬영하지마", "촬영하지말", "찍으면안돼", "촬영하면안돼",
-        )
-        if (negationKeywords.any(normalized::contains)) {
-            val targets = listOf(
-                "질문", "사진", "챗지피티", "chatgpt", "제미나이", "클로드", "클라우드", "카메라", "물어", "묻",
-                "앞에", "앞쪽", "전방", "눈앞", "주변", "이거", "이게", "글자", "글씨", "텍스트", "문구",
-                "표지판", "간판", "읽어", "사진", "카메라",
-            )
-            if (targets.any(normalized::contains)) {
-                return Interpretation.Clarify("원하는 명령을 하나만 다시 말해 주세요.")
-            }
+        // 1. Direct photo or question cancellation or stop
+        if (isDirectPhotoOrQuestionCancel(normalized)) {
+            return Interpretation.Execute(AppCommand.Cancel)
+        }
+
+        // 2. Negation handling: explicit negative action forms with question, photo, or provider keywords
+        if (isExplicitNegativeAction(normalized)) {
+            return Interpretation.Clarify("원하는 명령을 하나만 다시 말해 주세요.")
         }
 
         // 2. Compound commands
@@ -57,6 +51,53 @@ object CloudCommandParser {
 
         // Unknown local speech: do NOT upload to cloud
         return null
+    }
+
+    private fun isDirectPhotoOrQuestionCancel(normalized: String): Boolean {
+        val cancelEndings = listOf(
+            "취소", "취소해", "취소해줘", "취소해주세요", "취소하기",
+            "중지", "중지해", "중지해줘", "중지해주세요",
+            "그만", "그만해", "그만해줘",
+        )
+        if (cancelEndings.none(normalized::endsWith)) return false
+        val cancelTargets = listOf(
+            "사진", "촬영", "찍기", "찍는거", "질문", "물어보", "챗지피티", "chatgpt", "제미나이", "클로드",
+            "글씨", "글자", "텍스트", "읽기", "읽는거", "보는거", "보기", "카메라", "앞에", "전방", "눈앞",
+        )
+        return normalized in setOf("취소", "취소해", "취소해줘", "취소해주세요", "취소하기") ||
+            cancelTargets.any(normalized::contains)
+    }
+
+    private fun isExplicitNegativeAction(normalized: String): Boolean {
+        val negativeActionKeywords = listOf(
+            // Direct "안" negative verb stems (excluding inability "못" forms to preserve requests like "못 읽겠어 읽어줘")
+            "안찍", "안읽", "안보내", "안보낼", "안물어", "안묻", "안봐", "안볼", "질문안",
+            // Prohibitions with ~면 안 돼 / 되 / 된 / 됨 / 됩 / 될
+            "읽으면안돼", "읽으면안되", "읽으면안된", "읽으면안됨", "읽으면안됩", "읽으면안될",
+            "찍으면안돼", "찍으면안되", "찍으면안된", "찍으면안됨", "찍으면안됩", "찍으면안될",
+            "촬영하면안돼", "촬영하면안되", "촬영하면안된", "촬영하면안됨", "촬영하면안됩", "촬영하면안될",
+            "보내면안돼", "보내면안되", "보내면안된", "보내면안됨", "보내면안됩", "보내면안될",
+            "전송하면안돼", "전송하면안되", "전송하면안된", "전송하면안됨", "전송하면안됩", "전송하면안될",
+            "올리면안돼", "올리면안되", "올리면안된", "올리면안됨", "올리면안됩", "올리면안될",
+            "보면안돼", "보면안되", "보면안된", "보면안됨", "보면안됩", "보면안될",
+            "물어보면안돼", "물어보면안되", "물어보면안된", "물어보면안됨", "물어보면안됩", "물어보면안될",
+            "질문하면안돼", "질문하면안되", "질문하면안된", "질문하면안됨", "질문하면안됩", "질문하면안될",
+            // Long-form negation ~지 마 / 말
+            "하지마", "하지말", "찍지마", "찍지말", "묻지마", "묻지말", "물어보지마", "물어보지말",
+            "보내지마", "보내지말", "전송하지마", "전송하지말", "올리지마", "올리지말",
+            "보지마", "보지말", "읽지마", "읽지말", "읽어주지마", "읽어주지말",
+            "촬영하지마", "촬영하지말", "질문하지마", "질문하지말",
+            // ~지 않
+            "찍지않", "촬영하지않", "읽지않", "보내지않", "전송하지않", "물어보지않", "질문하지않", "보지않",
+        )
+        if (negativeActionKeywords.none(normalized::contains)) return false
+        val targets = listOf(
+            "질문", "사진", "챗지피티", "chatgpt", "제미나이", "클로드", "클라우드", "카메라", "물어", "묻",
+            "앞에", "앞쪽", "전방", "눈앞", "주변", "이거", "이게", "글자", "글씨", "텍스트", "문구",
+            "표지판", "간판", "읽어", "카메라",
+            "찍", "촬영", "읽", "보내", "전송", "올리",
+        )
+        return targets.any(normalized::contains)
     }
 
     /**

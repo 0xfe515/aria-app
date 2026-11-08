@@ -1,5 +1,6 @@
 package com.ariateam.aria.cloud
 
+import com.ariateam.aria.command.AppCommand
 import com.ariateam.aria.command.CommandContext
 import com.ariateam.aria.command.Interpretation
 import com.ariateam.aria.command.RuleCommandInterpreter
@@ -311,5 +312,116 @@ class CloudCommandParserTest {
         assertNull(parse("오늘 날씨"))
         assertNull(parse("불 켜줘"))
         assertNull(parse("소리 켜"))
+    }
+
+    @Test
+    fun reproductionNegationAndCancelDoNotRouteToPhotoQuestion() {
+        // Static reproduction cases specifically named in task
+        val reproNeg1 = parse("앞에 글씨 읽으면 안 돼")
+        assertTrue("Expected Clarify or Cancel for '앞에 글씨 읽으면 안 돼', got $reproNeg1", reproNeg1 is Interpretation.Clarify)
+
+        val reproNeg2 = parse("앞에 사진 안 찍어줘")
+        assertTrue("Expected Clarify or Cancel for '앞에 사진 안 찍어줘', got $reproNeg2", reproNeg2 is Interpretation.Clarify)
+
+        val reproCancel = parse("앞에 글씨 읽기 취소")
+        assertTrue("Expected Execute(Cancel) for '앞에 글씨 읽기 취소', got $reproCancel", reproCancel is Interpretation.Execute && reproCancel.command == AppCommand.Cancel)
+    }
+
+    @Test
+    fun explicitNegativeActionFormsVetoPhotoAndTextQuestionDispatch() {
+        val negativeForms = listOf(
+            "앞에 글씨 읽으면 안 돼",
+            "앞에 글씨 읽으면 안 돼요",
+            "앞에 글씨 읽으면 안 된다",
+            "앞에 사진 안 찍어줘",
+            "앞에 사진 안 찍어",
+            "앞에 사진 안 찍을래",
+            "앞에 사진 안 찍는다",
+            "앞에 사진 안 찍음",
+            "앞에 글씨 안 읽어줘",
+            "앞에 글씨 안 읽어",
+            "앞에 텍스트 안 읽을래",
+            "앞에 글씨 안 읽는다",
+            "사진 안 찍어",
+            "사진 안 찍어줘",
+            "사진 안 찍을래",
+            "사진 안 보낼래",
+            "사진 안 보내줘",
+            "사진 안 보내",
+            "사진 찍으면 안 돼",
+            "사진 찍으면 안 됩니다",
+            "사진 촬영하면 안 돼",
+            "사진 촬영하면 안 됩니다",
+            "사진 보내면 안 돼",
+            "사진 보내면 안 돼요",
+            "질문 안 할래",
+            "질문 안 물어봐",
+            "챗지피티 물어보면 안 돼",
+            "앞에 카메라로 안 볼래",
+            "앞에 보지 마",
+            "앞에 글씨 읽지 마",
+            "앞에 사진 찍지 마",
+        )
+        for (phrase in negativeForms) {
+            val result = parse(phrase)
+            assertTrue("Expected Clarify for negative form '$phrase', got $result", result is Interpretation.Clarify)
+            val clarify = result as Interpretation.Clarify
+            assertEquals("원하는 명령을 하나만 다시 말해 주세요.", clarify.question)
+        }
+    }
+
+    @Test
+    fun directPhotoAndQuestionCancelReturnsExecuteCancel() {
+        val cancelForms = listOf(
+            "앞에 글씨 읽기 취소",
+            "글씨 읽기 취소",
+            "글자 읽기 취소",
+            "텍스트 읽기 취소",
+            "사진 취소",
+            "사진 찍기 취소",
+            "사진 촬영 취소",
+            "촬영 취소",
+            "질문 취소",
+            "앞에 보는 거 취소",
+            "챗지피티 취소",
+            "ChatGPT 취소",
+        )
+        for (phrase in cancelForms) {
+            val result = parse(phrase)
+            assertTrue("Expected Execute(Cancel) for '$phrase', got $result", result is Interpretation.Execute && result.command == AppCommand.Cancel)
+        }
+    }
+
+    @Test
+    fun directPhotoAndQuestionStopCancelsActiveQuestion() {
+        val stopForms = listOf(
+            "사진 중지",
+            "촬영 중지",
+            "사진 촬영 중지",
+            "질문 중지",
+            "글씨 읽기 중지",
+        )
+        for (phrase in stopForms) {
+            val result = parse(phrase)
+            assertTrue("Expected Execute(Cancel) for '$phrase', got $result", result is Interpretation.Execute && result.command == AppCommand.Cancel)
+        }
+    }
+
+    @Test
+    fun positiveVisualQuestionsWithAnOrProhibitionsRemainPhoto() {
+        val positivePhrases = listOf(
+            "앞에 있는 안내판 읽어줘",
+            "앞에 안내판 뭐라고 써 있어",
+            "앞에 출입 금지 표지판 읽어줘",
+            "전방 주차 금지 표지판 읽어줘",
+            "앞에 안전 표지판 읽어줘",
+            "눈앞에 보안 안내문 읽어줘",
+            "앞에 있는 간판 읽어줘",
+            "앞에 글씨 못 읽겠어 읽어줘",
+        )
+        for (phrase in positivePhrases) {
+            val result = parse(phrase)
+            assertTrue("Expected CloudPhotoQuestion for '$phrase', got $result", result is Interpretation.CloudPhotoQuestion)
+        }
     }
 }
