@@ -40,6 +40,7 @@ class OdDetectionDecodeTest {
         names[3] = "motorcycle"
         names[5] = "bus"
         names[7] = "truck"
+        names[9] = "traffic light"
         return names
     }
 
@@ -391,5 +392,216 @@ class OdDetectionDecodeTest {
             }
             simulateTensorImplCopyTo()
         }
+    }
+
+    @Test
+    fun trafficLightClass9IsDecodedWithCorrectGeometryAndLabel() {
+        val results = decode(
+            boxes = boxes(0.05f, 0.40f, 0.25f, 0.50f),
+            classes = floatArrayOf(9f),
+            scores = floatArrayOf(0.88f),
+            count = 1f,
+        )
+        assertEquals(1, results.size)
+        val detection = results[0]
+        assertEquals("classId must be 9", 9, detection.classId)
+        assertEquals("label must be traffic light", "traffic light", detection.label)
+        assertEquals(0.88f, detection.score, 1e-5f)
+        assertEquals("xmin -> left", 0.40f, detection.left, 1e-5f)
+        assertEquals("ymin -> top", 0.05f, detection.top, 1e-5f)
+        assertEquals("xmax -> right", 0.50f, detection.right, 1e-5f)
+        assertEquals("ymax -> bottom", 0.25f, detection.bottom, 1e-5f)
+    }
+
+    @Test
+    fun trafficLightWithLowScoreOrNanOrFractionalOrOutOfBoundsFollowsSameGuards() {
+        // Below score threshold
+        val lowScore = decode(
+            boxes = boxes(0.05f, 0.40f, 0.25f, 0.50f),
+            classes = floatArrayOf(9f),
+            scores = floatArrayOf(0.49f),
+            count = 1f,
+        )
+        assertTrue("traffic light with score < threshold must be dropped", lowScore.isEmpty())
+
+        // NaN score
+        val nanScore = decode(
+            boxes = boxes(0.05f, 0.40f, 0.25f, 0.50f),
+            classes = floatArrayOf(9f),
+            scores = floatArrayOf(Float.NaN),
+            count = 1f,
+        )
+        assertTrue("traffic light with NaN score must be dropped", nanScore.isEmpty())
+
+        // Fractional class ID
+        val fractionalClass = decode(
+            boxes = boxes(0.05f, 0.40f, 0.25f, 0.50f),
+            classes = floatArrayOf(9.2f),
+            scores = floatArrayOf(0.9f),
+            count = 1f,
+        )
+        assertTrue("fractional class 9.2f must be dropped", fractionalClass.isEmpty())
+
+        // Inverted box geometry (ymax < ymin)
+        val invertedBox = decode(
+            boxes = boxes(0.50f, 0.40f, 0.20f, 0.50f),
+            classes = floatArrayOf(9f),
+            scores = floatArrayOf(0.9f),
+            count = 1f,
+        )
+        assertTrue("inverted box coordinates must be dropped", invertedBox.isEmpty())
+
+        // Box slightly out of bounds gets clipped to [0, 1]
+        val oobBox = decode(
+            boxes = boxes(-0.1f, 0.40f, 0.25f, 1.2f),
+            classes = floatArrayOf(9f),
+            scores = floatArrayOf(0.9f),
+            count = 1f,
+        )
+        assertEquals(1, oobBox.size)
+        assertEquals(0f, oobBox[0].top, 1e-5f)
+        assertEquals(1f, oobBox[0].right, 1e-5f)
+    }
+
+    @Test
+    fun unsupportedCocoCategoriesAreDroppedWhileTrafficLightIsRetained() {
+        val boxes = boxes(
+            0.1f, 0.1f, 0.3f, 0.3f, // airplane (4)
+            0.2f, 0.2f, 0.4f, 0.4f, // train (6)
+            0.05f, 0.4f, 0.25f, 0.5f, // traffic light (9)
+            0.3f, 0.3f, 0.5f, 0.5f, // fire hydrant (10)
+        )
+        val classes = floatArrayOf(4f, 6f, 9f, 10f)
+        val scores = floatArrayOf(0.95f, 0.92f, 0.85f, 0.90f)
+        val results = decode(boxes, classes, scores, count = 4f)
+        assertEquals("only traffic light (9) should be retained from this list", 1, results.size)
+        assertEquals(9, results[0].classId)
+        assertEquals("traffic light", results[0].label)
+    }
+
+    @Test
+    fun mixedDetectionsExceedingCapPrioritizesObstaclesOverHigherScoringTrafficLights() {
+        // 10 high-scoring traffic lights (0.95 down to 0.86)
+        // 5 lower-scoring obstacles (0.60 down to 0.56)
+        // Total = 15 detections, cap = 12
+        val slots = 15
+        val boxesArray = FloatArray(slots * 4) { index ->
+            when (index % 4) {
+                0 -> 0.10f
+                1 -> 0.10f
+                2 -> 0.40f
+                else -> 0.40f
+            }
+        }
+        val classesArray = FloatArray(slots)
+        val scoresArray = FloatArray(slots)
+
+        // Slots 0..9: traffic lights (class 9, scores 0.95..0.86)
+        for (i in 0 until 10) {
+            classesArray[i] = 9f
+            scoresArray[i] = 0.95f - (i * 0.01f)
+        }
+        // Slots 10..14: obstacles (class 0=person, 2=car, scores 0.60..0.56)
+        for (i in 10 until 15) {
+            classesArray[i] = if (i % 2 == 0) 0f else 2f
+            scoresArray[i] = 0.60f - ((i - 10) * 0.01f)
+        }
+
+        val results = decode(
+            boxes = boxesArray,
+            classes = classesArray,
+            scores = scoresArray,
+            count = 15f,
+        )
+
+        assertEquals("must cap to maxDetections (12)", LiteRtObjectDetector.MAX_RESULTS, results.size)
+
+        // All 5 obstacles must be retained despite lower scores than traffic lights
+        val retainedObstacles = results.filter { it.classId != LiteRtObjectDetector.TRAFFIC_LIGHT_CLASS_ID }
+        val retainedLights = results.filter { it.classId == LiteRtObjectDetector.TRAFFIC_LIGHT_CLASS_ID }
+        assertEquals("all 5 obstacles must survive truncation", 5, retainedObstacles.size)
+        assertEquals("remaining 7 slots filled by top traffic lights", 7, retainedLights.size)
+
+        // Verify public ordering contract: retained list is sorted by descending score
+        for (i in 0 until results.size - 1) {
+            assertTrue("retained list must be sorted by descending score at $i", results[i].score >= results[i + 1].score)
+        }
+    }
+
+    @Test
+    fun allTrafficLightsExceedingCapTruncatesToMaxDetections() {
+        val slots = 16
+        val boxesArray = FloatArray(slots * 4) { index ->
+            when (index % 4) {
+                0 -> 0.10f
+                1 -> 0.10f
+                2 -> 0.40f
+                else -> 0.40f
+            }
+        }
+        val classesArray = FloatArray(slots) { 9f }
+        val scoresArray = FloatArray(slots) { 0.90f - (it * 0.01f) }
+
+        val results = decode(boxesArray, classesArray, scoresArray, count = slots.toFloat())
+        assertEquals(LiteRtObjectDetector.MAX_RESULTS, results.size)
+        assertTrue(results.all { it.classId == 9 })
+        for (i in 0 until results.size - 1) {
+            assertTrue(results[i].score >= results[i + 1].score)
+        }
+    }
+
+    @Test
+    fun allObstaclesExceedingCapPreservesTopObstaclesByScore() {
+        val slots = 16
+        val boxesArray = FloatArray(slots * 4) { index ->
+            when (index % 4) {
+                0 -> 0.10f
+                1 -> 0.10f
+                2 -> 0.40f
+                else -> 0.40f
+            }
+        }
+        val classesArray = FloatArray(slots) { (it % 3).toFloat() } // classes 0, 1, 2
+        val scoresArray = FloatArray(slots) { 0.90f - (it * 0.01f) }
+
+        val results = decode(boxesArray, classesArray, scoresArray, count = slots.toFloat())
+        assertEquals(LiteRtObjectDetector.MAX_RESULTS, results.size)
+        assertTrue(results.all { it.classId != 9 })
+        for (i in 0 until results.size - 1) {
+            assertTrue(results[i].score >= results[i + 1].score)
+        }
+    }
+
+    @Test
+    fun detectionsUnderOrEqualCapAreNotTruncated() {
+        // Exact cap (12)
+        val exactSlots = 12
+        val boxes12 = FloatArray(exactSlots * 4) { index ->
+            when (index % 4) {
+                0 -> 0.10f
+                1 -> 0.10f
+                2 -> 0.40f
+                else -> 0.40f
+            }
+        }
+        val classes12 = FloatArray(exactSlots) { if (it < 6) 0f else 9f }
+        val scores12 = FloatArray(exactSlots) { 0.80f }
+        val results12 = decode(boxes12, classes12, scores12, count = 12f)
+        assertEquals(12, results12.size)
+
+        // Under cap (5)
+        val underSlots = 5
+        val boxes5 = FloatArray(underSlots * 4) { index ->
+            when (index % 4) {
+                0 -> 0.10f
+                1 -> 0.10f
+                2 -> 0.40f
+                else -> 0.40f
+            }
+        }
+        val classes5 = FloatArray(underSlots) { if (it < 2) 2f else 9f }
+        val scores5 = FloatArray(underSlots) { 0.85f }
+        val results5 = decode(boxes5, classes5, scores5, count = 5f)
+        assertEquals(5, results5.size)
     }
 }

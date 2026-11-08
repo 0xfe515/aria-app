@@ -64,9 +64,26 @@ warm-up invocation. Nothing about the output layout is inferred from runtime val
 ## Category indices
 
 `classId` values are zero-based indices into the 90-line COCO label map (which has gaps), not a
-compacted 0..79 index. The helper reports only: person `0`, bicycle `1`, car `2`, motorcycle `3`,
-bus `5`, truck `7`; every other category is filtered out. No crosswalk (segmentation class) label is
-inferred from this model.
+compacted 0..79 index.
+
+Supported categories are split into display-only categories and obstacle hazard categories:
+
+- **Display categories (UI overlay bounding boxes):**
+  - Obstacles: person `0`, bicycle `1`, car `2`, motorcycle `3`, bus `5`, truck `7`
+  - Traffic light position: traffic light `9` (labeled `신호등`, neutral bounding box styling)
+  - Every other COCO category is filtered out.
+- **Hazard fusion categories (obstacle alerts):**
+  - Strictly limited to: person `0`, bicycle `1`, car `2`, motorcycle `3`, bus `5`, truck `7`.
+  - Category `9` (`traffic light`) is excluded from hazard fusion: it never triggers obstacle advisories,
+    never alters walkability assessment, and never implies safe crossing or signal permission.
+
+### Signal state & device accuracy disclaimer
+
+- The bundled model outputs 2D bounding boxes and category confidence only; it does **not** classify
+  signal state (red, amber, green, pedestrian walk/don't walk, or off).
+- Device accuracy for real-world traffic lights (especially small or distant signals) and on-device latency
+  remain unverified on physical hardware in this iteration; no hardware claims are made.
+- No crosswalk (segmentation class) label is inferred from this model.
 
 ## Runtime policy
 

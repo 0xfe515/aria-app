@@ -17,17 +17,16 @@ class CrosswalkOverlayRegressionTest {
     private fun overlayFor(mask: ByteArray): IntArray =
         IntArray(mask.size) { index ->
             val classId = mask[index].toInt() and 0xFF
-            // Use a default color for unknown classes
-            VisionContract.CLASS_OVERLAY_ARGB.getOrElse(classId) { 0x80123456.toInt() }
+            VisionContract.CLASS_OVERLAY_ARGB.getOrElse(classId) { VisionContract.OVERLAY_COLOR_RED }
         }
 
     @Test
     fun `class 3 small component suppression`() {
-        // Test that a small class 3 component (<32 pixels) is suppressed
+        // Test that a small class 3 component (<32 pixels) is suppressed to red (no transparent holes)
         val width = 10
         val height = 10
-        val mask = ByteArray(width * height) { 0 } // Background class 0
-        // Insert a small 4-pixel component (2x2 square) of class 3
+        val mask = ByteArray(width * height) { 0 } // Background class 0 (red)
+        // Insert a small 4-pixel component (2x2 square) of class 3 (green)
         mask[2 * width + 2] = 3
         mask[2 * width + 3] = 3
         mask[3 * width + 2] = 3
@@ -39,31 +38,28 @@ class CrosswalkOverlayRegressionTest {
 
         // Class mask should be unchanged
         assertArrayEquals(originalMask, mask)
-        // The 4-pixel component should be suppressed (made transparent)
-        assertEquals(0, overlay[2 * width + 2])
-        assertEquals(0, overlay[2 * width + 3])
-        assertEquals(0, overlay[3 * width + 2])
-        assertEquals(0, overlay[3 * width + 3])
-        // All other pixels should retain their overlay color (background)
+        // The 4-pixel green component should be suppressed to red
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[2 * width + 2])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[2 * width + 3])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[3 * width + 2])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[3 * width + 3])
+        // All other pixels should retain their red overlay color
         for (index in 0 until overlay.size) {
             val coords = index / width to index % width
             if (!(coords.first in 2..3 && coords.second in 2..3)) {
-                assertEquals(VisionContract.CLASS_OVERLAY_ARGB[0], overlay[index])
+                assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[index])
             }
         }
     }
 
     @Test
     fun `class 3 small component near zone insensitivity`() {
-        // Test that class 3 small components are suppressed even in near zone
+        // Test that class 3 small components are suppressed to red even in near zone
         val width = 20
         val height = 20
         val mask = ByteArray(width * height) { 0 } // Background class 0
-        // Place a small class 3 component in the near zone
-        // Near zone start in output coordinates: based on MODEL_HEIGHT=288, NEAR_ZONE_START_ROW=230
         val nearZoneStartRow = ((height.toLong() * OverlayComponentFilter.NEAR_ZONE_START_ROW + OverlayComponentFilter.MODEL_HEIGHT - 1) / OverlayComponentFilter.MODEL_HEIGHT).toInt()
-        // Place component so it touches the near zone but doesn't go out of bounds
-        val componentRow = nearZoneStartRow  // First row of near zone
+        val componentRow = nearZoneStartRow
         val componentCol = 5
         // Create a 3-pixel component (vertical line) starting at near zone boundary
         mask[componentRow * width + componentCol] = 3
@@ -76,18 +72,18 @@ class CrosswalkOverlayRegressionTest {
 
         // Class mask should be unchanged
         assertArrayEquals(originalMask, mask)
-        // The 3-pixel component should be suppressed despite touching near zone
-        assertEquals(0, overlay[componentRow * width + componentCol])
-        assertEquals(0, overlay[(componentRow + 1) * width + componentCol])
-        assertEquals(0, overlay[(componentRow + 2) * width + componentCol])
+        // The 3-pixel component should be suppressed to red despite touching near zone
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[componentRow * width + componentCol])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[(componentRow + 1) * width + componentCol])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[(componentRow + 2) * width + componentCol])
     }
 
     @Test
     fun `class 4 near zone exemption`() {
-        // Verify existing behavior: class 4 small components are preserved when touching near zone
+        // Obstacles (class 4 = person) remain red even tiny; no transparent hole
         val width = 10
         val height = 10
-        val mask = ByteArray(width * height) { 2 } // Default to sidewalk
+        val mask = ByteArray(width * height) { 2 } // Default to sidewalk (green)
         val nearZoneStartRow = ((height.toLong() * OverlayComponentFilter.NEAR_ZONE_START_ROW + OverlayComponentFilter.MODEL_HEIGHT - 1) / OverlayComponentFilter.MODEL_HEIGHT).toInt()
         val componentRow = nearZoneStartRow + 1
         val componentCol = 5
@@ -97,18 +93,16 @@ class CrosswalkOverlayRegressionTest {
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width, height)
 
-        // Class mask unchanged
         assertArrayEquals(originalMask, mask)
-        // Class 4 component should be preserved (not suppressed)
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[4], overlay[componentRow * width + componentCol])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[componentRow * width + componentCol])
     }
 
     @Test
     fun `class 5 near zone exemption`() {
-        // Verify existing behavior: class 5 small components are preserved when touching near zone
+        // Obstacles (class 5 = vehicle) remain red even tiny
         val width = 10
         val height = 10
-        val mask = ByteArray(width * height) { 2 } // Default to sidewalk
+        val mask = ByteArray(width * height) { 2 } // Default to sidewalk (green)
         val nearZoneStartRow = ((height.toLong() * OverlayComponentFilter.NEAR_ZONE_START_ROW + OverlayComponentFilter.MODEL_HEIGHT - 1) / OverlayComponentFilter.MODEL_HEIGHT).toInt()
         val componentRow = nearZoneStartRow + 1
         val componentCol = 5
@@ -118,18 +112,16 @@ class CrosswalkOverlayRegressionTest {
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width, height)
 
-        // Class mask unchanged
         assertArrayEquals(originalMask, mask)
-        // Class 5 component should be preserved
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[5], overlay[componentRow * width + componentCol])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[componentRow * width + componentCol])
     }
 
     @Test
     fun `class 6 near zone exemption`() {
-        // Verify existing behavior: class 6 small components are preserved when touching near zone
+        // Obstacles (class 6 = pole_sign) remain red even tiny
         val width = 10
         val height = 10
-        val mask = ByteArray(width * height) { 2 } // Default to sidewalk
+        val mask = ByteArray(width * height) { 2 } // Default to sidewalk (green)
         val nearZoneStartRow = ((height.toLong() * OverlayComponentFilter.NEAR_ZONE_START_ROW + OverlayComponentFilter.MODEL_HEIGHT - 1) / OverlayComponentFilter.MODEL_HEIGHT).toInt()
         val componentRow = nearZoneStartRow + 1
         val componentCol = 5
@@ -139,19 +131,16 @@ class CrosswalkOverlayRegressionTest {
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width, height)
 
-        // Class mask unchanged
         assertArrayEquals(originalMask, mask)
-        // Class 6 component should be preserved
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[6], overlay[componentRow * width + componentCol])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[componentRow * width + componentCol])
     }
 
     @Test
     fun `non near zone class 4 suppression`() {
-        // Verify that class 4 small components are suppressed when NOT in near zone
+        // In binary display, obstacles (person) anywhere in the frame remain red even tiny
         val width = 10
         val height = 10
-        val mask = ByteArray(width * height) { 2 } // Default to sidewalk
-        // Place component well above near zone
+        val mask = ByteArray(width * height) { 2 } // Default to sidewalk (green)
         val componentRow = 2
         val componentCol = 5
         mask[componentRow * width + componentCol] = 4 // person
@@ -160,19 +149,18 @@ class CrosswalkOverlayRegressionTest {
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width, height)
 
-        // Class mask unchanged
         assertArrayEquals(originalMask, mask)
-        // Single pixel component should be suppressed
-        assertEquals(0, overlay[componentRow * width + componentCol])
+        // Obstacle remains red; no transparent hole punched
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[componentRow * width + componentCol])
     }
 
     @Test
     fun `large component preservation`() {
-        // Verify that large components (>=32 pixels) are preserved
+        // Verify that large components (>=32 pixels) of class 3 are preserved as green
         val width = 10
         val height = 10
-        val mask = ByteArray(width * height) { 0 } // Background class 0
-        // Create a 6x6 component (36 pixels) of class 3
+        val mask = ByteArray(width * height) { 0 } // Background class 0 (red)
+        // Create a 6x6 component (36 pixels) of class 3 (green)
         for (row in 2..7) {
             for (col in 2..7) {
                 mask[row * width + col] = 3
@@ -185,57 +173,53 @@ class CrosswalkOverlayRegressionTest {
 
         // Class mask should be unchanged
         assertArrayEquals(originalMask, mask)
-        // All pixels in the component should be preserved
+        // All pixels in the component should be preserved as green
         for (row in 2..7) {
             for (col in 2..7) {
-                assertEquals(VisionContract.CLASS_OVERLAY_ARGB[3], overlay[row * width + col])
+                assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[row * width + col])
             }
         }
-        // Background pixels should remain unchanged
+        // Background pixels should remain red
         for (index in 0 until overlay.size) {
             val coords = index / width to index % width
             if (!(coords.first in 2..7 && coords.second in 2..7)) {
-                assertEquals(VisionContract.CLASS_OVERLAY_ARGB[0], overlay[index])
+                assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[index])
             }
         }
     }
 
     @Test
     fun `diagonal connectivity`() {
-        // Verify diagonal connections are considered (based on existing test)
-        val mask = ByteArray(4) { 0 } // Background class 0
-        mask[0] = 3  // Top-left corner
-        mask[3] = 3  // Bottom-right corner (diagonal)
+        // Verify diagonal connections are considered
+        val mask = ByteArray(4) { 0 } // Background class 0 (red)
+        mask[0] = 3  // Top-left corner (green)
+        mask[3] = 3  // Bottom-right corner (diagonal, green)
         val overlay = overlayFor(mask)
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width = 2, height = 2, minimumComponentPixels = 2)
 
-        // With 2-pixel minimum, the two diagonal pixels should be considered connected
-        // and thus preserved (since component size=2 >= minimum)
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[3], overlay[0])
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[3], overlay[3])
-        // Other pixels should remain background
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[0], overlay[1]) // Top-right
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[0], overlay[2]) // Bottom-left
+        // With 2-pixel minimum, the two diagonal pixels are connected and preserved as green
+        assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[3])
+        // Other pixels remain red
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[1])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[2])
     }
 
     @Test
     fun `class isolation`() {
-        // Verify different classes don't connect (based on existing test).
-        // Start from background so each inserted class forms an isolated single-pixel
-        // component; otherwise leftover class-3 pixels merge and exceed the minimum.
         val mask = ByteArray(4) { 0 }
-        mask[0] = 3
-        mask[1] = 4 // Different class
+        mask[0] = 3 // class 3 (green, size 1 < 2 -> suppressed to red)
+        mask[1] = 4 // class 4 (obstacle -> remains red)
         val originalMask = mask.copyOf()
         val overlay = overlayFor(mask)
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width = 2, height = 2, minimumComponentPixels = 2)
 
         assertArrayEquals(originalMask, mask)
-        assertEquals(0, overlay[0]) // Class 3 pixel suppressed (size=1 < 2)
-        assertEquals(0, overlay[1]) // Class 4 pixel suppressed (size=1 < 2)
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[0], overlay[2]) // Background unchanged
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[0], overlay[3]) // Background unchanged
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[1])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[2])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[3])
     }
 }

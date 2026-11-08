@@ -74,17 +74,28 @@ object VisionContract {
     )
 
     /**
-     * Class order and colors matching upstream `seg_multi.py` and `test_video_multi.py` (`PALETTE` BGR converted to ARGB).
-     * Note: Class 3 (`crosswalk`) is learned via upstream AI Hub fine-tuning (`train_finetune.py`, IoU ~0.729).
+     * Unified binary presentation colors for accessibility overlay.
+     * GREEN (0x8039FF39) denotes walkable sidewalk and crosswalk areas.
+     * RED (0x80FF3939) denotes non-walkable surfaces, obstacles, and background.
+     * Both colors share an identical alpha channel (0x80) for display consistency.
+     */
+    const val OVERLAY_COLOR_GREEN: Int = 0x8039FF39.toInt()
+    const val OVERLAY_COLOR_RED: Int = 0x80FF3939.toInt()
+
+    /**
+     * Class order matching upstream `tulg580/vision_model` 7-class MobileNetV2/U-Net export.
+     * Semantic indices and walkable flags remain byte-for-byte identical to upstream contracts.
+     * Presentation overlay colors map walkable classes (2 = sidewalk, 3 = crosswalk) to GREEN,
+     * and non-walkable classes (0, 1, 4, 5, 6) or invalid classes to RED for binary display.
      */
     val CLASSES: List<ClassSpec> = listOf(
-        ClassSpec(0, "other", "기타·배경", walkable = false, overlayArgb = 0x00000000),
-        ClassSpec(1, "road", "도로", walkable = false, overlayArgb = 0x80FF3939.toInt()),
-        ClassSpec(2, "sidewalk", "인도", walkable = true, overlayArgb = 0x8039FF39.toInt()),
-        ClassSpec(3, "crosswalk", "횡단보도", walkable = true, overlayArgb = 0x803939FF.toInt()),
-        ClassSpec(4, "person", "사람", walkable = false, overlayArgb = 0x80FFFF39.toInt()),
-        ClassSpec(5, "vehicle", "차량", walkable = false, overlayArgb = 0x80FF39FF.toInt()),
-        ClassSpec(6, "pole_sign", "기둥·표지판", walkable = false, overlayArgb = 0x8039FFFF.toInt()),
+        ClassSpec(0, "other", "기타·배경", walkable = false, overlayArgb = OVERLAY_COLOR_RED),
+        ClassSpec(1, "road", "도로", walkable = false, overlayArgb = OVERLAY_COLOR_RED),
+        ClassSpec(2, "sidewalk", "인도", walkable = true, overlayArgb = OVERLAY_COLOR_GREEN),
+        ClassSpec(3, "crosswalk", "횡단보도", walkable = true, overlayArgb = OVERLAY_COLOR_GREEN),
+        ClassSpec(4, "person", "사람", walkable = false, overlayArgb = OVERLAY_COLOR_RED),
+        ClassSpec(5, "vehicle", "차량", walkable = false, overlayArgb = OVERLAY_COLOR_RED),
+        ClassSpec(6, "pole_sign", "기둥·표지판", walkable = false, overlayArgb = OVERLAY_COLOR_RED),
     )
 
     val CLASS_OVERLAY_ARGB = IntArray(CLASSES.size) { CLASSES[it].overlayArgb }

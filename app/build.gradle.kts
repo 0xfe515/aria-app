@@ -321,8 +321,8 @@ android {
         applicationId = "com.ariateam.aria"
         minSdk = 31
         targetSdk = 37
-        versionCode = 9
-        versionName = "1.0.0-preview.20261108.2"
+        versionCode = 10
+        versionName = "1.0.0-preview.20261108.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         proguardFiles(

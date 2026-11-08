@@ -18,17 +18,19 @@ class OverlayComponentFilterTest {
     fun suppressesIsolatedSpeckleInOverlayOnly() {
         val width = 8
         val height = 8
-        val mask = ByteArray(width * height) { 2 }
-        mask[0] = 1
+        // Red background with a single green pixel
+        val mask = ByteArray(width * height) { 1 }
+        mask[0] = 2
         val originalMask = mask.copyOf()
         val overlay = overlayFor(mask)
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width, height)
 
         assertArrayEquals(originalMask, mask)
-        assertEquals(0, overlay[0])
+        // Noisy green speckle (<32 pixels) becomes red; no transparent holes
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[0])
         for (index in 1 until overlay.size) {
-            assertEquals(VisionContract.CLASS_OVERLAY_ARGB[2], overlay[index])
+            assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[index])
         }
     }
 
@@ -101,9 +103,10 @@ class OverlayComponentFilterTest {
             assertEquals(1_000_000L, output.postprocessDurationNanos)
             val bitmapColors = capturedColors.get()
             assertNotNull(bitmapColors)
-            assertEquals(0, bitmapColors!![0])
-            assertEquals(0, bitmapColors[1])
-            assertEquals(VisionContract.CLASS_OVERLAY_ARGB[2], bitmapColors[2])
+            // Class 1 (road) is an obstacle/non-walkable class: it remains RED even tiny
+            assertEquals(VisionContract.OVERLAY_COLOR_RED, bitmapColors!![0])
+            assertEquals(VisionContract.OVERLAY_COLOR_RED, bitmapColors[1])
+            assertEquals(VisionContract.OVERLAY_COLOR_GREEN, bitmapColors[2])
         } finally {
             segmenter.close()
             tempPath.toFile().delete()
@@ -112,49 +115,52 @@ class OverlayComponentFilterTest {
 
     @Test
     fun connectsDiagonallyAndKeepsComponentAtThreshold() {
-        val mask = ByteArray(4) { 2 }
-        mask[0] = 1
-        mask[3] = 1
+        val mask = ByteArray(4) { 1 }
+        mask[0] = 2
+        mask[3] = 2
         val overlay = overlayFor(mask)
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width = 2, height = 2, minimumComponentPixels = 2)
 
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[1], overlay[0])
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[1], overlay[3])
+        assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[3])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[1])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[2])
     }
 
     @Test
     fun thresholdsZero16_32And64ApplyStrictLessThanRule() {
         val width = 8
         val height = 8
-        val mask = ByteArray(width * height) { 2 }
+        val mask = ByteArray(width * height) { 1 }
         for (y in 1..4) {
             for (x in 1..4) {
-                mask[y * width + x] = 1
+                mask[y * width + x] = 2
             }
         }
 
         for ((threshold, expectedVisiblePixels) in listOf(0 to 16, 16 to 16, 32 to 0, 64 to 0)) {
             val overlay = overlayFor(mask)
             OverlayComponentFilter().suppressSmallComponents(mask, overlay, width, height, threshold)
-            val visibleClassOnePixels = overlay.count { it == VisionContract.CLASS_OVERLAY_ARGB[1] }
-            assertEquals("threshold=$threshold", expectedVisiblePixels, visibleClassOnePixels)
+            val visibleGreenPixels = overlay.count { it == VisionContract.OVERLAY_COLOR_GREEN }
+            assertEquals("threshold=$threshold", expectedVisiblePixels, visibleGreenPixels)
         }
     }
 
     @Test
     fun separatesAdjacentClassesWhenFindingComponents() {
-        val mask = ByteArray(4) { 2 }
-        mask[0] = 1
-        mask[1] = 3
+        val mask = ByteArray(4) { 1 }
+        mask[0] = 2
+        mask[1] = 4
         val originalMask = mask.copyOf()
         val overlay = overlayFor(mask)
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width = 2, height = 2, minimumComponentPixels = 2)
 
         assertArrayEquals(originalMask, mask)
-        assertEquals(0, overlay[0])
-        assertEquals(0, overlay[1])
+        // Green component size 1 < 2 is suppressed to red; obstacle class 4 remains red
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[1])
     }
 
     @Test
@@ -171,65 +177,68 @@ class OverlayComponentFilterTest {
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width, height)
 
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[4], overlay[7 * width])
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[4], overlay[8 * width])
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[5], overlay[8 * width + 2])
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[6], overlay[8 * width + 4])
-        assertEquals(0, overlay[7 * width + 8])
+        // All obstacles remain red even tiny; no transparent holes are punched
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[7 * width])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[8 * width])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[8 * width + 2])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[8 * width + 4])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[7 * width + 8])
     }
 
     @Test
     fun preservesInvalidLabelsConservativelyAndFiltersValidComponents() {
         val mask = byteArrayOf(255.toByte(), 7, 1, 2)
         val originalMask = mask.copyOf()
-        val overlay = intArrayOf(0x80112233.toInt(), 0x80445566.toInt(), VisionContract.CLASS_OVERLAY_ARGB[1], VisionContract.CLASS_OVERLAY_ARGB[2])
+        val overlay = intArrayOf(0x80112233.toInt(), 0x80445566.toInt(), VisionContract.OVERLAY_COLOR_RED, VisionContract.OVERLAY_COLOR_GREEN)
         val invalidOverlayColors = overlay.copyOfRange(0, 2)
 
         OverlayComponentFilter().suppressSmallComponents(mask, overlay, width = 2, height = 2)
 
         assertArrayEquals(originalMask, mask)
         assertArrayEquals(invalidOverlayColors, overlay.copyOfRange(0, 2))
-        assertEquals(0, overlay[2])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[2])
+        // Green component of size 1 < 32 is suppressed to red
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[3])
     }
 
     @Test
     fun handlesEdgesAndAllImageComponents() {
-        val edgeMask = ByteArray(16) { 2 }
-        edgeMask[0] = 3
-        edgeMask[1] = 3
+        val edgeMask = ByteArray(16) { 1 }
+        edgeMask[0] = 2
+        edgeMask[1] = 2
         val edgeOverlay = overlayFor(edgeMask)
         OverlayComponentFilter().suppressSmallComponents(edgeMask, edgeOverlay, width = 4, height = 4, minimumComponentPixels = 3)
-        assertEquals(0, edgeOverlay[0])
-        assertEquals(0, edgeOverlay[1])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, edgeOverlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, edgeOverlay[1])
 
         val fullMask = ByteArray(9) { 1 }
         val fullOverlay = overlayFor(fullMask)
         OverlayComponentFilter().suppressSmallComponents(fullMask, fullOverlay, width = 3, height = 3, minimumComponentPixels = 9)
-        assertArrayEquals(IntArray(9) { VisionContract.CLASS_OVERLAY_ARGB[1] }, fullOverlay)
+        assertArrayEquals(IntArray(9) { VisionContract.OVERLAY_COLOR_RED }, fullOverlay)
     }
 
     @Test
     fun repeatedCallsUseFreshVisitedState() {
         val filter = OverlayComponentFilter()
-        val mask = ByteArray(9) { 2 }
-        mask[0] = 1
+        val mask = ByteArray(9) { 1 }
+        mask[0] = 2
         val overlay = overlayFor(mask)
         filter.suppressSmallComponents(mask, overlay, width = 3, height = 3, minimumComponentPixels = 2)
-        assertEquals(0, overlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[0])
 
-        mask[1] = 1
-        overlay[0] = VisionContract.CLASS_OVERLAY_ARGB[1]
-        overlay[1] = VisionContract.CLASS_OVERLAY_ARGB[1]
+        mask[1] = 2
+        overlay[0] = VisionContract.OVERLAY_COLOR_GREEN
+        overlay[1] = VisionContract.OVERLAY_COLOR_GREEN
         filter.suppressSmallComponents(mask, overlay, width = 3, height = 3, minimumComponentPixels = 2)
 
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[1], overlay[0])
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[1], overlay[1])
+        assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[1])
     }
 
     private fun overlayFor(mask: ByteArray): IntArray =
         IntArray(mask.size) { index ->
             val classId = mask[index].toInt() and 0xFF
-            VisionContract.CLASS_OVERLAY_ARGB.getOrElse(classId) { 0x80123456.toInt() }
+            VisionContract.CLASS_OVERLAY_ARGB.getOrElse(classId) { VisionContract.OVERLAY_COLOR_RED }
         }
 
     private fun assertDecoderOutputOnlyFiltersOverlay(
@@ -276,7 +285,8 @@ class OverlayComponentFilterTest {
         assertEquals(originalSummary, filteredSummary)
         assertEquals(1, filteredSummary.classPixelCounts[1])
         assertEquals(63, filteredSummary.classPixelCounts[2])
-        assertEquals(0, overlay[0])
-        assertEquals(VisionContract.CLASS_OVERLAY_ARGB[2], overlay[1])
+        // Class 1 (road) pixel remains red; class 2 (sidewalk) pixel remains green
+        assertEquals(VisionContract.OVERLAY_COLOR_RED, overlay[0])
+        assertEquals(VisionContract.OVERLAY_COLOR_GREEN, overlay[1])
     }
 }

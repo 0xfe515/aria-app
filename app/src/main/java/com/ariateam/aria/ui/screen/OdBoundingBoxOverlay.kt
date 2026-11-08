@@ -70,6 +70,7 @@ val KOREAN_OBSTACLE_LABELS: Map<Int, String> = mapOf(
     3 to "오토바이",
     5 to "버스",
     7 to "트럭",
+    9 to "신호등",
 )
 
 fun formatKoreanClassLabel(classId: Int, fallbackLabel: String = ""): String {

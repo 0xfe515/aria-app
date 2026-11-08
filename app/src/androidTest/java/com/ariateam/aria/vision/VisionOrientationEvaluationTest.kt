@@ -35,13 +35,13 @@ class VisionOrientationEvaluationTest {
     fun syntheticAsymmetricMarkersVerifyPairedOrientationTransforms() {
         assertArrayEquals(
             intArrayOf(
-                0x00000000,
-                0x80FF3939.toInt(),
-                0x8039FF39.toInt(),
-                0x803939FF.toInt(),
-                0x80FFFF39.toInt(),
-                0x80FF39FF.toInt(),
-                0x8039FFFF.toInt(),
+                VisionContract.OVERLAY_COLOR_RED,
+                VisionContract.OVERLAY_COLOR_RED,
+                VisionContract.OVERLAY_COLOR_GREEN,
+                VisionContract.OVERLAY_COLOR_GREEN,
+                VisionContract.OVERLAY_COLOR_RED,
+                VisionContract.OVERLAY_COLOR_RED,
+                VisionContract.OVERLAY_COLOR_RED,
             ),
             VisionContract.CLASS_OVERLAY_ARGB,
         )

@@ -611,7 +611,12 @@ class LiteRtVisionSegmenter internal constructor(
     val reusableOverlayArgb: IntArray by lazy {
         IntArray(VisionContract.INPUT_PIXELS)
     }
+    val reusableCrosswalkRegion: BooleanArray by lazy {
+        BooleanArray(VisionContract.INPUT_PIXELS)
+    }
+    private val crosswalkRegionEstimator = CrosswalkRegionEstimator()
     private val overlayComponentFilter = OverlayComponentFilter()
+    internal val binaryVisionOverlayRenderer = BinaryVisionOverlayRenderer(overlayComponentFilter)
 
     class PreparedModelSession internal constructor(
         internal val mappedBuffer: MappedByteBuffer,
@@ -1144,7 +1149,9 @@ class LiteRtVisionSegmenter internal constructor(
                     transform = transform,
                     modelWidth = VisionContract.MODEL_INPUT_WIDTH,
                     modelHeight = VisionContract.MODEL_INPUT_HEIGHT,
-                    overlayComponentFilter = overlayComponentFilter,
+                    binaryVisionOverlayRenderer = binaryVisionOverlayRenderer,
+                    crosswalkRegionEstimator = crosswalkRegionEstimator,
+                    crosswalkRegionBuffer = reusableCrosswalkRegion,
                 )
                 val bitmap = if (produceOverlayBitmap) {
                     bitmapFactory.create(reusableOverlayArgb, VisionContract.MODEL_WIDTH, VisionContract.MODEL_HEIGHT)
@@ -1380,6 +1387,11 @@ class LiteRtVisionSegmenter internal constructor(
         }
 
 
+        private val staticEstimatorLock = Any()
+        private val staticEstimator = CrosswalkRegionEstimator()
+        private var staticCrosswalkRegion = BooleanArray(0)
+        private val staticRenderer = BinaryVisionOverlayRenderer()
+
         fun decodeArgmaxAndMask(
             probabilities: FloatArray,
             outClassMask: ByteArray,
@@ -1391,20 +1403,53 @@ class LiteRtVisionSegmenter internal constructor(
             transform: UprightCropRect? = null,
             modelWidth: Int = width,
             modelHeight: Int = height,
-        ): VisionSegmentationSummary = decodeArgmaxAndMaskInternal(
-            probabilities = probabilities,
-            outClassMask = outClassMask,
-            outOverlayArgb = outOverlayArgb,
-            width = width,
-            height = height,
-            numClasses = numClasses,
-            roiStartRow = roiStartRow,
-            transform = transform,
-            modelWidth = modelWidth,
-            modelHeight = modelHeight,
-            overlayComponentFilter = OverlayComponentFilter(),
-            minimumOverlayComponentPixels = OverlayComponentFilter.DEFAULT_MINIMUM_COMPONENT_PIXELS,
-        )
+        ): VisionSegmentationSummary {
+            if (outOverlayArgb == null) {
+                return decodeArgmaxAndMaskInternal(
+                    probabilities = probabilities,
+                    outClassMask = outClassMask,
+                    outOverlayArgb = null,
+                    width = width,
+                    height = height,
+                    numClasses = numClasses,
+                    roiStartRow = roiStartRow,
+                    transform = transform,
+                    modelWidth = modelWidth,
+                    modelHeight = modelHeight,
+                    crosswalkRegionEstimator = null,
+                    crosswalkRegionBuffer = null,
+                )
+            }
+
+            require(width > 0 && height > 0 && width <= Int.MAX_VALUE / height) {
+                "Dimensions must be positive and fit in an Int: width=$width, height=$height"
+            }
+            val pixelCount = width * height
+            require(outClassMask.size >= pixelCount && outOverlayArgb.size >= pixelCount) {
+                "Output mask arrays too small for ${width}x${height}"
+            }
+
+            return synchronized(staticEstimatorLock) {
+                if (staticCrosswalkRegion.size < pixelCount) {
+                    staticCrosswalkRegion = BooleanArray(pixelCount)
+                }
+                decodeArgmaxAndMaskInternal(
+                    probabilities = probabilities,
+                    outClassMask = outClassMask,
+                    outOverlayArgb = outOverlayArgb,
+                    width = width,
+                    height = height,
+                    numClasses = numClasses,
+                    roiStartRow = roiStartRow,
+                    transform = transform,
+                    modelWidth = modelWidth,
+                    modelHeight = modelHeight,
+                    binaryVisionOverlayRenderer = staticRenderer,
+                    crosswalkRegionEstimator = staticEstimator,
+                    crosswalkRegionBuffer = staticCrosswalkRegion,
+                )
+            }
+        }
 
         internal fun decodeArgmaxAndMaskInternal(
             probabilities: FloatArray,
@@ -1417,7 +1462,10 @@ class LiteRtVisionSegmenter internal constructor(
             transform: UprightCropRect?,
             modelWidth: Int,
             modelHeight: Int,
-            overlayComponentFilter: OverlayComponentFilter,
+            binaryVisionOverlayRenderer: BinaryVisionOverlayRenderer? = null,
+            overlayComponentFilter: OverlayComponentFilter? = null,
+            crosswalkRegionEstimator: CrosswalkRegionEstimator? = null,
+            crosswalkRegionBuffer: BooleanArray? = null,
             minimumOverlayComponentPixels: Int = OverlayComponentFilter.DEFAULT_MINIMUM_COMPONENT_PIXELS,
         ): VisionSegmentationSummary {
             require(width > 0 && height > 0 && modelWidth > 0 && modelHeight > 0 && numClasses > 0) {
@@ -1432,7 +1480,6 @@ class LiteRtVisionSegmenter internal constructor(
                 "Output mask arrays too small for ${width}x${height}"
             }
 
-            val colors = VisionContract.CLASS_OVERLAY_ARGB
             val walkableFlags = VisionContract.CLASS_WALKABLE
             val classCounts = IntArray(numClasses)
             val centerBlockedCounts = IntArray(numClasses)
@@ -1467,7 +1514,6 @@ class LiteRtVisionSegmenter internal constructor(
                         probOffset += numClasses
 
                         outClassMask[pixelIndex] = bestClass.toByte()
-                        outOverlayArgb?.set(pixelIndex, colors[bestClass])
                         classCounts[bestClass]++
 
                         if (inRoi) {
@@ -1561,7 +1607,6 @@ class LiteRtVisionSegmenter internal constructor(
                         }
 
                         outClassMask[pixelIndex] = bestClass.toByte()
-                        outOverlayArgb?.set(pixelIndex, colors[bestClass])
                         classCounts[bestClass]++
 
                         if (inRoi) {
@@ -1591,11 +1636,15 @@ class LiteRtVisionSegmenter internal constructor(
             }
 
             if (outOverlayArgb != null) {
-                overlayComponentFilter.suppressSmallComponents(
+                val renderer = binaryVisionOverlayRenderer
+                    ?: (if (overlayComponentFilter != null) BinaryVisionOverlayRenderer(overlayComponentFilter) else BinaryVisionOverlayRenderer())
+                renderer.renderOverlay(
                     classMask = outClassMask,
-                    overlayArgb = outOverlayArgb,
+                    outOverlayArgb = outOverlayArgb,
                     width = width,
                     height = height,
+                    crosswalkRegionEstimator = crosswalkRegionEstimator,
+                    crosswalkRegionBuffer = crosswalkRegionBuffer,
                     minimumComponentPixels = minimumOverlayComponentPixels,
                 )
             }

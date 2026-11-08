@@ -737,4 +737,93 @@ class OdBoxGeometryCalculatorTest {
         assertEquals(1, boxes2.size)
         assertEquals("자동차", boxes2[0].koreanLabel)
     }
+
+    @Test
+    fun mapAndClip_trafficLightFormatsWithKoreanLabelAndPercentage() {
+        val trafficLightObj = makeObj(
+            classId = 9,
+            label = "traffic light",
+            score = 0.92f,
+            left = 0.40f,
+            top = 0.05f,
+            right = 0.60f,
+            bottom = 0.25f,
+        )
+        val box = OdBoxGeometryCalculator.mapAndClip(
+            detection = trafficLightObj,
+            cropLeftPx = 50f,
+            cropTopPx = 100f,
+            cropWidthPx = 300f,
+            cropHeightPx = 400f,
+        )
+        assertNotNull(box)
+        assertEquals(9, box!!.classId)
+        assertEquals("신호등", box.koreanLabel)
+        assertEquals("신호등 92%", box.formattedLabel)
+        assertEquals(170f, box.rectLeftPx, 0.01f)
+        assertEquals(120f, box.rectTopPx, 0.01f)
+        assertEquals(230f, box.rectRightPx, 0.01f)
+        assertEquals(200f, box.rectBottomPx, 0.01f)
+    }
+
+    @Test
+    fun formatKoreanClassLabel_mapsAllSupportedClassesIncludingTrafficLight() {
+        assertEquals("사람", formatKoreanClassLabel(0))
+        assertEquals("자전거", formatKoreanClassLabel(1))
+        assertEquals("자동차", formatKoreanClassLabel(2))
+        assertEquals("오토바이", formatKoreanClassLabel(3))
+        assertEquals("버스", formatKoreanClassLabel(5))
+        assertEquals("트럭", formatKoreanClassLabel(7))
+        assertEquals("신호등", formatKoreanClassLabel(9))
+        assertEquals("장애물", formatKoreanClassLabel(4))
+        assertEquals("custom", formatKoreanClassLabel(4, fallbackLabel = "custom"))
+    }
+
+    @Test
+    fun evaluateBoxes_trafficLightBoxRenderedAndClearedOnCameraStopOrUnfresh() {
+        val now = 1_000_000_000L
+        val trafficLightObj = makeObj(classId = 9, label = "traffic light", score = 0.90f)
+        val snapshot = OdOverlaySnapshot(
+            detections = listOf(trafficLightObj),
+            expiresAtElapsedNanos = now + 500_000_000L,
+            holdUntilNextResult = true,
+        )
+
+        // 1. Rendered when active
+        val rendered = OdBoxGeometryCalculator.evaluateBoxes(
+            cameraStatus = CameraSessionStatus.Running,
+            modelLoaded = true,
+            hasFreshImage = true,
+            odOverlay = snapshot,
+            nowElapsedRealtimeNanos = now,
+            cropLeftPx = 0f,
+            cropTopPx = 0f,
+            cropWidthPx = 300f,
+            cropHeightPx = 300f,
+        )
+        assertEquals(1, rendered.size)
+        assertEquals(9, rendered[0].classId)
+        assertEquals("신호등", rendered[0].koreanLabel)
+        assertEquals("신호등 90%", rendered[0].formattedLabel)
+
+        // TalkBack accessibility summary
+        val accessibilityDesc = OdBoxGeometryCalculator.buildAccessibilityDescription(rendered)
+        assertNotNull(accessibilityDesc)
+        assertTrue(accessibilityDesc!!.contains("신호등 90%"))
+        assertFalse(accessibilityDesc.contains("초록") || accessibilityDesc.contains("빨강") || accessibilityDesc.contains("건너"))
+
+        // 2. Cleared on camera stop
+        val stoppedBoxes = OdBoxGeometryCalculator.evaluateBoxes(
+            cameraStatus = CameraSessionStatus.Stopped,
+            modelLoaded = true,
+            hasFreshImage = true,
+            odOverlay = snapshot,
+            nowElapsedRealtimeNanos = now,
+            cropLeftPx = 0f,
+            cropTopPx = 0f,
+            cropWidthPx = 300f,
+            cropHeightPx = 300f,
+        )
+        assertTrue(stoppedBoxes.isEmpty())
+    }
 }

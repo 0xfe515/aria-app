@@ -704,4 +704,131 @@ class ObjectDetectionHazardFusionTest {
         assertEquals(OdFusionRejection.BASE_ALREADY_WORSE, outcome.rejection)
         assertEquals(warningBase, outcome.assessment)
     }
+
+    @Test
+    fun trafficLightDetectionNeverCreatesAdvisoryOrModifiesHazardEvenAcrossMultipleFrames() {
+        val fusion = fusion()
+        val baseAssessment = base(level = HazardLevel.CLEAR_UNWARNED, message = "안전")
+        val trafficLightObj = DetectedObject(
+            classId = 9,
+            label = "traffic light",
+            score = 0.98f,
+            left = 0.40f,
+            top = 0.10f,
+            right = 0.60f,
+            bottom = 0.95f, // Even in lower corridor band
+        )
+
+        var t = 1_000_000_000L
+        for (frameIndex in 1..5) {
+            val outcome = fusion.pass(
+                base = baseAssessment,
+                evidence = evidence(t, listOf(trafficLightObj)),
+                frameCaptureTimestampNanos = t + 50_000_000L,
+            )
+            assertFalse("Traffic light must never apply hazard advisory (frame $frameIndex)", outcome.advisoryApplied)
+            assertEquals("Traffic light must be rejected as no eligible obstacle", OdFusionRejection.NO_ELIGIBLE_OBJECT, outcome.rejection)
+            assertEquals("Base assessment must be preserved byte-for-byte", baseAssessment, outcome.assessment)
+            assertEquals("Hazard level unchanged", HazardLevel.CLEAR_UNWARNED, outcome.assessment.level)
+            assertFalse("Never an alert candidate", outcome.assessment.isAlertCandidate)
+            t += 200_000_000L
+        }
+    }
+
+    @Test
+    fun trafficLightAlongsideObstacleAllowsObstacleHazardWithoutInterference() {
+        val fusion = fusion()
+        val baseAssessment = base()
+        val trafficLight = DetectedObject(classId = 9, label = "traffic light", score = 0.99f, left = 0.4f, top = 0.1f, right = 0.6f, bottom = 0.9f)
+        val car = detection(classId = 2, label = "car", score = 0.85f)
+
+        val t1 = 1_000_000_000L
+        val t2 = t1 + 200_000_000L
+
+        // Reference baseline: car alone
+        val carOnlyFusion = fusion()
+        val carOnly1 = carOnlyFusion.pass(
+            base = baseAssessment,
+            evidence = evidence(t1, listOf(car)),
+            frameCaptureTimestampNanos = t1 + 50_000_000L,
+        )
+        val carOnly2 = carOnlyFusion.pass(
+            base = baseAssessment,
+            evidence = evidence(t2, listOf(car)),
+            frameCaptureTimestampNanos = t2 + 50_000_000L,
+        )
+
+        // Test run: both traffic light and car present
+        val outcome1 = fusion.pass(
+            base = baseAssessment,
+            evidence = evidence(t1, listOf(trafficLight, car)),
+            frameCaptureTimestampNanos = t1 + 50_000_000L,
+        )
+        assertEquals(carOnly1.advisoryApplied, outcome1.advisoryApplied)
+        assertEquals(carOnly1.rejection, outcome1.rejection)
+        assertEquals(carOnly1.assessment, outcome1.assessment)
+
+        val outcome2 = fusion.pass(
+            base = baseAssessment,
+            evidence = evidence(t2, listOf(trafficLight, car)),
+            frameCaptureTimestampNanos = t2 + 50_000_000L,
+        )
+        // Outcome must be strictly equivalent to the obstacle-alone baseline
+        assertEquals(carOnly2.advisoryApplied, outcome2.advisoryApplied)
+        assertEquals(carOnly2.rejection, outcome2.rejection)
+        assertEquals(carOnly2.assessment, outcome2.assessment)
+        assertTrue("Car obstacle must produce advisory despite presence of traffic light", outcome2.advisoryApplied)
+        assertEquals(OdFusionRejection.ADVISORY_APPLIED, outcome2.rejection)
+        assertEquals(HazardLevel.NEAR_PATH_HAZARD, outcome2.assessment.level)
+        assertTrue(outcome2.assessment.messageKorean.contains("자동차"))
+    }
+
+    @Test
+    fun allSixOriginalObstacleClassesProduceAdvisoryWhenConfirmedWhileTrafficLightDoesNot() {
+        val obstacleClasses = listOf(
+            0 to "사람",
+            1 to "자전거",
+            2 to "자동차",
+            3 to "오토바이",
+            5 to "버스",
+            7 to "트럭",
+        )
+
+        for ((classId, expectedKorean) in obstacleClasses) {
+            val fusion = fusion()
+            val t1 = 1_000_000_000L
+            val t2 = t1 + 200_000_000L
+
+            fusion.pass(
+                base = base(),
+                evidence = evidence(t1, listOf(detection(classId = classId))),
+                frameCaptureTimestampNanos = t1 + 50_000_000L,
+            )
+            val outcome = fusion.pass(
+                base = base(),
+                evidence = evidence(t2, listOf(detection(classId = classId))),
+                frameCaptureTimestampNanos = t2 + 50_000_000L,
+            )
+            assertTrue("Class $classId must produce advisory", outcome.advisoryApplied)
+            assertEquals("Class $classId must apply advisory", OdFusionRejection.ADVISORY_APPLIED, outcome.rejection)
+            assertTrue("Korean message for class $classId must contain $expectedKorean", outcome.assessment.messageKorean.contains(expectedKorean))
+        }
+
+        // Now verify class 9 specifically
+        val fusion9 = fusion()
+        val t1 = 1_000_000_000L
+        val t2 = t1 + 200_000_000L
+        fusion9.pass(
+            base = base(),
+            evidence = evidence(t1, listOf(detection(classId = 9, label = "traffic light"))),
+            frameCaptureTimestampNanos = t1 + 50_000_000L,
+        )
+        val outcome9 = fusion9.pass(
+            base = base(),
+            evidence = evidence(t2, listOf(detection(classId = 9, label = "traffic light"))),
+            frameCaptureTimestampNanos = t2 + 50_000_000L,
+        )
+        assertFalse("Traffic light (9) must not produce advisory", outcome9.advisoryApplied)
+        assertEquals(OdFusionRejection.NO_ELIGIBLE_OBJECT, outcome9.rejection)
+    }
 }

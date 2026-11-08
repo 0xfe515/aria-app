@@ -1,6 +1,7 @@
 package com.ariateam.aria.vision.od
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -153,10 +154,23 @@ class OdModelArtifactTest {
         assertEquals("bus", labels[5])
         assertEquals("train", labels[6])
         assertEquals("truck", labels[7])
+        assertEquals("traffic light", labels[9])
         assertEquals("toothbrush", labels[89])
         for (id in LiteRtObjectDetector.ALLOWED_CLASS_IDS) {
             assertTrue("allowed class $id must exist in the label map", id in labels.indices)
         }
+    }
+
+    @Test
+    fun pinnedDetectorAllowlistIncludesTrafficLightForDisplayAndRejectsOtherCocoClasses() {
+        val allowed = LiteRtObjectDetector.ALLOWED_CLASS_IDS.toSet()
+        val expected = setOf(0, 1, 2, 3, 5, 7, 9)
+        assertEquals("allowed class IDs must match expected obstacle + traffic light set", expected, allowed)
+        assertTrue("traffic light (index 9) must be allowed", allowed.contains(9))
+        assertFalse("airplane (index 4) must be excluded", allowed.contains(4))
+        assertFalse("train (index 6) must be excluded", allowed.contains(6))
+        assertFalse("boat (index 8) must be excluded", allowed.contains(8))
+        assertFalse("stop sign (index 12) must be excluded", allowed.contains(12))
     }
 
     @Test

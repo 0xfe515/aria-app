@@ -366,8 +366,14 @@ class LiteRtObjectDetector(context: Context) : ObjectDetectorEngine {
 
         const val SCORE_THRESHOLD = 0.5f
 
-        /** COCO-90 category ids of the obstacle classes this helper may report. */
-        val ALLOWED_CLASS_IDS = intArrayOf(0, 1, 2, 3, 5, 7)
+        const val TRAFFIC_LIGHT_CLASS_ID = 9
+
+        /**
+         * COCO-90 category ids of the classes this helper may report:
+         * 0 (person), 1 (bicycle), 2 (car), 3 (motorcycle), 5 (bus), 7 (truck), and
+         * 9 (traffic light - display position only, excluded from hazard fusion).
+         */
+        val ALLOWED_CLASS_IDS = intArrayOf(0, 1, 2, 3, 5, 7, TRAFFIC_LIGHT_CLASS_ID)
 
         val EXPECTED_INPUT_SHAPE = intArrayOf(1, DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE, CHANNELS)
         val EXPECTED_BOXES_SHAPE = intArrayOf(1, MODEL_SLOT_COUNT, BOX_COORDS)
@@ -464,12 +470,44 @@ class LiteRtObjectDetector(context: Context) : ObjectDetectorEngine {
                 ) ?: continue
                 results.add(detection)
             }
-            results.sortWith(compareByDescending { it.score })
-            return if (results.size > config.maxDetections) {
-                results.subList(0, config.maxDetections)
-            } else {
-                results
+            if (results.size <= config.maxDetections) {
+                results.sortWith(compareByDescending { it.score })
+                return results
             }
+
+            // When results exceed maxDetections, prioritize obstacle classes (0,1,2,3,5,7)
+            // by descending score so display-only extras (traffic light 9) never crowd out
+            // genuine obstacle candidates from hazard fusion and the UI overlay.
+            val obstacles = ArrayList<DetectedObject>(results.size)
+            val displayExtras = ArrayList<DetectedObject>(results.size)
+            for (detection in results) {
+                if (detection.classId != TRAFFIC_LIGHT_CLASS_ID) {
+                    obstacles.add(detection)
+                } else {
+                    displayExtras.add(detection)
+                }
+            }
+            obstacles.sortWith(compareByDescending { it.score })
+            displayExtras.sortWith(compareByDescending { it.score })
+
+            val selectedObstacles = if (obstacles.size > config.maxDetections) {
+                obstacles.subList(0, config.maxDetections)
+            } else {
+                obstacles
+            }
+            val remainingSlots = config.maxDetections - selectedObstacles.size
+            val selectedExtras = if (remainingSlots > 0 && displayExtras.isNotEmpty()) {
+                displayExtras.take(remainingSlots)
+            } else {
+                emptyList()
+            }
+
+            val retained = ArrayList<DetectedObject>(selectedObstacles.size + selectedExtras.size)
+            retained.addAll(selectedObstacles)
+            retained.addAll(selectedExtras)
+            // Sort retained subset by descending score to preserve the engine's public ordering contract.
+            retained.sortWith(compareByDescending { it.score })
+            return retained
         }
 
         internal const val CLASS_ID_TOLERANCE = 1e-3f
@@ -504,6 +542,7 @@ class LiteRtObjectDetector(context: Context) : ObjectDetectorEngine {
                 3 to "motorcycle",
                 5 to "bus",
                 7 to "truck",
+                9 to "traffic light",
             )
             for ((id, name) in expected) {
                 if (!labels[id].equals(name, ignoreCase = true)) {

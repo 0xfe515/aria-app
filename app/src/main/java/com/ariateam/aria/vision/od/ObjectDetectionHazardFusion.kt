@@ -47,6 +47,10 @@ data class OdFusionConfig(
         /**
          * MediaPipe COCO labelmap category IDs for person, bicycle, car, motorcycle, bus, truck.
          * The labelmap is zero-based with gaps, so these are explicit IDs, not a contiguous range.
+         *
+         * Note: Category 9 (`traffic light`) is a display-only position indicator rendered in the
+         * UI overlay, and is strictly excluded from hazard fusion (no obstacle advisories, no
+         * collision warnings, and no crossing permission).
          */
         val ALLOWED_CLASS_IDS: Set<Int> = setOf(0, 1, 2, 3, 5, 7)
 

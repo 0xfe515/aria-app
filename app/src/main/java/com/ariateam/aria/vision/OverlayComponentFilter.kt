@@ -36,13 +36,14 @@ internal class OverlayComponentFilter {
             epoch++
         }
 
-        val colors = VisionContract.CLASS_OVERLAY_ARGB
-        val nearZoneStartRow = ((height.toLong() * NEAR_ZONE_START_ROW + MODEL_HEIGHT - 1) / MODEL_HEIGHT).toInt()
+        val greenColor = VisionContract.OVERLAY_COLOR_GREEN
+        val redColor = VisionContract.OVERLAY_COLOR_RED
         var pixelCountQueued = 0
 
         for (startIndex in 0 until pixelCount) {
-            val classId = classMask[startIndex].toInt() and 0xFF
-            if (classId >= colors.size || (colors[classId] ushr 24) == 0 || visitedEpochs[startIndex] == epoch) {
+            // Only green pixels form noise components to suppress into red.
+            // Obstacles and background are already red and remain red even if tiny.
+            if (overlayArgb[startIndex] != greenColor || visitedEpochs[startIndex] == epoch) {
                 continue
             }
 
@@ -50,14 +51,9 @@ internal class OverlayComponentFilter {
             componentPixels[pixelCountQueued++] = startIndex
             visitedEpochs[startIndex] = epoch
             var head = componentStart
-            var touchesProtectedNearZone = false
             while (head < pixelCountQueued) {
                 val index = componentPixels[head++]
                 val y = index / width
-                if ((classId == 4 || classId == 5 || classId == 6) && y >= nearZoneStartRow) {
-                    touchesProtectedNearZone = true
-                }
-
                 val minY = if (y > 0) y - 1 else y
                 val maxY = if (y + 1 < height) y + 1 else y
                 val x = index - y * width
@@ -72,7 +68,7 @@ internal class OverlayComponentFilter {
                         if (
                             neighborIndex != index &&
                             visitedEpochs[neighborIndex] != epoch &&
-                            (classMask[neighborIndex].toInt() and 0xFF) == classId
+                            overlayArgb[neighborIndex] == greenColor
                         ) {
                             visitedEpochs[neighborIndex] = epoch
                             componentPixels[pixelCountQueued++] = neighborIndex
@@ -83,13 +79,10 @@ internal class OverlayComponentFilter {
                 }
             }
 
-            if (
-                pixelCountQueued - componentStart < minimumComponentPixels &&
-                !touchesProtectedNearZone
-            ) {
+            if (pixelCountQueued - componentStart < minimumComponentPixels) {
                 var componentIndex = componentStart
                 while (componentIndex < pixelCountQueued) {
-                    overlayArgb[componentPixels[componentIndex]] = TRANSPARENT
+                    overlayArgb[componentPixels[componentIndex]] = redColor
                     componentIndex++
                 }
             }
