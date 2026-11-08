@@ -1,0 +1,17 @@
+# Photo request lifecycle and camera payload verification (2026-11-09)
+
+## Confirmed lifecycle defect and fix
+
+The earlier visibility-gate removal was incomplete: `MainScreen` reads both `VoiceViewModel.state` and `isServiceSynced` through `collectAsStateWithLifecycle`, which stops collecting below `STARTED`. Its `LaunchedEffect` therefore could not observe newly arriving request IDs while the Activity was stopped, even though `screenVisible` was no longer checked. Cloud delivery now independently combines the backing state flows with a snapshot of startup admission in the composition-owned effect. It retains the remembered ID baseline, waits across service resynchronization and admission, consumes a request once, forwards ID zero as cancellation, and is cancelled/disposed with the composition. Other screen state remains lifecycle collected.
+
+`CloudQuestionDeliveryPolicyTest` exercises the same collector and policy used by MainScreen: a new photo request waits while admission is closed, is delivered once the gate opens, keeps the prompt/type/ID, and a replayed ID is ignored. A genuinely stale first synchronized snapshot establishes the baseline, while an active `processing` request at first sync stays pending and is delivered after admission.
+
+## Real camera regression
+
+`CloudImageCaptureDeviceTest` launches Home with permissions granted and a temporary body/mount profile, waits for the real VisionSession camera to reach Running, parses a loose visual utterance, and calls `CloudQuestionCoordinator` with the actual `VisionSession.captureSingleFrame`. Its fake authenticated repository and fake transport do not contact ChatGPT. The test inspects the Responses API request, checks the retained question and `input_image` JPEG data URL, decodes the bytes as a JPEG with nonzero dimensions, and only accepts the expected response from the transport that saw that image. The fixture restores the prior body profile and explicit-stop state and closes the coordinator, activity, camera and service in teardown.
+
+`ChatGptLiveImageProbeTest` is an additional coordinator-authorized opt-in diagnostic. It only contacts the real API when instrumentation arg `aria_live_image_probe=true` is supplied and an existing authenticated session is present; otherwise it reports an explicit JUnit assumption/not-run. It generates an in-memory white bitmap with a random large black four-digit code (the code is not sent in the prompt), calls the current ChatGPT auth/client path, and requires the response to contain the code. The worker did not execute this test or access any user account.
+
+## Evidence boundaries
+
+Confirmed: lifecycle-aware UI collection paused request reception while stopped; the earlier visibility-only fix did not address that. The user reports a response arrives but does not reflect the photo, so a generic text fallback or absent/incorrect image remains a hypothesis; static inspection found no omitted-image branch in the coordinator's photo call. The new device test is authored to prove a real CameraX frame reaches the compressed image request path on Pixel 3 when run by the coordinator. No test was executed in this worker, so real-device capture and build status are pending. The fake transport proves payload construction only; only an explicitly opted-in live synthetic probe could verify the currently authenticated model's image handling, and it was not run here. No claim is made about general background/service support.

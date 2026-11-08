@@ -432,7 +432,7 @@ class CommandCoordinator internal constructor(
                 announce("질문 응답 시간이 초과되었어요.")
             }
         }, 60_000)
-        announce("질문을 확인하고 있어요.")
+        // Keep the request active without emitting a progress toast or spoken acknowledgment.
     }
 
     private fun handleCloudPhotoQuestion(prompt: String) {
@@ -454,7 +454,7 @@ class CommandCoordinator internal constructor(
                 announce("사진 질문 응답 시간이 초과되었어요.")
             }
         }, 60_000)
-        announce("사진을 촬영하여 ChatGPT에 질문을 보냅니다.")
+        // Keep the request active without emitting a progress toast or spoken acknowledgment.
     }
 
     fun consumeCloudQuestion(id: Long) {

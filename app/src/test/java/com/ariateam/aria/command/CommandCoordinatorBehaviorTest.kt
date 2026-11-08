@@ -260,10 +260,15 @@ class CommandCoordinatorBehaviorTest {
         assertTrue("Conversational query should assign a cloudQuestionId", coordinator.snapshot.cloudQuestionId > 0L)
         assertEquals("text", coordinator.snapshot.cloudQuestionType)
         assertEquals("오늘 서울 날씨 어때?", coordinator.snapshot.cloudQuestionPrompt)
+        assertTrue(coordinator.snapshot.processing)
+        assertEquals("질문 처리 중", coordinator.snapshot.message)
+        assertTrue(emittedSnapshots.any { it.cloudQuestionId == coordinator.snapshot.cloudQuestionId && it.processing })
+        assertTrue(emittedSnapshots.none { it.message == "질문을 확인하고 있어요." })
+        coordinator.close()
     }
 
     @Test
-    fun finalized_explicitPhotoQuestion_announcesChatGpt() {
+    fun finalized_explicitPhotoQuestion_staysProcessingWithoutProgressAcknowledgment() {
         val coordinator = createCoordinator(audible = true)
         coordinator.started()
         emittedSnapshots.clear()
@@ -272,7 +277,11 @@ class CommandCoordinatorBehaviorTest {
 
         assertTrue("Photo query should assign a cloudQuestionId", coordinator.snapshot.cloudQuestionId > 0L)
         assertEquals("photo", coordinator.snapshot.cloudQuestionType)
-        assertEquals("사진을 촬영하여 ChatGPT에 질문을 보냅니다.", coordinator.snapshot.message)
+        assertTrue(coordinator.snapshot.processing)
+        assertEquals("사진 질문 처리 중", coordinator.snapshot.message)
+        assertTrue(emittedSnapshots.any { it.cloudQuestionId == coordinator.snapshot.cloudQuestionId && it.processing })
+        assertTrue(emittedSnapshots.none { it.message == "사진을 촬영하여 ChatGPT에 질문을 보냅니다." })
+        coordinator.close()
     }
 
     @Test
@@ -288,5 +297,23 @@ class CommandCoordinatorBehaviorTest {
         // Should speak the response text, NOT navigate screen to home
         assertEquals("홈으로 가", coordinator.snapshot.message)
         assertEquals(0L, coordinator.snapshot.navigationId)
+        assertFalse(coordinator.snapshot.processing)
+        assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+        coordinator.close()
+    }
+
+    @Test
+    fun reportCloudError_clearsProcessingAndDeliversActualError() {
+        val coordinator = createCoordinator(audible = false)
+        coordinator.started()
+        coordinator.finalized("오늘 날씨 어때")
+        val qId = coordinator.snapshot.cloudQuestionId
+
+        coordinator.reportCloudError(qId, "질문을 처리하지 못했어요.")
+
+        assertEquals("질문을 처리하지 못했어요.", coordinator.snapshot.message)
+        assertFalse(coordinator.snapshot.processing)
+        assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+        coordinator.close()
     }
 }

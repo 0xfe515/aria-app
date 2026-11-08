@@ -292,10 +292,10 @@ class VoiceListeningSessionTest {
         assertTrue(h.commands.isEmpty())
     }
 
-    @Test fun truncatedSingleSyllableAndPartialWakeFormsNeverWakeOrExecuteAcrossSessions() {
+    @Test fun incompleteWakeFragmentsNeverWakeOrExecuteAndDoNotCarryAcrossSessions() {
         val h = Harness()
         h.start()
-        listOf("헤", "헤이", "헤이 아리", "헤뤼", "헤뤼이").forEach { fragment ->
+        listOf("헤", "헤이", "헤이 아", "헤뤼", "헤뤼이").forEach { fragment ->
             h.driver.current.partial(fragment)
             assertEquals(VoicePhase.Waiting, h.session.snapshot.phase)
             h.driver.current.result(listOf(fragment))
@@ -305,10 +305,29 @@ class VoiceListeningSessionTest {
             h.time.advance(300)
             h.driver.current.ready()
         }
-        // A subsequent session starting with "아리아 설정 열어" must not concatenate with prior "헤".
+        // A fresh session's standalone Aria wake is valid and must not concatenate with prior "헤".
         h.driver.current.result(listOf("아리아 설정 열어"))
-        assertEquals(0, h.wakes)
+        assertEquals(1, h.wakes)
+        assertEquals(1, h.inputs)
+        assertEquals(listOf("설정 열어"), h.commands)
+    }
+
+    @Test fun validShortWakeFinalsExecuteOnceAndPartialWakeTextWaitsForFinal() {
+        val h = Harness()
+        h.start()
+        h.driver.current.partial("헤이 아리 설정 열어")
+        assertEquals(1, h.wakes)
+        assertEquals(1, h.inputs)
         assertTrue(h.commands.isEmpty())
+        h.driver.current.result(listOf("헤이 아리 설정 열어"))
+        assertEquals(listOf("설정 열어"), h.commands)
+
+        h.time.advance(300)
+        h.driver.current.ready()
+        h.driver.current.result(listOf("헤이 아리 도움말"))
+        assertEquals(2, h.wakes)
+        assertEquals(2, h.inputs)
+        assertEquals(listOf("설정 열어", "도움말"), h.commands)
     }
 
     @Test fun observedPhoneticWakeAndAgreedNBestCandidatesWakeAndPreserveTopResultForCommands() {

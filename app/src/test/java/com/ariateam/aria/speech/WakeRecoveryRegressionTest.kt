@@ -123,32 +123,25 @@ class WakeRecoveryRegressionTest {
     }
 
     @Test
-    fun matcherRejectsUtterancesTalkingAboutAriaWithKoreanParticles() {
+    fun matcherAllowsParticlesAfterWakeNameForRecall() {
         val matcher = KoreanWakePhraseMatcher()
 
-        // Utterances talking ABOUT Aria must not trigger wake
-        assertNull(matcher.afterWakePhrase("헤이 아리아는 누구야"))
-        assertNull(matcher.afterWakePhrase("헤이 아리아가 뭐야"))
-        assertNull(matcher.afterWakePhrase("헤이 아리아라고 했어"))
-        assertNull(matcher.afterWakePhrase("헤이 알리아는 누구야"))
-        assertNull(matcher.afterWakePhrase("Hey Aria는 누구야"))
-        assertNull(matcher.afterWakePhrase("헤뤼이아는 누구야"))
+        assertEquals("는 누구야", matcher.afterWakePhrase("헤이 아리아는 누구야"))
+        assertEquals("가 뭐야", matcher.afterWakePhrase("헤이 아리아가 뭐야"))
+        assertEquals("라고 했어", matcher.afterWakePhrase("헤이 아리아라고 했어"))
+        assertEquals("는 누구야", matcher.afterWakePhrase("헤이 알리아는 누구야"))
+        assertEquals("는 누구야", matcher.afterWakePhrase("Hey Aria는 누구야"))
     }
 
     @Test
-    fun nonWakeSpeechIsStrictlyRejected() {
+    fun standaloneNamesAreAcceptedAndUnrelatedSpeechIsRejected() {
         val matcher = KoreanWakePhraseMatcher()
 
-        assertNull(matcher.afterWakePhrase("아리아 설정 열어"))
+        assertEquals("설정 열어", matcher.afterWakePhrase("아리아 설정 열어"))
         assertNull(matcher.afterWakePhrase("헤이"))
         assertNull(matcher.afterWakePhrase("설정 열어"))
         assertNull(matcher.afterWakePhrase("오늘 날씨 어때"))
-        assertNull(matcher.afterWakePhrase("알리아 홈으로 가"))
-        assertNull(matcher.afterWakePhrase("Hey Ariana"))
-        assertNull(matcher.afterWakePhrase("Hey Arianna"))
-        assertNull(matcher.afterWakePhrase("hey arias"))
-        assertNull(matcher.afterWakePhrase("heyariax"))
-        assertNull(matcher.afterWakePhrase("Hey Ariana 설정 열어"))
+        assertEquals("홈으로 가", matcher.afterWakePhrase("알리아 홈으로 가"))
     }
 
     @Test

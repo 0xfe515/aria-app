@@ -205,13 +205,8 @@ class CommandSpeechPlaybackTest {
         val qId = coordinator.snapshot.cloudQuestionId
         assertTrue(qId > 0L)
 
-        // Normal-priority question intake confirmation completes before cloud response
-        val confirmationUtterance = fakeEngine.spokenUtteranceIds[0]
-        fakeEngine.notifyDone(confirmationUtterance)
-        fakeScheduler.advanceTimeBy(500)
-        assertNull(speech.currentPriority)
-
         val baseline = fakeEngine.spokenTexts.size
+        assertEquals("Question intake should not speak before the response arrives", 0, baseline)
 
         // 2. Cloud response arrives and begins speech through the real CommandSpeech seam
         coordinator.speakCloudResponse(qId, "앞에 횡단보도가 있습니다.")

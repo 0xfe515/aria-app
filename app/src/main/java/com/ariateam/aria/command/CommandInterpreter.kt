@@ -33,9 +33,28 @@ class RuleCommandInterpreter : CommandInterpreter {
         }
         if (value in setOf("취소", "취소해", "취소해줘", "아니", "아니요", "됐어")) return execute(AppCommand.Cancel)
         if (value in setOf("듣기중지", "듣기중지해", "그만들어", "그만들어줘", "음성인식꺼", "전체중지")) return execute(AppCommand.Stop)
-        if (listOf("그리고", "하고", "다음에").any(value::contains)) {
+        if (listOf("그리고", "다음에").any(value::contains)) {
             return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
         }
+
+        // Direct visual requests take precedence over navigation/provider substring matches.
+        // The cloud parser still owns negation and unsupported-provider handling.
+        val visualCue = listOf("앞에", "앞쪽", "전방", "눈앞", "글씨", "글자", "텍스트", "읽어", "표지판", "간판")
+            .any(value::contains)
+        if (visualCue) {
+            val visualInterpretation = com.ariateam.aria.cloud.CloudCommandParser.parse(text, context, now)
+            if (visualInterpretation is Interpretation.CloudPhotoQuestion || visualInterpretation is Interpretation.Clarify) {
+                val secondCommandAfterHago = Regex(
+                    "하고(?:홈|설정|소리|안내|효과음|화면|네이버|카카오|길찾|중지|종료|취소|닫아|열어|꺼줘|켜줘)",
+                ).containsMatchIn(value)
+                if (value.contains("하고") && secondCommandAfterHago) {
+                    return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
+                }
+                return visualInterpretation
+            }
+        }
+
+        if (value.contains("하고")) return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
 
         val navInterpretation = NavigationCommandParser.parse(text, context, now)
         if (navInterpretation != null) {

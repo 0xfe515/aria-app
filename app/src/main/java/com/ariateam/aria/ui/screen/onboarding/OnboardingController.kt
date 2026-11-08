@@ -134,7 +134,8 @@ internal class OnboardingController(
         // Invalidate any recognition started for a previous prompt.
         recognitionGeneration++
 
-        val pending = PendingPrompt(generation, utteranceId, text, onDone)
+        val speechText = onboardingSpeechText(text)
+        val pending = PendingPrompt(generation, utteranceId, speechText, onDone)
         pendingPrompt = pending
 
         if (!ttsReady || tts == null) {
@@ -143,7 +144,7 @@ internal class OnboardingController(
         }
 
         val result = tts?.speak(
-            text,
+            speechText,
             TextToSpeech.QUEUE_FLUSH,
             null,
             utteranceId

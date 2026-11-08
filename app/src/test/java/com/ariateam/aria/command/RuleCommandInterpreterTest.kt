@@ -78,4 +78,20 @@ class RuleCommandInterpreterTest {
         val result = parse("사진 찍어서 알려줘")
         assertTrue(result is Interpretation.CloudPhotoQuestion)
     }
+
+    @Test fun directVisualCuePrecedesNavigationMatching() {
+        listOf(
+            "앞에 뭐 있어",
+            "표지판 글씨 읽어줘",
+            "전방 간판 텍스트 읽어 주세요",
+            "앞에 뭐가 있는지 확인하고 알려줘",
+            "앞에 텍스트 확인하고 읽어줘",
+        ).forEach { utterance ->
+            assertTrue(utterance, parse(utterance) is Interpretation.CloudPhotoQuestion)
+        }
+        assertTrue("앞에 뭐야 하고 설정 열어", parse("앞에 뭐야 하고 설정 열어") is Interpretation.Clarify)
+        listOf("텍스트 읽지 마", "글씨 읽어주지 마", "앞에 사진 찍으면 안 돼").forEach { utterance ->
+            assertTrue(utterance, parse(utterance) is Interpretation.Clarify)
+        }
+    }
 }

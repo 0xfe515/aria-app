@@ -90,6 +90,7 @@ import com.ariateam.aria.vision.VisionModelState
 import com.ariateam.aria.vision.VisionPipelineMode
 import com.ariateam.aria.vision.VisionSession
 import com.ariateam.aria.vision.VisionViewModel
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
@@ -443,49 +444,42 @@ fun MainScreen(
     var lastCloudQuestionId by rememberSaveable { mutableLongStateOf(state.command.cloudQuestionId) }
     var hasCloudQuestionBaseline by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(state.command.cloudQuestionId, screenVisible, startupModel.hasBeenAdmitted, isServiceSynced) {
-        if (!isServiceSynced) return@LaunchedEffect
-        if (!hasCloudQuestionBaseline) {
-            lastCloudQuestionId = state.command.cloudQuestionId
-            hasCloudQuestionBaseline = true
-            return@LaunchedEffect
-        }
-        val qId = state.command.cloudQuestionId
-        if (qId == 0L) {
-            cloudCoordinator.cancel()
-            return@LaunchedEffect
-        }
-        if (qId <= lastCloudQuestionId) return@LaunchedEffect
-        if (!screenVisible || !startupModel.hasBeenAdmitted) return@LaunchedEffect
-
-        lastCloudQuestionId = qId
-        val qType = state.command.cloudQuestionType
-        val qPrompt = state.command.cloudQuestionPrompt
-
-        model.consumeCloudQuestion(qId)
-
-        if (qType == "photo") {
-            cloudCoordinator.askPhotoQuestion(
-                questionId = qId,
-                prompt = qPrompt,
-                onResponse = { responseText ->
-                    model.speakCloudResponse(qId, responseText)
-                },
-                onError = { errorMessage ->
-                    model.reportCloudError(qId, errorMessage)
-                },
-            )
-        } else {
-            cloudCoordinator.askTextQuestion(
-                questionId = qId,
-                prompt = qPrompt,
-                onResponse = { responseText ->
-                    model.speakCloudResponse(qId, responseText)
-                },
-                onError = { errorMessage ->
-                    model.reportCloudError(qId, errorMessage)
-                },
-            )
+    LaunchedEffect(model, cloudCoordinator, startupModel) {
+        val deliveryPolicy = com.ariateam.aria.cloud.CloudQuestionDeliveryPolicy(
+            initialLastQuestionId = lastCloudQuestionId,
+            initialHasBaseline = hasCloudQuestionBaseline,
+        )
+        com.ariateam.aria.cloud.collectCloudQuestionDeliveries(
+            voiceState = model.state,
+            serviceSynced = model.isServiceSynced,
+            admitted = snapshotFlow { startupModel.hasBeenAdmitted },
+            policy = deliveryPolicy,
+        ) { delivery ->
+            lastCloudQuestionId = deliveryPolicy.lastQuestionId
+            hasCloudQuestionBaseline = deliveryPolicy.hasBaseline
+            when (delivery) {
+                null -> Unit
+                com.ariateam.aria.cloud.CloudQuestionDelivery.Cancel ->
+                    cloudCoordinator.cancel()
+                is com.ariateam.aria.cloud.CloudQuestionDelivery.Request -> {
+                    model.consumeCloudQuestion(delivery.questionId)
+                    if (delivery.type == "photo") {
+                        cloudCoordinator.askPhotoQuestion(
+                            questionId = delivery.questionId,
+                            prompt = delivery.prompt,
+                            onResponse = { responseText -> model.speakCloudResponse(delivery.questionId, responseText) },
+                            onError = { errorMessage -> model.reportCloudError(delivery.questionId, errorMessage) },
+                        )
+                    } else {
+                        cloudCoordinator.askTextQuestion(
+                            questionId = delivery.questionId,
+                            prompt = delivery.prompt,
+                            onResponse = { responseText -> model.speakCloudResponse(delivery.questionId, responseText) },
+                            onError = { errorMessage -> model.reportCloudError(delivery.questionId, errorMessage) },
+                        )
+                    }
+                }
+            }
         }
     }
 

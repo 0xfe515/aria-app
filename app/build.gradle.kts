@@ -47,7 +47,25 @@ object SherpaOfflineProvisioning {
         "▁헤 이 ▁아 리 아 @헤이아리아\n" +
             "▁헤 이 ▁아 리 야 @헤이아리야\n" +
             "▁헤 이 아 리 아 @헤이아리아\n" +
-            "▁헤 이 아 리 야 @헤이아리야\n"
+            "▁헤 이 아 리 야 @헤이아리야\n" +
+            "▁헤 뤼 이 아 @헤이아리아\n" +
+            "▁헤 뤼 이 야 @헤이아리야\n" +
+            "▁해 이 ▁아 리 아 @헤이아리아\n" +
+            "▁해 이 ▁아 리 야 @헤이아리야\n" +
+            "▁에 이 ▁아 리 아 @헤이아리아\n" +
+            "▁에 이 ▁아 리 야 @헤이아리야\n" +
+            "▁헤 ▁아 리 아 @헤이아리아\n" +
+            "▁헤 ▁아 리 야 @헤이아리야\n" +
+            "▁헤 이 알 리 아 @헤이아리아\n" +
+            "▁헤 이 알 리 야 @헤이아리야\n" +
+            "▁해 이 알 리 아 @헤이아리아\n" +
+            "▁해 이 알 리 야 @헤이아리야\n" +
+            "▁아 리 아 @헤이아리아\n" +
+            "▁아 리 야 @헤이아리야\n" +
+            "▁아 리 @헤이아리아\n" +
+            "▁알 리 아 @헤이아리아\n" +
+            "▁알 리 야 @헤이아리야\n" +
+            "▁알 리 @헤이아리아\n"
 
     private const val CONNECT_TIMEOUT_MS = 30_000
     private const val READ_TIMEOUT_MS = 120_000
@@ -321,8 +339,8 @@ android {
         applicationId = "com.ariateam.aria"
         minSdk = 31
         targetSdk = 37
-        versionCode = 11
-        versionName = "1.0.0-preview.20261109.1"
+        versionCode = 12
+        versionName = "1.0.0-preview.20261109.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         proguardFiles(

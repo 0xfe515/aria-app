@@ -154,6 +154,18 @@ class CloudCommandParserTest {
             "카메라로 봐줘",
             "카메라로 뭐 보여",
             "챗지피티 사진 찍어줘",
+            "앞에",
+            "앞에 뭐야",
+            "앞에 뭐 있어",
+            "앞쪽",
+            "전방",
+            "글씨",
+            "글자",
+            "텍스트",
+            "읽어줘",
+            "읽어 주세요",
+            "표지판",
+            "간판",
         )
 
         for (phrase in photoPhrases) {
@@ -223,23 +235,29 @@ class CloudCommandParserTest {
     }
 
     @Test
-    fun doesNotRouteAbstractQuotedOrUnrelatedQuestionsToPhoto() {
+    fun explicitVisualCuesWinEvenInQuotedOrAbstractPhrasing() {
+        listOf(
+            "앞에 있는 거 뭐야라는 표현의 의미가 뭐야?",
+            "무슨 글씨체를 쓰면 좋을까?",
+            "‘앞에 있는 거 뭐야’라는 표현은 어떤 뜻이야?",
+            "앞에 있는 거 뭐야라고 가정하면 질문이 성립해?",
+            "앞에 있는 거 뭐야? 라고 물어보면 어떤 질문이 돼?",
+            "‘앞에 있는 거 뭐야?’",
+        ).forEach { phrase ->
+            assertTrue("Expected visual cue to route '$phrase'", parse(phrase) is Interpretation.CloudPhotoQuestion)
+        }
+    }
+
+    @Test
+    fun doesNotRouteUnrelatedQuestionsWithoutVisualCuesToPhoto() {
         val unrelated = listOf(
             "앞으로 계획은 어떻게 세워?",
-            "글씨체의 뜻이 뭐야?",
-            "앞에 있는 거 뭐야라는 표현의 의미가 뭐야?",
-            "이 문장에서 ‘앞에 무슨 글씨야’는 무슨 뜻이야?",
-            "무슨 글씨체를 쓰면 좋을까?",
             "카메라 해상도 알려줘",
             "사진 파일 형식 설명해줘",
             "주변 맛집 알려줘",
             "화면 설정 설명해줘",
             "이거 코틀린 코드 설명해줘",
             "카메라 렌즈는 뭐야?",
-            "‘앞에 있는 거 뭐야’라는 표현은 어떤 뜻이야?",
-            "앞에 있는 거 뭐야라고 가정하면 질문이 성립해?",
-            "앞에 있는 거 뭐야? 라고 물어보면 어떤 질문이 돼?",
-            "‘앞에 있는 거 뭐야?’",
         )
         for (phrase in unrelated) {
             assertNull("Unexpected cloud/photo routing for '$phrase'", parse(phrase))
@@ -257,6 +275,10 @@ class CloudCommandParserTest {
             "앞에 있는 거 뭐야 하지마",
             "표지판 글자 읽지 말아줘",
             "질문 보내지마",
+            "텍스트 읽지 마",
+            "글씨 읽어주지 마",
+            "앞에 사진 찍으면 안 돼",
+            "표지판 사진 전송하지 마",
         )
 
         for (phrase in negations) {

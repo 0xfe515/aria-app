@@ -16,12 +16,14 @@ object CloudCommandParser {
         // 1. Negation handling: negative intent with question, photo, or provider keywords
         val negationKeywords = listOf(
             "하지마", "하지말", "찍지마", "찍지말", "묻지마", "묻지말", "물어보지마", "보내지마", "보내지말",
-            "보지마", "보지말", "읽지마", "읽지말",
+            "보내면안돼", "전송하지마", "올리지마", "보지마", "보지말", "읽지마", "읽지말",
+            "읽어주지마", "읽어주지말", "촬영하지마", "촬영하지말", "찍으면안돼", "촬영하면안돼",
         )
         if (negationKeywords.any(normalized::contains)) {
             val targets = listOf(
                 "질문", "사진", "챗지피티", "chatgpt", "제미나이", "클로드", "클라우드", "카메라", "물어", "묻",
-                "앞에", "앞쪽", "전방", "눈앞", "주변", "이거", "이게", "글자", "글씨", "표지판", "간판",
+                "앞에", "앞쪽", "전방", "눈앞", "주변", "이거", "이게", "글자", "글씨", "텍스트", "문구",
+                "표지판", "간판", "읽어", "사진", "카메라",
             )
             if (targets.any(normalized::contains)) {
                 return Interpretation.Clarify("원하는 명령을 하나만 다시 말해 주세요.")
@@ -175,6 +177,10 @@ object CloudCommandParser {
 
     private fun isNaturalVisualQuestion(rawText: String, normalized: String): Boolean {
         if (normalized.isEmpty()) return false
+        // Explicit visual vocabulary has high recall by design. A quoted or abstract phrase
+        // still routes to vision when the user also says a direct visual cue.
+        val visualCues = listOf("앞에", "앞쪽", "전방", "눈앞", "글씨", "글자", "텍스트", "읽어", "표지판", "간판")
+        if (visualCues.any(normalized::contains)) return true
         if (isPhraseDiscussion(rawText, normalized)) return false
 
         // Keep the older demonstrative shorthand, but do not generalize its token to arbitrary topics.
