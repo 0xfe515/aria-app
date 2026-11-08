@@ -181,6 +181,7 @@ class CommandCoordinator internal constructor(
 
     /** Called at Waiting -> Dictating, so an old interpretation cannot win while user speaks. */
     fun inputStarted() {
+        if (snapshot.externalNavId != 0L) clearExternalNavigation()
         if (awaiting) {
             generation.advance()
             speech.stop()
@@ -348,7 +349,11 @@ class CommandCoordinator internal constructor(
             if (snapshot.externalNavId == id) clearExternalNavigation()
         }, 30_000)
 
-        val message = "${provider.displayName}로 ${destination} 검색을 열어요."
+        val message = if (provider == NavigationProvider.Naver) {
+            "네이버 지도 도보 경로를 준비해요: $destination."
+        } else {
+            "${provider.displayName}로 ${destination} 검색을 열어요."
+        }
         if (!visible) {
             notifyExternalNav(message, id, provider, destination)
         }

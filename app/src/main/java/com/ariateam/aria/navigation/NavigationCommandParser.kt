@@ -69,6 +69,9 @@ object NavigationCommandParser {
                 if (detectedProviders.size == 1) {
                     return Interpretation.NavigateExternal(detectedProviders.first(), pendingDest)
                 }
+                if (containsNavigationKeyword(trimmed)) {
+                    return Interpretation.NavigateExternal(NavigationProvider.Naver, pendingDest)
+                }
             } else if (activeTarget.startsWith(CONTEXT_PROV_PREFIX)) {
                 val providerId = activeTarget.substring(CONTEXT_PROV_PREFIX.length).trim()
                 val provider = NavigationProvider.fromId(providerId)
@@ -103,9 +106,8 @@ object NavigationCommandParser {
             provider != null && !DestinationValidator.isValid(destinationCandidate) -> {
                 Interpretation.Clarify("${provider.displayName}로 갈 목적지를 말씀해 주세요.")
             }
-            provider == null && DestinationValidator.isValid(destinationCandidate) -> {
-                Interpretation.Clarify("네이버 지도, 카카오맵, 구글 지도 중 어떤 지도로 안내할까요?")
-            }
+            provider == null && DestinationValidator.isValid(destinationCandidate) ->
+                Interpretation.NavigateExternal(NavigationProvider.Naver, destinationCandidate)
             else -> {
                 Interpretation.Clarify("어디로 갈까요? 목적지를 말씀해 주세요.")
             }
@@ -148,6 +150,11 @@ object NavigationCommandParser {
             "길안내", "길찾기", "길찾아", "안내해", "안내 해", "가자", "가줘", "가 주세요", "가는길", "가는 길",
         )
         return keywords.any(text::contains)
+    }
+
+    private fun containsExplicitGenericNavigationKeyword(text: String): Boolean {
+        val compact = text.lowercase().filter { it.isLetterOrDigit() }
+        return listOf("길안내", "길찾기", "길찾아", "가는길", "가는방법").any(compact::contains)
     }
 
     fun extractDestinationCandidate(text: String, provider: NavigationProvider?): String {
@@ -255,10 +262,15 @@ object NavigationCommandParser {
 
     fun extractPendingTarget(text: String): String? {
         val trimmed = text.trim()
+        val compact = trimmed.lowercase().filter { it.isLetterOrDigit() }
         val providers = detectProviders(trimmed)
         if (providers.size > 1) return null
 
         val provider = providers.firstOrNull()
+        if (NEGATION_PATTERNS.any(compact::contains) || COMPOUND_PATTERNS.any(compact::contains)) {
+            return null
+        }
+        if (provider == null && !containsNavigationKeyword(trimmed)) return null
         val candidate = extractDestinationCandidate(trimmed, provider)
 
         return when {
@@ -267,6 +279,10 @@ object NavigationCommandParser {
             }
             provider == null && DestinationValidator.isValid(candidate) -> {
                 "$CONTEXT_DEST_PREFIX$candidate"
+            }
+            provider == null && !DestinationValidator.isValid(candidate) &&
+                containsExplicitGenericNavigationKeyword(trimmed) -> {
+                "$CONTEXT_PROV_PREFIX${NavigationProvider.Naver.id}"
             }
             else -> null
         }

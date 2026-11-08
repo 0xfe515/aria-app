@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.ariateam.aria.cloud.auth.ChatGptAccountSummary
 import com.ariateam.aria.cloud.auth.ChatGptAuthRepository
 import com.ariateam.aria.cloud.auth.ChatGptAuthState
@@ -34,6 +35,8 @@ class CloudQuestionDeviceTest {
 
     private lateinit var keyStorage: AndroidKeyStoreAriaKeyStorage
     private lateinit var fakeAuth: FakeDeviceAuthRepository
+    private val coordinators = mutableListOf<CloudQuestionCoordinator>()
+    private val bitmaps = mutableListOf<Bitmap>()
 
     private class FakeDeviceAuthRepository(
         var token: String? = "test_device_token",
@@ -68,6 +71,10 @@ class CloudQuestionDeviceTest {
 
     @After
     fun tearDown() {
+        coordinators.forEach { it.dispose() }
+        bitmaps.filterNot { it.isRecycled }.forEach { it.recycle() }
+        coordinators.clear()
+        bitmaps.clear()
         if (::keyStorage.isInitialized) {
             keyStorage.clearApiKey()
         }
@@ -115,7 +122,7 @@ class CloudQuestionDeviceTest {
             ioDispatcher = Dispatchers.Main,
             mainDispatcher = Dispatchers.Main,
             frameCapturer = { cb -> pendingCallback = cb },
-        )
+        ).also(coordinators::add)
 
         var responseDelivered: String? = null
         var errorDelivered: String? = null
@@ -127,13 +134,16 @@ class CloudQuestionDeviceTest {
             onError = { errorDelivered = it },
         )
 
+        // The auth job first crosses IO to obtain a token, then returns to main before capture.
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
         assertNotNull("Frame capture callback should be captured", pendingCallback)
 
         // Cancel before frame arrives
         coordinator.cancel(501L)
 
         // Provide real Android bitmap
-        val realBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        val realBitmap = realBitmap()
         assertFalse("Bitmap should not be recycled before delivery", realBitmap.isRecycled)
 
         pendingCallback?.invoke(realBitmap)
@@ -152,7 +162,7 @@ class CloudQuestionDeviceTest {
             ioDispatcher = Dispatchers.Main,
             mainDispatcher = Dispatchers.Main,
             frameCapturer = { cb -> pendingCallback = cb },
-        )
+        ).also(coordinators::add)
 
         coordinator.askPhotoQuestion(
             questionId = 502L,
@@ -161,13 +171,16 @@ class CloudQuestionDeviceTest {
             onError = {},
         )
 
+        // Complete token authentication and its main-thread continuation before expecting capture.
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
         assertNotNull(pendingCallback)
 
         // Dispose coordinator
         coordinator.dispose()
         assertTrue(coordinator.isDisposed)
 
-        val realBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        val realBitmap = realBitmap()
         pendingCallback?.invoke(realBitmap)
 
         assertTrue("Bitmap must be recycled immediately on disposed coordinator", realBitmap.isRecycled)
@@ -183,7 +196,7 @@ class CloudQuestionDeviceTest {
             ioDispatcher = queuedDispatcher,
             mainDispatcher = queuedDispatcher,
             frameCapturer = { cb -> pendingCallback = cb },
-        )
+        ).also(coordinators::add)
 
         coordinator.askPhotoQuestion(
             questionId = 601L,
@@ -192,7 +205,10 @@ class CloudQuestionDeviceTest {
             onError = {},
         )
 
-        val realBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        // Auth uses the same queued dispatcher for IO and main; drain both hops to frame capture.
+        runAuthUntilCapture(queuedDispatcher, queuedDispatcher) { pendingCallback != null }
+
+        val realBitmap = realBitmap()
         assertFalse("Bitmap should not be recycled before delivery", realBitmap.isRecycled)
 
         // Deliver frame to coordinator; coroutine is queued on queuedDispatcher and has not started body
@@ -217,7 +233,7 @@ class CloudQuestionDeviceTest {
             ioDispatcher = queuedDispatcher,
             mainDispatcher = queuedDispatcher,
             frameCapturer = { cb -> pendingCallback = cb },
-        )
+        ).also(coordinators::add)
 
         coordinator.askPhotoQuestion(
             questionId = 602L,
@@ -226,7 +242,10 @@ class CloudQuestionDeviceTest {
             onError = {},
         )
 
-        val realBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        // Auth uses the same queued dispatcher for IO and main; drain both hops to frame capture.
+        runAuthUntilCapture(queuedDispatcher, queuedDispatcher) { pendingCallback != null }
+
+        val realBitmap = realBitmap()
         assertFalse(realBitmap.isRecycled)
 
         pendingCallback?.invoke(realBitmap)
@@ -267,7 +286,7 @@ class CloudQuestionDeviceTest {
             ioDispatcher = queuedIo,
             mainDispatcher = queuedMain,
             frameCapturer = { cb -> pendingCallback = cb },
-        )
+        ).also(coordinators::add)
 
         var responseDelivered: String? = null
         var errorDelivered: String? = null
@@ -279,7 +298,10 @@ class CloudQuestionDeviceTest {
             onError = { errorDelivered = it },
         )
 
-        val realBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        // Auth uses queued IO then queued main; finish both hops before injecting a frame.
+        runAuthUntilCapture(queuedMain, queuedIo) { pendingCallback != null }
+
+        val realBitmap = realBitmap()
         assertFalse(realBitmap.isRecycled)
 
         pendingCallback?.invoke(realBitmap)
@@ -332,7 +354,7 @@ class CloudQuestionDeviceTest {
             ioDispatcher = queuedIo,
             mainDispatcher = queuedMain,
             frameCapturer = { cb -> pendingCallback = cb },
-        )
+        ).also(coordinators::add)
 
         var responseDelivered: String? = null
         var errorDelivered: String? = null
@@ -344,7 +366,10 @@ class CloudQuestionDeviceTest {
             onError = { errorDelivered = it },
         )
 
-        val realBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        // Auth uses queued IO then queued main; finish both hops before injecting a frame.
+        runAuthUntilCapture(queuedMain, queuedIo) { pendingCallback != null }
+
+        val realBitmap = realBitmap()
         assertFalse(realBitmap.isRecycled)
 
         pendingCallback?.invoke(realBitmap)
@@ -378,7 +403,24 @@ class CloudQuestionDeviceTest {
             queue.clear()
             for (r in list) r.run()
         }
+        fun hasTasks(): Boolean = queue.isNotEmpty()
     }
+
+    private fun runAuthUntilCapture(
+        main: QueuedTestDispatcher,
+        io: QueuedTestDispatcher,
+        captured: () -> Boolean,
+    ) {
+        var turns = 0
+        while (!captured() && (main.hasTasks() || io.hasTasks())) {
+            check(++turns < 100) { "Queued dispatcher did not reach expected auth/capture phase" }
+            io.advance()
+            main.advance()
+        }
+        assertTrue("Expected queued auth job to reach frame capture", captured())
+    }
+
+    private fun realBitmap(): Bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).also(bitmaps::add)
 
     companion object {
         private const val TEST_PREFS_NAME = "aria_cloud_secure_prefs_device_test"

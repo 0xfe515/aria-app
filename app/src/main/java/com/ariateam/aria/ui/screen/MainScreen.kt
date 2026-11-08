@@ -57,8 +57,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ariateam.aria.DebugDestination
 import com.ariateam.aria.command.LanguageStatus
 import com.ariateam.aria.navigation.ExternalNavigationLauncher
+import com.ariateam.aria.navigation.AndroidDestinationResolver
+import com.ariateam.aria.navigation.DestinationResolution
 import com.ariateam.aria.navigation.NavigationLaunchResult
 import com.ariateam.aria.navigation.NavigationProvider
+import com.ariateam.aria.navigation.NavigationRequestPolicy
+import com.ariateam.aria.navigation.withQueryLabel
 import com.ariateam.aria.PendingCameraStartGate
 import com.ariateam.aria.distance.BodyMountProfileStore
 import com.ariateam.aria.distance.DistanceActivity
@@ -88,6 +92,7 @@ import com.ariateam.aria.vision.VisionSession
 import com.ariateam.aria.vision.VisionViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun MainScreen(
@@ -411,6 +416,7 @@ fun MainScreen(
     }
 
     val externalLauncher = remember(context) { ExternalNavigationLauncher(context) }
+    val destinationResolver = remember(context) { AndroidDestinationResolver(context) }
     var lastExternalNavId by rememberSaveable { mutableLongStateOf(state.command.externalNavId) }
     var hasExternalNavBaseline by rememberSaveable { mutableStateOf(false) }
 
@@ -491,17 +497,55 @@ fun MainScreen(
             return@LaunchedEffect
         }
         val eventId = state.command.externalNavId
-        if (eventId == 0L || eventId <= lastExternalNavId) return@LaunchedEffect
-        if (!screenVisible || !startupModel.hasBeenAdmitted) return@LaunchedEffect
+        if (!startupModel.hasBeenAdmitted || !NavigationRequestPolicy.mayHandle(
+                eventId, lastExternalNavId, state.command.externalNavId, screenVisible,
+            )
+        ) return@LaunchedEffect
 
-        lastExternalNavId = eventId
         val provider = NavigationProvider.fromId(state.command.externalNavProvider)
         val destination = state.command.externalNavDestination
 
-        model.consumeNavigation(eventId)
-
         if (provider != null && destination.isNotBlank()) {
-            when (externalLauncher.launch(provider, destination)) {
+            if (provider == NavigationProvider.Naver) {
+                val rawResolution = withTimeoutOrNull(4_000L) { destinationResolver.resolve(destination) }
+                    ?: DestinationResolution.Unavailable
+                val resolution = rawResolution.withQueryLabel(destination)
+                if (!isActive || !NavigationRequestPolicy.mayHandle(
+                        eventId, lastExternalNavId, state.command.externalNavId, screenVisible,
+                    )
+                ) return@LaunchedEffect
+                if (resolution is DestinationResolution.Resolved) {
+                    when (externalLauncher.launchWalkingRoute(resolution.destination)) {
+                        is NavigationLaunchResult.WalkingRouteLaunched -> Toast.makeText(
+                            context,
+                            "도보 경로를 네이버 지도에 전달했습니다. 필요하면 도보 안내 시작을 눌러 주세요.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        is NavigationLaunchResult.WebFallbackLaunched -> Toast.makeText(
+                            context, "네이버 앱에서 경로를 열지 못해 웹 검색으로 연결합니다.", Toast.LENGTH_SHORT,
+                        ).show()
+                        is NavigationLaunchResult.AppLaunched -> Toast.makeText(
+                            context, "네이버 앱에서 목적지를 검색합니다. 도보 안내는 앱에서 시작해 주세요.", Toast.LENGTH_SHORT,
+                        ).show()
+                        is NavigationLaunchResult.Failed -> Toast.makeText(
+                            context, com.ariateam.aria.R.string.nav_not_found, Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                } else {
+                    val message = when (resolution) {
+                        DestinationResolution.Ambiguous -> "목적지가 여러 곳으로 확인되어 검색 결과만 엽니다. 정확한 장소를 말해 주세요."
+                        DestinationResolution.Unavailable -> "목적지 좌표를 확인할 수 없어 네이버 지도에서 검색합니다."
+                        DestinationResolution.NotFound -> "목적지 좌표를 찾지 못해 네이버 지도에서 검색합니다."
+                        is DestinationResolution.Resolved -> ""
+                    }
+                    when (externalLauncher.launch(provider, destination)) {
+                        is NavigationLaunchResult.AppLaunched -> Toast.makeText(context, "$message 도보 안내는 네이버 지도에서 시작해 주세요.", Toast.LENGTH_LONG).show()
+                        is NavigationLaunchResult.WebFallbackLaunched -> Toast.makeText(context, "네이버 앱이 없어 웹 검색을 엽니다. 도보 경로는 네이버 지도 앱에서 확인해 주세요.", Toast.LENGTH_LONG).show()
+                        is NavigationLaunchResult.Failed -> Toast.makeText(context, com.ariateam.aria.R.string.nav_not_found, Toast.LENGTH_SHORT).show()
+                        is NavigationLaunchResult.WalkingRouteLaunched -> Unit
+                    }
+                }
+            } else when (externalLauncher.launch(provider, destination)) {
                 is NavigationLaunchResult.AppLaunched -> {
                     Toast.makeText(
                         context,
@@ -523,7 +567,12 @@ fun MainScreen(
                         Toast.LENGTH_SHORT,
                     ).show()
                 }
+                is NavigationLaunchResult.WalkingRouteLaunched -> Unit
             }
+        }
+        lastExternalNavId = eventId
+        if (currentLatestState.command.externalNavId == eventId) {
+            model.consumeNavigation(eventId)
         }
     }
 

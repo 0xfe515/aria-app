@@ -10,8 +10,7 @@ import java.nio.charset.StandardCharsets
  * Official scheme behaviors:
  * - Google Maps: `google.navigation:q={query}&mode=w` requests pedestrian mode navigation.
  *   Fallback: `https://www.google.com/maps/search/?api=1&query={query}`.
- * - Naver Map: Without destination coordinates (lat/lng), the official supported deep link
- *   is `nmap://search?query={query}&appname={packageName}`.
+ * - Naver Map: text queries use search; resolved destinations use the official walking route.
  *   Fallback: `https://m.map.naver.com/search2/search.naver?query={query}`.
  * - KakaoMap: Without destination coordinates, the official supported deep link
  *   is `kakaomap://search?q={query}`.
@@ -49,6 +48,13 @@ enum class NavigationProvider(
             Naver -> "nmap://search?query=$encoded&appname=com.ariateam.aria"
             Kakao -> "kakaomap://search?q=$encoded"
         }
+    }
+
+    fun buildWalkingRouteUriString(destination: ResolvedDestination): String {
+        require(this == Naver)
+        require(destination.isWithinNaverBounds)
+        return "nmap://route/walk?dlat=${destination.latitude}&dlng=${destination.longitude}" +
+            "&dname=${safeEncode(destination.name)}&appname=com.ariateam.aria"
     }
 
     fun buildAppUri(destination: String): Uri = Uri.parse(buildAppUriString(destination))

@@ -1,0 +1,9 @@
+# Naver walking route handoff
+
+Aria resolves Naver destinations locally with Android `Geocoder` (Korean locale) and, only when one plausible result remains, hands Naver Map a documented `nmap://route/walk` URI with destination latitude, longitude, name, and `appname`. API 33+ uses the asynchronous geocoder callback; API 31–32 uses a single bounded worker and a four-second UI deadline. Cancellation removes queued legacy work or interrupts its worker, while the Compose request guard prevents a cancelled, hidden, or superseded request from opening an app. Ambiguous, unavailable, and not-found resolutions open the existing Naver text search and explain that coordinates or a walking route were not confirmed.
+
+Direct coordinates are accepted only within the Naver scheme's documented latitude/longitude bounds. The route URI omits origin fields because Naver documents those as optional and defaults them to the user's current location. Aria does not request location permission for this handoff.
+
+The official scheme documentation defines `/route/walk` as pedestrian route search and shows `dlat`, `dlng`, `dname`, and `appname`; it documents omitted start coordinates as the current user location. It does not promise that the app will begin active turn-by-turn guidance automatically or operate invisibly in the background, so Aria tells the user to start walking guidance in Naver when needed: [Naver Map URL Scheme](https://guide-gov.ncloud-docs.com/docs/naveropenapiv3-maps-url-scheme-url-scheme).
+
+The external app launch does not call Aria's voice-service stop path. `VoiceService` remains a microphone foreground service while its session is active. The existing `MainScreen` stop lifecycle path detaches the camera preview; no vision/session lifecycle policy was changed here. No real-device behavior was verified.

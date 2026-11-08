@@ -21,6 +21,9 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.ariateam.aria.MainActivity
+import com.ariateam.aria.distance.BodyMountPosition
+import com.ariateam.aria.distance.BodyMountProfile
+import com.ariateam.aria.distance.BodyMountProfileStore
 import com.ariateam.aria.startup.StartupPermissionInventory
 import com.ariateam.aria.startup.StartupViewModel
 import com.ariateam.aria.vision.debug.GpuDiagnosticOverlayActivity
@@ -48,6 +51,9 @@ class VisionBackgroundSessionTest {
     private var startedLifecycleOwner: StartedLifecycleOwner? = null
     private var diagnosticController: VisionPipelineController? = null
     private var originallyStoppedByUser = false
+    private var bodyMountFixtureStore: BodyMountProfileStore? = null
+    private var originalBodyMountProfile: BodyMountProfile? = null
+    private var bodyMountFixtureInstalled = false
 
     @Before
     fun prepareVisibleHome() {
@@ -77,23 +83,38 @@ class VisionBackgroundSessionTest {
 
     @After
     fun stopSessionAndCloseActivity() {
-        instrumentation.runOnMainSync {
-            diagnosticController?.close()
-            diagnosticController = null
-            context.stopService(Intent(context, VisionForegroundService::class.java))
-            VisionSession.closeController()
-        }
-        scenario?.close()
-        scenario = null
-        startedLifecycleOwner?.let { owner ->
-            instrumentation.runOnMainSync { owner.destroy() }
-        }
-        startedLifecycleOwner = null
-        instrumentation.waitForIdleSync()
-        if (originallyStoppedByUser) {
-            VisionSession.markExplicitStop(context)
-        } else {
-            VisionSession.clearExplicitStop(context)
+        try {
+            instrumentation.runOnMainSync {
+                diagnosticController?.close()
+                diagnosticController = null
+                context.stopService(Intent(context, VisionForegroundService::class.java))
+                VisionSession.closeController()
+            }
+            scenario?.close()
+            scenario = null
+            startedLifecycleOwner?.let { owner ->
+                instrumentation.runOnMainSync { owner.destroy() }
+            }
+            startedLifecycleOwner = null
+            instrumentation.waitForIdleSync()
+        } finally {
+            try {
+                if (bodyMountFixtureInstalled) {
+                    val store = requireNotNull(bodyMountFixtureStore)
+                    if (originalBodyMountProfile == null) store.clear()
+                    else check(store.save(originalBodyMountProfile!!)) { "Unable to restore original body mount profile" }
+                }
+            } finally {
+                bodyMountFixtureStore?.close()
+                bodyMountFixtureStore = null
+                originalBodyMountProfile = null
+                bodyMountFixtureInstalled = false
+                if (originallyStoppedByUser) {
+                    VisionSession.markExplicitStop(context)
+                } else {
+                    VisionSession.clearExplicitStop(context)
+                }
+            }
         }
     }
 
@@ -356,6 +377,7 @@ class VisionBackgroundSessionTest {
 
     @Test
     fun homeBackgroundAndReturn_keepsOneCameraSessionUntilExplicitStop() {
+        installBodyMountProfileFixture()
         // Ensure clean session baseline before Home launch
         context.stopService(Intent(context, VisionForegroundService::class.java))
         VisionSession.closeController()
@@ -517,6 +539,15 @@ class VisionBackgroundSessionTest {
                 !VisionSession.isInitialized
         })
         assertTrue("An explicit notification stop must require a visible restart", VisionSession.requiresExplicitRestart(context))
+    }
+
+    private fun installBodyMountProfileFixture() {
+        val store = BodyMountProfileStore(context)
+        originalBodyMountProfile = store.profile.value
+        bodyMountFixtureStore = store
+        val fixtureProfile = BodyMountProfile(statureCm = 170f, position = BodyMountPosition.CHEST)
+        bodyMountFixtureInstalled = true
+        check(store.save(fixtureProfile)) { "Unable to install valid body mount profile fixture" }
     }
 
     @Test

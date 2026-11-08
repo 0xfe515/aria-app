@@ -2,6 +2,7 @@ package com.ariateam.aria.cloud
 
 import com.ariateam.aria.command.CommandContext
 import com.ariateam.aria.command.Interpretation
+import com.ariateam.aria.command.RuleCommandInterpreter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -176,6 +177,73 @@ class CloudCommandParserTest {
         val result3 = parse("앞에 뭐 있어")
         assertTrue(result3 is Interpretation.CloudPhotoQuestion)
         assertTrue((result3 as Interpretation.CloudPhotoQuestion).prompt.contains("앞에 무엇이 있는지"))
+
+        val detailedCapture = parse("사진 찍어서 앞에 있는 빨간 표지판 글자 읽어줘")
+        assertTrue(detailedCapture is Interpretation.CloudPhotoQuestion)
+        assertTrue((detailedCapture as Interpretation.CloudPhotoQuestion).prompt.contains("빨간 표지판 글자"))
+    }
+
+    @Test
+    fun routesNaturalKoreanObjectAndOcrQuestionsWithTheirDetails() {
+        val phrases = listOf(
+            "앞에 있는 거 뭐야?" to listOf("앞에 있는 거", "뭐야"),
+            "챗지피티야, 앞에 무슨 글씨야?" to listOf("앞에 무슨 글씨야"),
+            "질문: 앞쪽에 빨간 표지판 뭐라고 써 있어?" to listOf("빨간 표지판", "뭐라고 써 있어"),
+            "ChatGPT, 주변에 어떤 물건이 보여요?" to listOf("주변에 어떤 물건", "보여요"),
+            "눈앞에 있는 파란 상자 설명해 줘." to listOf("파란 상자", "설명해 줘"),
+            "전방 간판에 뭐라고 적혀 있어?" to listOf("전방 간판", "뭐라고 적혀 있어"),
+            "앞에 있는 식당 이름 알려줘" to listOf("앞에 있는 식당 이름", "알려줘"),
+            "앞에 QR 코드 뭐야?" to listOf("앞에 QR 코드", "뭐야"),
+            "저 간판에 뭐라고 써 있어?" to listOf("저 간판", "뭐라고 써 있어"),
+            "카메라 앞에 보이는 물체가 뭐예요?" to listOf("카메라 앞에", "뭐예요"),
+            "카메라에 보이는 QR 코드 뭐야?" to listOf("카메라에 보이는 QR 코드", "뭐야"),
+            "사진 속에 있는 간판에 뭐라고 써 있어?" to listOf("사진 속에 있는 간판", "뭐라고 써 있어"),
+        )
+        for ((phrase, expectedParts) in phrases) {
+            val result = parse(phrase)
+            assertTrue("Expected CloudPhotoQuestion for '$phrase', got $result", result is Interpretation.CloudPhotoQuestion)
+            val prompt = (result as Interpretation.CloudPhotoQuestion).prompt
+            for (part in expectedParts) assertTrue("Expected '$part' in '$prompt'", prompt.contains(part))
+        }
+    }
+
+    @Test
+    fun invokesNaturalPhotoQuestionsThroughTopLevelInterpreterPrefixes() {
+        val interpreter = RuleCommandInterpreter()
+        val utterances = listOf(
+            "챗지피티에게 앞에 무슨 글씨야?" to "앞에 무슨 글씨야",
+            "챗지피티한테 물어봐 앞에 있는 거 뭐야?" to "앞에 있는 거 뭐야",
+            "질문해줘: 앞에 무슨 글씨야" to "앞에 무슨 글씨야",
+        )
+        for ((utterance, expectedQuestion) in utterances) {
+            val result = interpreter.interpret(utterance, CommandContext(), 0L)
+            assertTrue("Expected CloudPhotoQuestion for '$utterance', got $result", result is Interpretation.CloudPhotoQuestion)
+            assertTrue((result as Interpretation.CloudPhotoQuestion).prompt.contains(expectedQuestion))
+        }
+    }
+
+    @Test
+    fun doesNotRouteAbstractQuotedOrUnrelatedQuestionsToPhoto() {
+        val unrelated = listOf(
+            "앞으로 계획은 어떻게 세워?",
+            "글씨체의 뜻이 뭐야?",
+            "앞에 있는 거 뭐야라는 표현의 의미가 뭐야?",
+            "이 문장에서 ‘앞에 무슨 글씨야’는 무슨 뜻이야?",
+            "무슨 글씨체를 쓰면 좋을까?",
+            "카메라 해상도 알려줘",
+            "사진 파일 형식 설명해줘",
+            "주변 맛집 알려줘",
+            "화면 설정 설명해줘",
+            "이거 코틀린 코드 설명해줘",
+            "카메라 렌즈는 뭐야?",
+            "‘앞에 있는 거 뭐야’라는 표현은 어떤 뜻이야?",
+            "앞에 있는 거 뭐야라고 가정하면 질문이 성립해?",
+            "앞에 있는 거 뭐야? 라고 물어보면 어떤 질문이 돼?",
+            "‘앞에 있는 거 뭐야?’",
+        )
+        for (phrase in unrelated) {
+            assertNull("Unexpected cloud/photo routing for '$phrase'", parse(phrase))
+        }
     }
 
     @Test
@@ -186,6 +254,8 @@ class CloudCommandParserTest {
             "물어보지마",
             "사진 찍지마",
             "카메라로 보지마",
+            "앞에 있는 거 뭐야 하지마",
+            "표지판 글자 읽지 말아줘",
             "질문 보내지마",
         )
 
@@ -202,6 +272,7 @@ class CloudCommandParserTest {
         val compounds = listOf(
             "질문하고 그리고 사진 찍어줘",
             "사진 찍고 다음에 질문해줘",
+            "앞에 있는 거 뭐야 그리고 사진 찍어줘",
         )
 
         for (phrase in compounds) {

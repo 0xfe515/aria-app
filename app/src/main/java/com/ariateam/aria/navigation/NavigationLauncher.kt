@@ -8,15 +8,33 @@ import android.net.Uri
 
 sealed interface NavigationLaunchResult {
     data class AppLaunched(val provider: NavigationProvider, val uri: Uri) : NavigationLaunchResult
+    data class WalkingRouteLaunched(val uri: Uri, val destination: ResolvedDestination) : NavigationLaunchResult
     data class WebFallbackLaunched(val provider: NavigationProvider, val uri: Uri) : NavigationLaunchResult
     data class Failed(val provider: NavigationProvider, val reason: String) : NavigationLaunchResult
 }
 
 interface NavigationLauncher {
     fun launch(provider: NavigationProvider, destination: String): NavigationLaunchResult
+    fun launchWalkingRoute(destination: ResolvedDestination): NavigationLaunchResult
 }
 
 class ExternalNavigationLauncher(private val context: Context) : NavigationLauncher {
+    override fun launchWalkingRoute(destination: ResolvedDestination): NavigationLaunchResult {
+        val provider = NavigationProvider.Naver
+        val uri = Uri.parse(provider.buildWalkingRouteUriString(destination))
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            setPackage(provider.packageName)
+            addCategory(Intent.CATEGORY_BROWSABLE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return try {
+            context.startActivity(intent)
+            NavigationLaunchResult.WalkingRouteLaunched(uri, destination)
+        } catch (_: Exception) {
+            launch(provider, destination.name)
+        }
+    }
+
     override fun launch(provider: NavigationProvider, destination: String): NavigationLaunchResult {
         val appUri = provider.buildAppUri(destination)
         val appIntent = Intent(Intent.ACTION_VIEW, appUri).apply {

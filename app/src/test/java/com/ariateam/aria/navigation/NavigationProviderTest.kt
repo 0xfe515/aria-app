@@ -20,6 +20,15 @@ class NavigationProviderTest {
     }
 
     @Test
+    fun naverResolvedDestinationUsesWalkingRouteAndImplicitCurrentLocation() {
+        val destination = ResolvedDestination("강남역", 37.4979, 127.0276)
+        assertEquals(
+            "nmap://route/walk?dlat=37.4979&dlng=127.0276&dname=%EA%B0%95%EB%82%A8%EC%97%AD&appname=com.ariateam.aria",
+            NavigationProvider.Naver.buildWalkingRouteUriString(destination),
+        )
+    }
+
+    @Test
     fun kakaoMapAppUriUsesOfficialSearchSchemeWithoutCoordinates() {
         val uri = NavigationProvider.Kakao.buildAppUriString("판교역")
         assertEquals("kakaomap://search?q=%ED%8C%90%EA%B5%90%EC%97%AD", uri)

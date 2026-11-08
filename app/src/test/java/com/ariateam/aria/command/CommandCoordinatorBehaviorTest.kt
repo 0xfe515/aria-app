@@ -195,6 +195,37 @@ class CommandCoordinatorBehaviorTest {
     }
 
     @Test
+    fun finalized_genericNavigationFollowUpDefaultsToNaverWithoutCloudFallback() {
+        val coordinator = createCoordinator(audible = true)
+        coordinator.started()
+
+        coordinator.finalized("길안내해줘")
+        assertEquals("어디로 갈까요? 목적지를 말씀해 주세요.", coordinator.snapshot.message)
+        assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+
+        coordinator.finalized("강남역")
+        assertTrue(coordinator.snapshot.externalNavId > 0L)
+        assertEquals("naver", coordinator.snapshot.externalNavProvider)
+        assertEquals("강남역", coordinator.snapshot.externalNavDestination)
+        assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+        coordinator.close()
+    }
+
+    @Test
+    fun inputStarted_cancelsPendingExternalNavigation() {
+        val coordinator = createCoordinator(audible = false)
+        coordinator.started()
+        coordinator.finalized("네이버 지도로 강남역 길안내")
+        assertTrue(coordinator.snapshot.externalNavId > 0L)
+
+        coordinator.inputStarted()
+
+        assertEquals(0L, coordinator.snapshot.externalNavId)
+        assertEquals("", coordinator.snapshot.externalNavDestination)
+        coordinator.close()
+    }
+
+    @Test
     fun finalized_cancellation_rejectsLocallyWithoutCloudQuestion() {
         val coordinator = createCoordinator(audible = true)
         coordinator.started()

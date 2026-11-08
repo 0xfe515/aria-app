@@ -48,16 +48,35 @@ class NavigationCommandParserTest {
     }
 
     @Test
-    fun missingProviderWithDestinationRequestsProviderChoice() {
-        val result = parse("강남역 길안내해줘")
+    fun genericMissingDestinationRemembersDefaultNaverProvider() {
+        val result = parse("길안내해줘")
         assertTrue(result is Interpretation.Clarify)
-        val clarify = result as Interpretation.Clarify
-        assertTrue(clarify.question.contains("네이버 지도"))
-        assertTrue(clarify.question.contains("카카오맵"))
-        assertTrue(clarify.question.contains("구글 지도"))
+        assertTrue((result as Interpretation.Clarify).question.contains("어디로 갈까요"))
+        assertEquals("nav_prov:naver", NavigationCommandParser.extractPendingTarget("길안내해줘"))
+        assertNull(NavigationCommandParser.extractPendingTarget("날씨 알려줘"))
+        assertNull(NavigationCommandParser.extractPendingTarget("강남역"))
+        assertNull(NavigationCommandParser.extractPendingTarget("안내해줘"))
+        assertNull(NavigationCommandParser.extractPendingTarget("길안내해줘 그리고 홈으로 가"))
+        assertNull(NavigationCommandParser.extractPendingTarget("길안내 하지마"))
+        assertNull(NavigationCommandParser.extractPendingTarget("네이버 지도로 길안내 하지마"))
+    }
+
+    @Test
+    fun genericDestinationDefaultsToNaver() {
+        val result = parse("강남역 길안내해줘")
+        assertTrue(result is Interpretation.NavigateExternal)
+        assertEquals(NavigationProvider.Naver, (result as Interpretation.NavigateExternal).provider)
 
         val target = NavigationCommandParser.extractPendingTarget("강남역 길안내해줘")
         assertEquals("nav_dest:강남역", target)
+    }
+
+    @Test
+    fun genericNavigationUsesPendingDestinationWithNaver() {
+        val result = parse("길안내해줘", context = CommandContext("nav_dest:강남역", expiresAt = 30_000), now = 10_000)
+        assertTrue(result is Interpretation.NavigateExternal)
+        assertEquals(NavigationProvider.Naver, (result as Interpretation.NavigateExternal).provider)
+        assertEquals("강남역", result.destination)
     }
 
     @Test
@@ -89,6 +108,12 @@ class NavigationCommandParserTest {
         assertTrue(result is Interpretation.Clarify)
         val clarify = result as Interpretation.Clarify
         assertTrue(clarify.question.contains("목적지"))
+    }
+
+    @Test
+    fun expiredPendingProviderDoesNotRouteBareDestination() {
+        val context = CommandContext("nav_prov:naver", expiresAt = 30_000)
+        assertNull(parse("강남역", context = context, now = 30_001))
     }
 
     @Test
