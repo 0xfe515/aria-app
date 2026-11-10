@@ -33,7 +33,7 @@ class RuleCommandInterpreter : CommandInterpreter {
         }
         if (value in setOf("취소", "취소해", "취소해줘", "아니", "아니요", "됐어")) return execute(AppCommand.Cancel)
         if (value in setOf("듣기중지", "듣기중지해", "그만들어", "그만들어줘", "음성인식꺼", "전체중지")) return execute(AppCommand.Stop)
-        if (listOf("그리고", "다음에").any(value::contains)) {
+        if (LocalIntentAnalysis.hasCompoundCommandConflict(text)) {
             return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
         }
 
@@ -47,17 +47,9 @@ class RuleCommandInterpreter : CommandInterpreter {
                 visualInterpretation is Interpretation.Clarify ||
                 visualInterpretation is Interpretation.Execute
             ) {
-                val secondCommandAfterHago = Regex(
-                    "하고(?:홈|설정|소리|안내|효과음|화면|네이버|카카오|길찾|중지|종료|취소|닫아|열어|꺼줘|켜줘)",
-                ).containsMatchIn(value)
-                if (value.contains("하고") && secondCommandAfterHago) {
-                    return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
-                }
                 return visualInterpretation
             }
         }
-
-        if (value.contains("하고")) return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
 
         val navInterpretation = NavigationCommandParser.parse(text, context, now)
         if (navInterpretation != null) {
@@ -68,6 +60,7 @@ class RuleCommandInterpreter : CommandInterpreter {
             return cloudInterpretation
         }
         val candidates = mutableSetOf<AppCommand>()
+        LocalIntentAnalysis.command(text)?.let(candidates::add)
         if (value in setOf("홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동")) candidates += AppCommand.Home
         if (value in setOf("설정", "설정열어", "설정열어줘", "설정으로가", "설정으로가줘", "설정으로이동", "설정화면열어")) candidates += AppCommand.Settings
         if (value in setOf("현재상태", "현재상태알려줘", "상태알려줘", "지금상태", "상태")) candidates += AppCommand.Status

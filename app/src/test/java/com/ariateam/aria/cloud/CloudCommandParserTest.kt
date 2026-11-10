@@ -178,6 +178,53 @@ class CloudCommandParserTest {
     }
 
     @Test
+    fun recognizesPhotoQuestionWrappersAndPreservesQuestionText() {
+        val phrases = listOf(
+            "사진 찍어서 GPT에게 이거 뭐야 알려줘" to "이거 뭐야",
+            "사진 찍어서 지피티한테 이게 뭔지 알려줘" to "이게 뭔지 알려줘",
+            "사진 찍어서 ChatGPT 주변 장면의 색 알려줘" to "주변 장면의 색",
+            "사진 찍고 앞에 있는 문구 읽어줘" to "앞에 있는 문구 읽어줘",
+            "지피티 사진 찍어서 약 봉투 내용 읽어줘!" to "약 봉투 내용 읽어줘!",
+            "사진 찍어서 GPT에게 이게 뭔지 알려줘?" to "이게 뭔지 알려줘?",
+            "GPT 사진 찍어서 약 봉투 내용 읽어줘!" to "약 봉투 내용 읽어줘!",
+            "사진 찍어서 GPT 모델이 뭔지 알려줘?" to "GPT 모델이 뭔지 알려줘?",
+        )
+        phrases.forEach { (utterance, expected) ->
+            val result = parse(utterance)
+            assertTrue("Expected photo question for '$utterance', got $result", result is Interpretation.CloudPhotoQuestion)
+            assertTrue("Prompt should preserve '$expected': ${(result as Interpretation.CloudPhotoQuestion).prompt}", result.prompt.contains(expected))
+        }
+        assertNull("Text topic question should not become a photo upload", parse("지피티 피자가 뭐야"))
+        assertNull("Abstract color question should not become a photo upload", parse("색의 의미 알려줘"))
+        listOf("사진 찍고 설정 열어", "사진 찍고 확인하고 설정 열어", "설정 열고 소리 꺼").forEach {
+            assertTrue("Expected clarify for independent commands '$it'", parse(it) is Interpretation.Clarify)
+        }
+        assertTrue(parse("사진 찍고 다음에 질문해줘") is Interpretation.Clarify)
+        assertTrue(parse("앞에 있는 거 뭐야 그리고 사진 찍어줘") is Interpretation.Clarify)
+        listOf("사진 찍고 확인하고 설명해줘", "앞에 확인하고 알려줘", "질문 사과하고 배의 차이 알려줘").forEach {
+            val result = parse(it)
+            assertTrue("Expected a single workflow or text question for '$it', got $result", result is Interpretation.CloudPhotoQuestion || result is Interpretation.CloudTextQuestion)
+        }
+    }
+
+    @Test
+    fun directDemonstrativeQuestionsUseSharedPhotoEvidenceAndPreserveWording() {
+        val phrases = listOf(
+            "이게 뭔지 알려줘" to "이게 뭔지 알려줘",
+            "지피티, 이게 뭔지 알려줘" to "이게 뭔지 알려줘",
+            "GPT 이거 무슨 색인지 알려줘" to "이거 무슨 색인지 알려줘",
+        )
+        phrases.forEach { (utterance, expected) ->
+            val result = parse(utterance)
+            assertTrue("Expected photo question for '$utterance', got $result", result is Interpretation.CloudPhotoQuestion)
+            assertTrue("Prompt should preserve '$expected': ${(result as Interpretation.CloudPhotoQuestion).prompt}", result.prompt.contains(expected))
+        }
+        assertNull("Abstract color question should not become a photo upload", parse("색의 의미 알려줘"))
+        assertNull("Provider topic question should not become a photo upload", parse("지피티 피자가 뭐야"))
+        assertNull("Provider model topic must stay a text question", parse("GPT 모델이 뭔지 알려줘"))
+    }
+
+    @Test
     fun photoQuestionExtractsSpecificPrompt() {
         val result1 = parse("사진 찍어서 글자 읽어줘")
         assertTrue(result1 is Interpretation.CloudPhotoQuestion)

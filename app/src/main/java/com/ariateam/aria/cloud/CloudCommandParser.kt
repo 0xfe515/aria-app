@@ -24,15 +24,9 @@ object CloudCommandParser {
             return Interpretation.Clarify("원하는 명령을 하나만 다시 말해 주세요.")
         }
 
-        // 2. Compound commands
-        if (listOf("그리고", "다음에").any(normalized::contains)) {
-            val targets = listOf(
-                "질문", "사진찍", "챗지피티", "chatgpt", "제미나이", "클로드", "물어봐",
-                "앞에", "앞쪽", "전방", "눈앞", "주변", "카메라", "이거", "글자", "표지판", "간판",
-            )
-            if (targets.any(normalized::contains)) {
-                return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
-            }
+        // Multiple executable actions clarify; one capture followed by its question remains one workflow.
+        if (com.ariateam.aria.command.LocalIntentAnalysis.hasCompoundCommandConflict(text)) {
+            return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
         }
 
         // 3. Explicit requests targeting unsupported providers (Gemini, Claude) including photo receiver phrases
@@ -42,7 +36,7 @@ object CloudCommandParser {
         }
 
         // 4. Photo question parsing
-        val photoResult = parsePhotoQuestion(text, normalized)
+        val photoResult = parsePhotoQuestion(text)
         if (photoResult != null) return photoResult
 
         // 5. Text question parsing (with ChatGPT aliases)
@@ -156,12 +150,12 @@ object CloudCommandParser {
         return null
     }
 
-    private fun parsePhotoQuestion(rawText: String, normalized: String): Interpretation? {
-        val effectiveNormalized = normalized.replaceFirst(Regex("^(챗지피티|chatgpt|챗gpt|클라우드)(에게|한테|야|아|로)?"), "")
-        val effectiveRaw = rawText.trim().replaceFirst(
-            Regex("^(챗지피티|chatgpt|챗gpt|클라우드)(?:에게|한테|야|아|로)?[\\s,:]*", RegexOption.IGNORE_CASE),
-            "",
-        )
+    private fun parsePhotoQuestion(rawText: String): Interpretation? {
+        val effectiveRaw = com.ariateam.aria.command.LocalIntentAnalysis.stripLeadingPhotoProvider(rawText.trim())
+            .replaceFirst(
+                Regex("^(?:gpt|지피티|챗지피티|chatgpt|챗gpt)[\\s,:]+(?=(?:이거|이게|저거|저게|그거|그게))", RegexOption.IGNORE_CASE),
+                "",
+            )
         val effectiveQuestionRaw = effectiveRaw.replaceFirst(
             Regex("^(?:질문있어|질문할게|질문해줘|질문해|물어봐줘|물어봐|질문)[\\s,:]*", RegexOption.IGNORE_CASE),
             "",
@@ -170,34 +164,14 @@ object CloudCommandParser {
         val questionNorm = RuleCommandInterpreter.normalize(questionRaw)
 
         // Explicit photo capture trigger phrases
-        val photoTriggers = listOf(
-            "사진찍어서", "사진찍고", "사진찍어줘", "사진찍어",
-            "사진촬영해서", "사진촬영하고", "사진촬영해줘", "사진촬영",
-            "카메라로봐줘", "카메라로봐", "카메라로뭐보여",
-        )
-
-        for (targetNorm in listOf(normalized, effectiveNormalized)) {
-            for (trigger in photoTriggers) {
-                if (targetNorm.startsWith(trigger)) {
-                    val remainder = targetNorm.removePrefix(trigger).trim()
-                    val photoDetails = effectiveRaw.replaceFirst(
-                        Regex("^(?:사진\\s*)?(?:찍어서|찍고|찍어줘?|촬영해서|촬영하고|촬영해줘?|촬영)\\s*"),
-                        "",
-                    ).trim()
-                    val prompt = when {
-                        remainder.isEmpty() -> "앞에 무엇이 있는지 설명해 주세요."
-                        remainder in setOf("알려줘", "설명해줘", "말해줘", "뭐있어", "뭐야", "읽어줘") ->
-                            "앞에 무엇이 있는지 설명해 주세요."
-                        photoDetails.isNotEmpty() && remainder !in setOf("알려줘", "설명해줘", "말해줘") ->
-                            "사진을 보고 다음 질문에 답해 주세요: $photoDetails"
-                        remainder.contains("글자") || remainder.contains("텍스트") || remainder.contains("읽어") ->
-                            "사진 속의 글자나 텍스트를 읽어 주세요."
-                        else -> effectiveRaw.substringAfter("사진").trim().ifEmpty { "앞에 무엇이 있는지 설명해 주세요." }
-                    }
-                    return Interpretation.CloudPhotoQuestion(prompt)
-                }
+        val captureQuestion = com.ariateam.aria.command.LocalIntentAnalysis.captureQuestion(questionRaw)
+        if (captureQuestion != null) {
+            val prompt = if (captureQuestion.isBlank() || captureQuestion in setOf("알려줘", "설명해줘", "말해줘")) {
+                "앞에 무엇이 있는지 설명해 주세요."
+            } else {
+                "사진을 보고 다음 질문에 답해 주세요: $captureQuestion"
             }
-
+            return Interpretation.CloudPhotoQuestion(prompt)
         }
 
         if (isNaturalVisualQuestion(questionRaw, questionNorm)) {
@@ -223,6 +197,18 @@ object CloudCommandParser {
         val visualCues = listOf("앞에", "앞쪽", "전방", "눈앞", "글씨", "글자", "텍스트", "읽어", "표지판", "간판")
         if (visualCues.any(normalized::contains)) return true
         if (isPhraseDiscussion(rawText, normalized)) return false
+
+        // Shared evidence applies only to demonstrative identification questions. The
+        // broader local helper also treats locatives such as "주변" as photo evidence.
+        val sharedPhotoRequest = com.ariateam.aria.command.LocalIntentAnalysis.photoRequest(rawText)
+        val demonstrativePrefixes = listOf("이거", "이게", "저거", "저게", "그거", "그게")
+        val identificationEvidence = listOf("뭔지", "뭐", "무엇", "어떤", "무슨", "색", "모양", "이름")
+        val demonstrativeBody = demonstrativePrefixes
+            .firstOrNull(normalized::startsWith)
+            ?.let(normalized::removePrefix)
+        if (sharedPhotoRequest != null && demonstrativeBody != null &&
+            identificationEvidence.any(demonstrativeBody::contains) && isVisualQuestionShape(demonstrativeBody)
+        ) return true
 
         // Keep the older demonstrative shorthand, but do not generalize its token to arbitrary topics.
         if (normalized in setOf("이거설명해줘", "이거알려줘")) return true
@@ -260,7 +246,7 @@ object CloudCommandParser {
 
     private fun isVisualQuestionShape(body: String): Boolean {
         val objectReference = listOf(
-            "있는", "보이는", "뭐", "무엇", "어떤게", "어떤것", "어떤거", "이름", "색", "모양",
+            "있는", "보이는", "뭐", "뭔지", "무엇", "어떤게", "어떤것", "어떤거", "이름", "색", "모양",
             "물건", "물체", "사물", "표지판", "간판", "글자", "글씨", "텍스트",
         )
             .any(body::contains)

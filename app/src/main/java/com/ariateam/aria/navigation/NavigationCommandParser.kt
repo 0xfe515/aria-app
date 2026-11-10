@@ -17,7 +17,7 @@ object NavigationCommandParser {
         "안내하지마", "길찾지마", "검색하지마",
     )
 
-    private val COMPOUND_PATTERNS = listOf("그리고", "하고", "다음에")
+    private val COMPOUND_PATTERNS = listOf("그리고", "다음에")
 
     private val APP_RESERVED_WORDS = setOf(
         "홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동",
@@ -40,7 +40,7 @@ object NavigationCommandParser {
         }
 
         // Compound command check
-        if (COMPOUND_PATTERNS.any(compact::contains)) {
+        if (COMPOUND_PATTERNS.any(compact::contains) || hasIndependentCommandAfterHago(trimmed)) {
             return Interpretation.Clarify("명령을 하나씩 말해 주세요.")
         }
 
@@ -147,18 +147,27 @@ object NavigationCommandParser {
 
     private fun containsNavigationKeyword(text: String): Boolean {
         val keywords = listOf(
-            "길안내", "길찾기", "길찾아", "안내해", "안내 해", "가자", "가줘", "가 주세요", "가는길", "가는 길",
+            "길안내", "길 안내", "길찾기", "길 찾기", "길찾아", "안내해", "안내 해", "안내해 주세요", "안내해주세요",
+            "가자", "가줘", "가 주세요", "가고 싶어", "가고싶어", "가고 싶어요", "가고싶어요",
+            "가는길", "가는 길", "가는 길 좀 알려", "걸어서", "도보로",
         )
         return keywords.any(text::contains)
     }
 
+    private fun hasIndependentCommandAfterHago(text: String): Boolean {
+        val compact = text.lowercase().filter { it.isLetterOrDigit() }
+        return Regex("(?:하고|가고)(?:홈|설정|소리|효과음|화면|중지|종료|취소|닫아|열어|꺼줘|켜줘)")
+            .containsMatchIn(compact)
+    }
+
     private fun containsExplicitGenericNavigationKeyword(text: String): Boolean {
         val compact = text.lowercase().filter { it.isLetterOrDigit() }
-        return listOf("길안내", "길찾기", "길찾아", "가는길", "가는방법").any(compact::contains)
+        return listOf("길안내", "길찾기", "길찾아", "가는길", "가는방법", "가고싶어", "가고싶어요")
+            .any(compact::contains)
     }
 
     fun extractDestinationCandidate(text: String, provider: NavigationProvider?): String {
-        var result = text.trim()
+        var result = text.trim().replace(Regex("[，,。.!?？]+"), " ").replace(Regex("\\s+"), " ").trim()
 
         // 1. Remove provider mentions (longer/more specific patterns first)
         if (provider != null) {
@@ -195,67 +204,44 @@ object NavigationCommandParser {
             }
         }
 
-        // 2. Remove leading action prefixes
-        val prefixes = listOf(
-            "길안내해줘", "길안내 해줘", "길안내", "길찾기", "안내해줘", "안내 해줘", "안내",
-            "가는길", "가는 길",
-        )
-        for (prefix in prefixes) {
-            if (result.startsWith(prefix)) {
-                result = result.substring(prefix.length).trim()
+        // Strip request language only at boundaries, so action-like substrings in names survive.
+        val actions = listOf(
+            "길 안내 해 주세요", "길 안내 해 줘", "길 안내 해줘", "길 안내해 주세요", "길 안내해줘", "길안내 해주세요", "길안내 해 주세요", "길안내해주세요", "길안내 해줘", "길안내해줘",
+            "길안내", "길 안내", "길찾기 해주세요", "길찾기해주세요", "길찾아줘", "길찾기", "길찾아",
+            "가는 길 좀 알려주세요", "가는 길 좀 알려줘", "가는길 알려줘", "가는 길 알려줘",
+            "가는방법 알려줘", "가는 방법 알려줘", "가는 길", "가는길",
+            "걸어서", "도보로", "찾아봐줘", "찾아봐", "찾아줘", "알려 주세요", "알려주세요", "알려줘",
+            "안내해 주세요", "안내해주세요", "안내 해주세요", "안내해줘", "안내 해줘", "안내해", "안내",
+            "가고 싶어요", "가고싶어요", "가고 싶어", "가고싶어", "가고", "가 주세요", "가주세요", "가줘", "가자",
+            "이동해줘", "이동하자", "검색해줘", "검색", "열어줘", "보여줘",
+        ).sortedByDescending(String::length)
+        for (action in actions) {
+            val genericWord = action in setOf("안내", "길안내", "길 안내", "길찾기", "가는 길", "가는길")
+            if (result.startsWith(action) && (!genericWord || result.length == action.length || result[action.length].isWhitespace())) {
+                result = result.removePrefix(action).trim()
+                break
             }
         }
-
-        // 3. Remove trailing action suffixes
-        val suffixes = listOf(
-            "가는길 알려줘", "가는 길 알려줘", "가는길 안내해줘", "가는 길 안내해줘",
-            "가는방법 알려줘", "가는 방법 알려줘", "가는길", "가는 길",
-            "길안내해줘", "길안내 해줘", "길안내해주세요", "길안내 해주세요", "길안내해", "길안내 해", "길안내",
-            "길찾기해줘", "길찾기 해줘", "길찾아줘", "길찾아 줘", "길찾기",
-            "안내해줘", "안내 해줘", "안내해주세요", "안내 해주세요", "안내해", "안내 해", "안내",
-            "찾아봐줘", "찾아봐 줘", "찾아봐", "찾아줘", "찾아 줘",
-            "알려줘", "알려 줘",
-            "가 주세요", "가주세요", "가줘", "가자",
-            "이동해줘", "이동 해줘", "이동하자", "이동",
-            "검색해줘", "검색 해줘", "검색",
-            "열어줘", "열어 줘", "열어",
-            "보여줘", "보여 줘",
-        )
-        for (suffix in suffixes) {
-            if (result.endsWith(suffix)) {
-                result = result.substring(0, result.length - suffix.length).trim()
+        for (action in actions) {
+            val genericWord = action in setOf("안내", "길안내", "길 안내", "길찾기", "가는 길", "가는길")
+            if (result.endsWith(action) && (!genericWord || result.length == action.length || result[result.length - action.length - 1].isWhitespace())) {
+                result = result.removeSuffix(action).trim()
+                break
             }
         }
-
-        // 4. Remove trailing destination particles: "까지", "으로", "로", "에"
-        // Preserve Korean road/street names ending with "로" or "대로" (e.g. 대학로, 을지로, 충무로, 테헤란로, 세종대로)
-        val preservedRoadEndings = listOf(
-            "대로", "순환로", "간선로", "북로", "남로",
-            "대학로", "을지로", "충무로", "퇴계로", "테헤란로", "종로", "구로",
-            "압구정로", "도산대로", "남대문로", "한강대로", "마포대로", "백범로",
-            "율곡로", "사직로", "세종로", "창경궁로", "동호로", "다산로",
+        if (result.endsWith("가고")) result = result.removeSuffix("가고").trim()
+        // Destination particles are meaningful only at the end of the extracted phrase.
+        val particle = listOf("까지", "으로", "에").firstOrNull { result.endsWith(it) && result.length > it.length + 1 }
+        if (particle != null) result = result.removeSuffix(particle).trim()
+        val spacedParticle = listOf(" 까지", " 으로", " 에").firstOrNull { result.endsWith(it) && result.length > it.length + 1 }
+        if (spacedParticle != null) result = result.removeSuffix(spacedParticle).trim()
+        if (result.endsWith("로로") && result.length > 3) result = result.dropLast(1)
+        val roadSuffixes = listOf(
+            "대로", "순환로", "간선로", "북로", "남로", "대학로", "을지로", "충무로", "퇴계로", "테헤란로",
+            "종로", "구로", "압구정로", "도산대로", "남대문로", "한강대로", "마포대로", "백범로", "율곡로",
+            "사직로", "세종로", "창경궁로", "동호로", "다산로", "강변북로",
         )
-
-        when {
-            result.endsWith("로로") && result.length > 2 -> {
-                result = result.substring(0, result.length - 1).trim()
-            }
-            result.endsWith("으로") && result.length > 3 -> {
-                result = result.substring(0, result.length - 2).trim()
-            }
-            result.endsWith("까지") && result.length > 3 -> {
-                result = result.substring(0, result.length - 2).trim()
-            }
-            result.endsWith("에") && result.length > 2 -> {
-                result = result.substring(0, result.length - 1).trim()
-            }
-            result.endsWith("로") && result.length > 2 -> {
-                val isPreserved = preservedRoadEndings.any { result.endsWith(it) }
-                if (!isPreserved) {
-                    result = result.substring(0, result.length - 1).trim()
-                }
-            }
-        }
+        if (result.endsWith("로") && result.length > 2 && roadSuffixes.none(result::endsWith)) result = result.dropLast(1).trim()
 
         return DestinationValidator.sanitize(result)
     }
@@ -267,7 +253,7 @@ object NavigationCommandParser {
         if (providers.size > 1) return null
 
         val provider = providers.firstOrNull()
-        if (NEGATION_PATTERNS.any(compact::contains) || COMPOUND_PATTERNS.any(compact::contains)) {
+        if (NEGATION_PATTERNS.any(compact::contains) || COMPOUND_PATTERNS.any(compact::contains) || hasIndependentCommandAfterHago(trimmed)) {
             return null
         }
         if (provider == null && !containsNavigationKeyword(trimmed)) return null

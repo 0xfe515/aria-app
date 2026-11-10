@@ -23,6 +23,31 @@ class RuleCommandInterpreterTest {
         ).forEach { (text, command) -> assertEquals(text, Interpretation.Execute(command), parse(text)) }
     }
 
+    @Test fun recognizesPoliteLocalIntentAndSingleCaptureWorkflow() {
+        mapOf(
+            "설정 좀 열어 주세요" to AppCommand.Settings,
+            "안내 소리 켜 주세요" to AppCommand.SoundOn,
+            "화면을 숨겨 주세요" to AppCommand.HideScreen,
+            "현재 상태를 확인해 주세요" to AppCommand.Status,
+        ).forEach { (utterance, command) -> assertEquals(utterance, Interpretation.Execute(command), parse(utterance)) }
+        listOf("사진 찍고 확인하고 설명해줘", "사진 찍어서 GPT에게 이게 뭔지 알려줘").forEach {
+            assertTrue("Expected one photo workflow for '$it', got ${parse(it)}", parse(it) is Interpretation.CloudPhotoQuestion)
+        }
+        assertTrue(parse("사진 찍고 설정 열어") is Interpretation.Clarify)
+        assertTrue(parse("사진 찍고 확인하고 설정 열어") is Interpretation.Clarify)
+        assertTrue(parse("앞에 있는 거 뭐야 하고 설정 열어") is Interpretation.Clarify)
+        assertTrue(parse("앞에 뭐가 있는지 확인하고 알려줘") is Interpretation.CloudPhotoQuestion)
+        assertTrue(parse("사진 찍고 확인하고 설명해줘") is Interpretation.CloudPhotoQuestion)
+        val textQuestion = parse("질문 사과하고 배의 차이 알려줘")
+        assertTrue(textQuestion is Interpretation.CloudTextQuestion)
+        assertTrue((textQuestion as Interpretation.CloudTextQuestion).question.contains("사과하고 배의 차이"))
+        assertEquals(Interpretation.Unknown, parse("설정 열어라는 말의 뜻"))
+        assertEquals(Interpretation.Execute(AppCommand.Settings), parse("설정을 열어주세요"))
+        assertEquals(Interpretation.Execute(AppCommand.ShowScreen), parse("화면 보여주세요"))
+        assertEquals(Interpretation.Execute(AppCommand.WalkingStatus), parse("보행 상태 확인해 주세요"))
+        assertTrue(parse("설정 열고 소리 꺼") is Interpretation.Clarify)
+    }
+
     @Test fun negationNeverBecomesAPositiveCommand() {
         listOf(
             "소리 켜지 마", "설정 열지 마", "홈으로 가지 마", "듣기 중지 하지 마",
@@ -77,6 +102,23 @@ class RuleCommandInterpreterTest {
     @Test fun recognizesCloudPhotoQuestionCommands() {
         val result = parse("사진 찍어서 알려줘")
         assertTrue(result is Interpretation.CloudPhotoQuestion)
+    }
+
+    @Test fun directDemonstrativePhotoQuestionsRouteThroughInterpreter() {
+        val phrases = listOf(
+            "이게 뭔지 알려줘" to "이게 뭔지 알려줘",
+            "지피티, 이게 뭔지 알려줘" to "이게 뭔지 알려줘",
+            "GPT 이거 무슨 색인지 알려줘" to "이거 무슨 색인지 알려줘",
+        )
+        phrases.forEach { (utterance, expected) ->
+            val result = parse(utterance)
+            assertTrue("Expected photo question for '$utterance', got $result", result is Interpretation.CloudPhotoQuestion)
+            assertTrue("Prompt should preserve '$expected': ${(result as Interpretation.CloudPhotoQuestion).prompt}", result.prompt.contains(expected))
+        }
+        assertTrue(parse("이게 뭔지 읽지 마") is Interpretation.Clarify)
+        assertEquals(Interpretation.Execute(AppCommand.Cancel), parse("이게 뭔지 질문 취소"))
+        assertTrue(parse("사진 찍어서 GPT 모델이 뭔지 알려줘") is Interpretation.CloudPhotoQuestion)
+        assertTrue((parse("사진 찍어서 GPT 모델이 뭔지 알려줘") as Interpretation.CloudPhotoQuestion).prompt.contains("GPT 모델이 뭔지 알려줘"))
     }
 
     @Test fun directVisualCuePrecedesNavigationMatching() {

@@ -222,4 +222,54 @@ class NavigationCommandParserTest {
             assertEquals(expected.second, nav.destination)
         }
     }
+
+    @Test
+    fun flexibleKoreanNavigationRequestsExtractExactDestination() {
+        val cases = mapOf(
+            "충주시청까지 안내해줘" to "충주시청",
+            "길 안내해 주세요, 충주시청" to "충주시청",
+            "길 안내 해 주세요 충주시청" to "충주시청",
+            "충주시청 길 안내 해 줘" to "충주시청",
+            "길안내 충주시청" to "충주시청",
+            "충주시청 가고 싶어" to "충주시청",
+            "충주시청으로 가고 싶어" to "충주시청",
+            "서울로 안내해줘" to "서울",
+            "충주시청 가는 길 좀 알려줘" to "충주시청",
+            "걸어서 충주시청까지" to "충주시청",
+            "  충주시청 까지 길안내 해주세요! " to "충주시청",
+        )
+
+        for ((utterance, destination) in cases) {
+            val result = parse(utterance)
+            assertTrue("Expected NavigateExternal for '$utterance', got $result", result is Interpretation.NavigateExternal)
+            assertEquals(destination, (result as Interpretation.NavigateExternal).destination)
+            assertEquals(NavigationProvider.Naver, result.provider)
+        }
+    }
+
+    @Test
+    fun navigationKeepsRoadNamesAndDoesNotMatchPlaceInformationQuestions() {
+        val cases = mapOf(
+            "테헤란로까지 안내해줘" to "테헤란로",
+            "을지로 가는 길 좀 알려줘" to "을지로",
+            "퇴계로까지 안내해줘" to "퇴계로",
+            "동호로까지 길안내" to "동호로",
+            "안내동까지 길안내" to "안내동",
+            "안내면사무소까지 안내해줘" to "안내면사무소",
+        )
+        for ((utterance, destination) in cases) {
+            val result = parse(utterance)
+            assertTrue("Expected NavigateExternal for '$utterance'", result is Interpretation.NavigateExternal)
+            assertEquals(destination, (result as Interpretation.NavigateExternal).destination)
+        }
+
+        assertNull(parse("충주시청에 대해 알려줘"))
+    }
+
+    @Test
+    fun desireAndSingleHagoWorkflowAreNotMisreadAsCompoundCommands() {
+        assertTrue(parse("충주시청 가고 싶어요") is Interpretation.NavigateExternal)
+        assertTrue(parse("충주시청 가고 길안내 해줘") is Interpretation.NavigateExternal)
+        assertTrue(parse("충주시청 가고 소리 꺼") is Interpretation.Clarify)
+    }
 }
