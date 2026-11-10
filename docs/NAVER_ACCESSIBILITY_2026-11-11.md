@@ -11,4 +11,3 @@ Independent validation passed with exit 0 for `:app:assembleDebug :app:testDebug
 The original checkout contains pre-existing unrelated changes. Only the navigation-assist hunks of MainScreen are staged via a three-way merge against the saved pre-task baseline; all other pre-existing changes remain untouched. Distribution will use the isolated committed source checkout, excluding those unrelated changes.
 
 APK SHA-256: `209da4aebbd7236500d23785cd21d4af4e16643f8223a8a6e1f88fb81732ff10`. Version code 17, version name 1.0.0-preview.20261111.1. Isolated build log: gradle-isolated-release.log (exit 0, 3m 17s); original checkout log: gradle-validation-2.log (exit 0, 4m 22s). Existing compiler deprecation/style warnings remain; no build or lint errors.
-
