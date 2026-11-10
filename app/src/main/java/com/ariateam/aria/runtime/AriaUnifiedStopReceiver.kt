@@ -8,6 +8,7 @@ import android.content.ServiceConnection
 import android.os.IBinder
 import android.util.Log
 import com.ariateam.aria.speech.IVoiceService
+import com.ariateam.aria.navigation.accessibility.NaverWalkingAccessibilityService
 import com.ariateam.aria.speech.VoiceService
 import com.ariateam.aria.vision.VisionForegroundService
 import com.ariateam.aria.vision.VisionSession
@@ -162,6 +163,7 @@ class AriaUnifiedStopReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != AriaUnifiedNotificationCoordinator.ACTION_STOP_ALL) return
+        NaverWalkingAccessibilityService.cancel(context)
         runCatching { Log.i(TAG, "AriaUnifiedStopReceiver: Stopping all foreground services upon user action") }
 
         // 1. Mark explicit user stop and stop camera foreground service

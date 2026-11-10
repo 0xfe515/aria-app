@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.util.Log
 import com.ariateam.aria.speech.IVoiceService
 import com.ariateam.aria.speech.VoiceService
+import com.ariateam.aria.navigation.accessibility.NaverAssistBridge
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -588,6 +589,7 @@ class AriaRuntimeProvider : ContentProvider() {
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
         val ctx = context ?: return null
+        if (method.startsWith("naverAssist")) return NaverAssistBridge.handle(method, extras)
         return AriaRuntimeStateBridge.handleCall(ctx, method, extras)
     }
 

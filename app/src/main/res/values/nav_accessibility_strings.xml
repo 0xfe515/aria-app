@@ -1,0 +1,4 @@
+<resources>
+    <string name="nav_accessibility_label">Aria 네이버 도보 안내 보조</string>
+    <string name="nav_accessibility_description">음성으로 요청한 네이버 도보 경로에서 목적지와 도보 안내 화면을 확인한 뒤 안내 시작을 한 번 누릅니다.</string>
+</resources>

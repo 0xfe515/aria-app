@@ -16,6 +16,7 @@ import com.ariateam.aria.R
 import com.ariateam.aria.navigation.DestinationValidator
 import com.ariateam.aria.navigation.NavigationCommandParser
 import com.ariateam.aria.navigation.NavigationProvider
+import com.ariateam.aria.navigation.accessibility.NaverWalkingAccessibilityService
 import com.ariateam.aria.settings.AlertFrequency
 import com.ariateam.aria.settings.FeedbackSettings
 import com.ariateam.aria.settings.FeedbackSettingsClient
@@ -213,6 +214,7 @@ class CommandCoordinator internal constructor(
     /** Called at Waiting -> Dictating, so an old interpretation cannot win while user speaks. */
     fun inputStarted() {
         if (snapshot.externalNavId != 0L) clearExternalNavigation()
+        context?.let(NaverWalkingAccessibilityService::cancel)
         if (awaiting) {
             generation.advance()
             speech.stop()
@@ -302,6 +304,7 @@ class CommandCoordinator internal constructor(
             AppCommand.ForwardCalibration -> requestForwardCalibration(generateEventId())
             AppCommand.Help -> announce("홈으로 돌아가, 설정 화면 열어, 네이버 지도 또는 카카오맵으로 길안내, 앞에 뭐가 있는지 또는 글씨 읽어줘, 앱 안내 음량 50퍼센트 또는 음량 낮춰, 경고 빈도 덜 자주, 주의 알림 켜기, 현재 알림 설정, 보행 상태, 정면 다시 보정, 취소, 전체 중지를 말할 수 있어요.")
             AppCommand.Cancel -> {
+                context?.let(NaverWalkingAccessibilityService::cancel)
                 commandContext = CommandContext()
                 clearNavigation()
                 clearExternalNavigation()
@@ -309,6 +312,7 @@ class CommandCoordinator internal constructor(
                 announce("취소했어요.")
             }
             AppCommand.Stop -> {
+                context?.let(NaverWalkingAccessibilityService::cancel)
                 commandContext = CommandContext()
                 clearNavigation()
                 clearExternalNavigation()
@@ -410,6 +414,7 @@ class CommandCoordinator internal constructor(
     }
 
     private fun navigateExternal(provider: NavigationProvider, destination: String) {
+        context?.let(NaverWalkingAccessibilityService::cancel)
         if (!DestinationValidator.isValid(destination)) {
             announce("목적지를 올바르게 말씀해 주세요.")
             return
@@ -749,6 +754,7 @@ class CommandCoordinator internal constructor(
     }
 
     fun stopped() {
+        context?.let(NaverWalkingAccessibilityService::cancel)
         stopPending = false
         main?.removeCallbacks(stopDeadline)
         calibrationTimeout?.let { main?.removeCallbacks(it) }

@@ -1,6 +1,8 @@
 package com.ariateam.aria.ui.screen
 
 import android.content.Intent
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.view.accessibility.AccessibilityManager
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -62,6 +64,7 @@ import com.ariateam.aria.navigation.DestinationResolution
 import com.ariateam.aria.navigation.NavigationLaunchResult
 import com.ariateam.aria.navigation.NavigationProvider
 import com.ariateam.aria.navigation.NavigationRequestPolicy
+import com.ariateam.aria.navigation.accessibility.NaverWalkingAccessibilityService
 import com.ariateam.aria.navigation.withQueryLabel
 import com.ariateam.aria.PendingCameraStartGate
 import com.ariateam.aria.distance.BodyMountProfileStore
@@ -509,21 +512,34 @@ fun MainScreen(
                     )
                 ) return@LaunchedEffect
                 if (resolution is DestinationResolution.Resolved) {
+                    val assistEnabled = runCatching {
+                        context.getSystemService(AccessibilityManager::class.java)
+                            ?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                            ?.any { info -> info.resolveInfo.serviceInfo.let { service ->
+                                service.packageName == context.packageName && service.name == NaverWalkingAccessibilityService::class.java.name
+                            } } == true
+                    }.getOrDefault(false)
+                    val assistToken = "$eventId-${SystemClock.elapsedRealtimeNanos()}"
+                    val assistArmed = assistEnabled && NaverWalkingAccessibilityService.arm(context, assistToken, resolution.destination.name)
                     when (externalLauncher.launchWalkingRoute(resolution.destination)) {
                         is NavigationLaunchResult.WalkingRouteLaunched -> Toast.makeText(
                             context,
-                            "도보 경로를 네이버 지도에 전달했습니다. 필요하면 도보 안내 시작을 눌러 주세요.",
+                            when {
+                                assistArmed -> "도보 경로를 전달했어요. 안내 시작 여부를 확인하는 중이에요."
+                                assistEnabled -> "도보 경로를 전달했어요. 자동 보조를 준비하지 못해 네이버 지도에서 직접 시작해 주세요."
+                                else -> "도보 경로를 네이버 지도에 전달했어요. 자동 안내 시작을 원하면 일반 설정에서 접근성 보조를 켜 주세요."
+                            },
                             Toast.LENGTH_LONG,
                         ).show()
-                        is NavigationLaunchResult.WebFallbackLaunched -> Toast.makeText(
+                        is NavigationLaunchResult.WebFallbackLaunched -> { NaverWalkingAccessibilityService.cancel(context); Toast.makeText(
                             context, "네이버 앱에서 경로를 열지 못해 웹 검색으로 연결합니다.", Toast.LENGTH_SHORT,
-                        ).show()
-                        is NavigationLaunchResult.AppLaunched -> Toast.makeText(
+                        ).show() }
+                        is NavigationLaunchResult.AppLaunched -> { NaverWalkingAccessibilityService.cancel(context); Toast.makeText(
                             context, "네이버 앱에서 목적지를 검색합니다. 도보 안내는 앱에서 시작해 주세요.", Toast.LENGTH_SHORT,
-                        ).show()
-                        is NavigationLaunchResult.Failed -> Toast.makeText(
+                        ).show() }
+                        is NavigationLaunchResult.Failed -> { NaverWalkingAccessibilityService.cancel(context); Toast.makeText(
                             context, com.ariateam.aria.R.string.nav_not_found, Toast.LENGTH_SHORT,
-                        ).show()
+                        ).show() }
                     }
                 } else {
                     val message = when (resolution) {

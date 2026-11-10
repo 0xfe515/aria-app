@@ -338,6 +338,8 @@ private fun GeneralSettings(
         onClick = onOpenAppSettings,
     )
 
+    NaverWalkingAccessibilitySettings()
+
     // 신체 장착 기준 (키·착용 위치)
     SettingsSectionTitle(stringResource(R.string.settings_general_mount_section))
     val profileSummary = if (profile != null && profile.isValid) {
