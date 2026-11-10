@@ -132,6 +132,8 @@ internal fun launchAccessibilitySettings(openSettings: () -> Unit): Boolean {
         return false
     } catch (_: SecurityException) {
         return false
+    } catch (_: Exception) {
+        return false
     }
 }
 

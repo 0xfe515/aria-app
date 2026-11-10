@@ -15,6 +15,65 @@ class NaverAssistPolicyTest {
         walking: Boolean = true, buttons: List<AssistButton> = button, consumed: Boolean = false,
     ) = NaverAssistPolicy.shouldClick(request, token, pkg, if (fresh) 700L else 400L, now, root, 1, 1, destination, walking, false, buttons, consumed)
 
+    private fun tree(vararg nodes: AssistTreeNode) = NaverAssistTargetSelector.select(nodes.toList(), NaverAssistPolicy.NAVER_PACKAGE, 7)
+
+    @Test fun composeLabeledChildrenResolveToOneSharedClickableParent() {
+        val targets = tree(
+            AssistTreeNode(0, null, "", true, true, false, NaverAssistPolicy.NAVER_PACKAGE, 7),
+            AssistTreeNode(1, 0, "", true, true, true, NaverAssistPolicy.NAVER_PACKAGE, 7),
+            AssistTreeNode(2, 1, "안내시작", true, true, false, NaverAssistPolicy.NAVER_PACKAGE, 7),
+            AssistTreeNode(3, 1, "안내시작", true, true, false, NaverAssistPolicy.NAVER_PACKAGE, 7),
+        )
+        assertEquals(setOf(1), targets)
+    }
+
+    @Test fun distinctParentsAreAmbiguousAndRejectedByOneTargetGuard() {
+        val targets = tree(
+            AssistTreeNode(0, null, "", true, true, false, NaverAssistPolicy.NAVER_PACKAGE, 7),
+            AssistTreeNode(1, 0, "", true, true, true, NaverAssistPolicy.NAVER_PACKAGE, 7),
+            AssistTreeNode(2, 1, "안내시작", true, true, false, NaverAssistPolicy.NAVER_PACKAGE, 7),
+            AssistTreeNode(3, 0, "", true, true, true, NaverAssistPolicy.NAVER_PACKAGE, 7),
+            AssistTreeNode(4, 3, "안내시작", true, true, false, NaverAssistPolicy.NAVER_PACKAGE, 7),
+        )
+        assertEquals(setOf(1, 3), targets)
+        assertFalse(allowed(buttons = targets.map { AssistButton("안내시작", true, true) }))
+    }
+
+    @Test fun rejectsDistantDisabledInvisibleAndMismatchedTargetsAndAcceptsDirectClick() {
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        assertTrue(tree(AssistTreeNode(0, null, "안내시작", true, true, true, pkg, 7)).contains(0))
+        assertTrue(tree(AssistTreeNode(0, null, "", true, true, false, pkg, 7), AssistTreeNode(1, 0, "", true, true, true, pkg, 7), AssistTreeNode(2, 1, "", true, true, false, pkg, 7), AssistTreeNode(3, 2, "안내시작", true, true, false, pkg, 7)).isEmpty())
+        assertTrue(tree(AssistTreeNode(0, null, "", true, false, true, pkg, 7), AssistTreeNode(1, 0, "안내시작", true, true, false, pkg, 7)).isEmpty())
+        assertTrue(tree(AssistTreeNode(0, null, "", false, true, true, pkg, 7), AssistTreeNode(1, 0, "안내시작", true, true, false, pkg, 7)).isEmpty())
+        assertTrue(tree(AssistTreeNode(0, null, "", true, true, true, "other", 7), AssistTreeNode(1, 0, "안내시작", true, true, false, pkg, 7)).isEmpty())
+        assertTrue(tree(AssistTreeNode(0, null, "", true, true, true, pkg, 8), AssistTreeNode(1, 0, "안내시작", true, true, false, pkg, 7)).isEmpty())
+        assertTrue(tree(AssistTreeNode(0, null, "", true, true, true, pkg, 7), AssistTreeNode(1, 0, "시작", true, true, false, pkg, 7)).isEmpty())
+    }
+
+    @Test fun rejectsDisabledStartLabelEvenWhenParentIsEnabled() {
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        assertTrue(tree(
+            AssistTreeNode(0, null, "", true, true, true, pkg, 7),
+            AssistTreeNode(1, 0, "안내시작", true, false, false, pkg, 7),
+        ).isEmpty())
+    }
+
+    @Test fun rejectsImmediateClickableParentWithUnrelatedLabelOrControlChild() {
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        assertTrue(tree(
+            AssistTreeNode(0, null, "", true, true, false, pkg, 7),
+            AssistTreeNode(1, 0, "", true, true, true, pkg, 7),
+            AssistTreeNode(2, 1, "안내시작", true, true, false, pkg, 7),
+            AssistTreeNode(3, 1, "미리보기", true, true, false, pkg, 7),
+        ).isEmpty())
+        assertTrue(tree(
+            AssistTreeNode(0, null, "", true, true, false, pkg, 7),
+            AssistTreeNode(1, 0, "", true, true, true, pkg, 7),
+            AssistTreeNode(2, 1, "안내시작", true, true, false, pkg, 7),
+            AssistTreeNode(3, 1, "", true, true, true, pkg, 7),
+        ).isEmpty())
+    }
+
     @Test fun matchingFreshWalkingRouteClicksOnce() { assertTrue(allowed()); assertFalse(allowed(consumed = true)) }
     @Test fun rejectsWrongPackageAndStaleRootOrEvent() {
         assertFalse(allowed(pkg = "com.other")); assertFalse(allowed(root = false)); assertFalse(allowed(fresh = false))

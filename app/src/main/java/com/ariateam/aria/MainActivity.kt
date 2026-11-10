@@ -5,14 +5,24 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.ariateam.aria.distance.BodyMountProfileStore
+import com.ariateam.aria.ui.screen.FirstLaunchAccessibilityGate
+import com.ariateam.aria.ui.screen.FirstLaunchAccessibilityPreferences
 import com.ariateam.aria.ui.screen.MainScreen
+import com.ariateam.aria.ui.screen.isServiceEnabled
+import com.ariateam.aria.ui.screen.openAccessibilitySettings
 import com.ariateam.aria.ui.screen.onboarding.OnboardingScreen
 import com.ariateam.aria.ui.theme.AriaTheme
 
@@ -40,6 +50,52 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun OnboardingGate() {
         val context = LocalContext.current
+        val lifecycleOwner = LocalLifecycleOwner.current
+        val accessibilityPreferences = remember { FirstLaunchAccessibilityPreferences(context) }
+        var accessibilityGateState by remember {
+            mutableStateOf(accessibilityPreferences.initialState(isEnabled = isServiceEnabledForApp(context)))
+        }
+
+        DisposableEffect(accessibilityPreferences, lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME && accessibilityPreferences.isSettingsReturnPending()) {
+                    accessibilityPreferences.completeSettingsReturn()
+                    accessibilityGateState = accessibilityPreferences.stateAfterSettingsReturn(
+                        isEnabled = isServiceEnabledForApp(context),
+                    )
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+
+        if (accessibilityGateState.showGate) {
+            Surface {
+                FirstLaunchAccessibilityGate(
+                    settingsUnavailable = accessibilityGateState.settingsUnavailable,
+                    onOpenSettings = {
+                        if (openAccessibilitySettings(context)) {
+                            accessibilityPreferences.markSettingsLaunched()
+                            accessibilityGateState = accessibilityGateState.copy(
+                                showGate = true,
+                                settingsUnavailable = false,
+                                pendingSettingsReturn = true,
+                            )
+                        } else {
+                            accessibilityGateState = accessibilityGateState.copy(settingsUnavailable = true)
+                        }
+                    },
+                    onSkip = {
+                        accessibilityPreferences.markSkipped()
+                        accessibilityGateState = accessibilityGateState.copy(
+                            showGate = false,
+                            pendingSettingsReturn = false,
+                        )
+                    },
+                )
+            }
+            return
+        }
 
         // Create the store after Composition is ready, once Context is attached.
         val profileStore = remember { BodyMountProfileStore(context) }
@@ -62,5 +118,13 @@ class MainActivity : ComponentActivity() {
         } else {
             MainScreen()
         }
+    }
+
+    private fun isServiceEnabledForApp(context: android.content.Context): Boolean {
+        val component = android.content.ComponentName(
+            context.packageName,
+            "com.ariateam.aria.navigation.accessibility.NaverWalkingAccessibilityService",
+        )
+        return isServiceEnabled(context, component)
     }
 }

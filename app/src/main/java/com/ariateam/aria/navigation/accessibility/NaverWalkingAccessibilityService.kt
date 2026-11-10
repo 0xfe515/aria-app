@@ -68,7 +68,8 @@ class NaverWalkingAccessibilityService : AccessibilityService() {
         }
         if (event.eventType !in setOf(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) return
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { disarm(active.token); return } ?: return
-        val buttons = mutableListOf<Pair<AccessibilityNodeInfo, AssistButton>>()
+        val tree = mutableListOf<AssistTreeNode>()
+        val nodeById = mutableMapOf<Int, AccessibilityNodeInfo>()
         val nodes = mutableListOf<AccessibilityNodeInfo>()
         try {
             treeComplete = true
@@ -78,11 +79,12 @@ class NaverWalkingAccessibilityService : AccessibilityService() {
             naverSeen = true
             val texts = mutableListOf<String>()
             val modes = mutableListOf<Pair<String, Boolean>>()
-            collect(root, texts, buttons, modes, nodes, isRoot = true)
+            collect(root, texts, modes, nodes, tree, nodeById, parentId = null, isRoot = true)
             if (!treeComplete) return
             val destinationMatch = texts.firstOrNull { NaverAssistPolicy.normalize(it) == NaverAssistPolicy.normalize(active.destination) }
             val mode = NaverAssistPolicy.modeEvidence(modes)
-            val eligible = buttons.filter { NaverAssistPolicy.isStartButton(it.second.text) && it.second.visible && it.second.enabled }
+            val targetIds = NaverAssistTargetSelector.select(tree, NaverAssistPolicy.NAVER_PACKAGE, root.windowId)
+            val eligible = targetIds.mapNotNull { id -> nodeById[id]?.let { it to AssistButton("안내시작", it.isVisibleToUser, it.isEnabled) } }
             if (NaverAssistPolicy.shouldClick(
                     active, active.token, pkg, event.eventTime, SystemClock.elapsedRealtime(),
                     root.isVisibleToUser && naverSeen, root.windowId, event.windowId, destinationMatch,
@@ -113,9 +115,11 @@ class NaverWalkingAccessibilityService : AccessibilityService() {
     private fun collect(
         node: AccessibilityNodeInfo,
         texts: MutableList<String>,
-        buttons: MutableList<Pair<AccessibilityNodeInfo, AssistButton>>,
         modes: MutableList<Pair<String, Boolean>>,
         nodes: MutableList<AccessibilityNodeInfo>,
+        tree: MutableList<AssistTreeNode>,
+        nodeById: MutableMap<Int, AccessibilityNodeInfo>,
+        parentId: Int?,
         isRoot: Boolean = false,
         depth: Int = 0,
     ) {
@@ -126,18 +130,21 @@ class NaverWalkingAccessibilityService : AccessibilityService() {
             }
             return
         }
+        val id = tree.size
         if (!isRoot) nodes += node
+        nodeById[id] = node
         val text = node.text?.toString().orEmpty().ifBlank { node.contentDescription?.toString().orEmpty() }
+        tree += AssistTreeNode(id, parentId, text, node.isVisibleToUser, node.isEnabled, node.isClickable,
+            node.packageName?.toString(), node.windowId)
         if (text.isNotBlank() && node.isVisibleToUser) {
             texts += text
             modes += text to (node.isSelected || node.isChecked)
         }
-        if (node.isClickable && node.isVisibleToUser) buttons += node to AssistButton(text, true, node.isEnabled)
         for (i in 0 until node.childCount) {
             if (nodes.size >= MAX_TREE_NODES) { treeComplete = false; break }
             val child = node.getChild(i)
             if (child == null) treeComplete = false
-            else collect(child, texts, buttons, modes, nodes, depth = depth + 1)
+            else collect(child, texts, modes, nodes, tree, nodeById, id, depth = depth + 1)
         }
     }
 

@@ -38,6 +38,61 @@ internal object NaverAssistPolicy {
     }
 }
 
+/** Bounded accessibility-tree snapshot used to resolve labels to actionable nodes. */
+internal data class AssistTreeNode(
+    val id: Int, val parentId: Int?, val label: String, val visible: Boolean,
+    val enabled: Boolean, val clickable: Boolean, val packageName: String?, val windowId: Int,
+)
+
+internal object NaverAssistTargetSelector {
+    private const val MAX_ANCESTORS = 1
+
+    fun select(nodes: List<AssistTreeNode>, packageName: String, windowId: Int): Set<Int> {
+        val byId = nodes.associateBy { it.id }
+        val targets = mutableSetOf<Int>()
+        for (labelNode in nodes) {
+            if (!labelNode.visible || !labelNode.enabled || labelNode.packageName != packageName || labelNode.windowId != windowId ||
+                !NaverAssistPolicy.isStartButton(labelNode.label)) continue
+            var candidate: AssistTreeNode? = labelNode
+            var steps = 0
+            while (candidate != null && steps <= MAX_ANCESTORS) {
+                if (candidate.visible && candidate.enabled && candidate.clickable &&
+                    candidate.packageName == packageName && candidate.windowId == windowId &&
+                    (candidate.id == labelNode.id || !hasUnrelatedActionableChild(candidate, labelNode, nodes, byId))) {
+                    targets += candidate.id
+                    break
+                }
+                if (steps == MAX_ANCESTORS) break
+                candidate = candidate.parentId?.let(byId::get)
+                steps++
+            }
+        }
+        return targets
+    }
+
+    private fun hasUnrelatedActionableChild(
+        candidate: AssistTreeNode,
+        matchedLabel: AssistTreeNode,
+        nodes: List<AssistTreeNode>,
+        byId: Map<Int, AssistTreeNode>,
+    ): Boolean = nodes.any { descendant ->
+        if (descendant.id == matchedLabel.id || !descendant.visible || !isDescendantOf(descendant, candidate, byId)) {
+            false
+        } else {
+            descendant.clickable || (descendant.label.isNotBlank() && !NaverAssistPolicy.isStartButton(descendant.label))
+        }
+    }
+
+    private fun isDescendantOf(node: AssistTreeNode, ancestor: AssistTreeNode, byId: Map<Int, AssistTreeNode>): Boolean {
+        var parent = node.parentId?.let(byId::get)
+        while (parent != null) {
+            if (parent.id == ancestor.id) return true
+            parent = parent.parentId?.let(byId::get)
+        }
+        return false
+    }
+}
+
 internal data class AssistButton(val text: String, val visible: Boolean, val enabled: Boolean)
 
 internal data class AssistModeEvidence(val walkingSelected: Boolean, val drivingOrTransitSelected: Boolean)
