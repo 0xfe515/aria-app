@@ -79,10 +79,11 @@ class HazardSpeechIntegrationDeviceTest {
                     override fun speakHazardWarning(m: String?) {}
                     override fun updateWalkingAssistState(session: Long, seq: Long, ts: Long, status: String?, announce: Boolean, stopped: Boolean) {}
                     override fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {}
-                    override fun postHazardAlert(session: Long, seq: Long, ts: Long, message: String?) {
-                        deliveredEvents.add(
-                            HazardAlertEvent(session, seq, ts, message.orEmpty())
-                        )
+                    override fun postHazardAlert(session: Long, seq: Long, ts: Long, message: String?) {}
+                    override fun postHazardAlertWithSeverity(session: Long, seq: Long, ts: Long, message: String?, severityOrdinal: Int) {
+                        val severity = com.ariateam.aria.hazard.AlertSeverity.entries.getOrNull(severityOrdinal)
+                            ?: com.ariateam.aria.hazard.AlertSeverity.WARNING
+                        deliveredEvents.add(HazardAlertEvent(session, seq, ts, message.orEmpty(), severity = severity))
                         latch.countDown()
                     }
                     override fun preemptSpeech() {}
@@ -173,8 +174,11 @@ class HazardSpeechIntegrationDeviceTest {
                     override fun speakHazardWarning(m: String?) {}
                     override fun updateWalkingAssistState(session: Long, seq: Long, ts: Long, status: String?, announce: Boolean, stopped: Boolean) {}
                     override fun reportForwardCalibrationResult(requestId: Long, successful: Boolean) {}
-                    override fun postHazardAlert(session: Long, seq: Long, ts: Long, message: String?) {
-                        deliveredEvents.add(HazardAlertEvent(session, seq, ts, message.orEmpty()))
+                    override fun postHazardAlert(session: Long, seq: Long, ts: Long, message: String?) {}
+                    override fun postHazardAlertWithSeverity(session: Long, seq: Long, ts: Long, message: String?, severityOrdinal: Int) {
+                        val severity = com.ariateam.aria.hazard.AlertSeverity.entries.getOrNull(severityOrdinal)
+                            ?: com.ariateam.aria.hazard.AlertSeverity.WARNING
+                        deliveredEvents.add(HazardAlertEvent(session, seq, ts, message.orEmpty(), severity = severity))
                     }
                     override fun preemptSpeech() {}
                     override fun isServiceActive(): Boolean = false

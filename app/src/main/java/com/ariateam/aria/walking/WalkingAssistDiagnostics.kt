@@ -30,6 +30,7 @@ enum class WalkingDiagnosticReason {
     PIPELINE_STALLED,
     PIPELINE_ERROR,
     NO_FRESH_RESULT,
+    USER_CAUTION_DISABLED,
 }
 
 data class WalkingAssistDiagnosticEvent(

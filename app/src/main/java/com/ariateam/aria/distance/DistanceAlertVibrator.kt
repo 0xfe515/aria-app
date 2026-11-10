@@ -7,6 +7,8 @@ import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import com.ariateam.aria.settings.FeedbackSettingsClient
+import com.ariateam.aria.settings.AlertFrequency
 
 enum class VibrationDecision {
     NONE,
@@ -19,9 +21,23 @@ enum class VibrationDecision {
  * Separated from Android system Vibrator service to allow direct, exhaustive JVM unit testing.
  */
 class DistanceAlertPolicy(
-    val urgentCooldownMs: Long = URGENT_COOLDOWN_MS,
-    val cautionCooldownMs: Long = CAUTION_COOLDOWN_MS,
+    urgentCooldownMs: Long = URGENT_COOLDOWN_MS,
+    cautionCooldownMs: Long = CAUTION_COOLDOWN_MS,
 ) {
+    private val normalUrgentCooldownMs = urgentCooldownMs
+    private val normalCautionCooldownMs = cautionCooldownMs
+    var cautionEnabled = true
+        private set
+    fun configure(frequency: AlertFrequency, cautionEnabled: Boolean) {
+        val factor = when (frequency) { AlertFrequency.FREQUENT -> 0.5; AlertFrequency.NORMAL -> 1.0; AlertFrequency.QUIET -> 2.0 }
+        this.urgentCooldownMs = (normalUrgentCooldownMs * factor).toLong().coerceAtLeast(300L)
+        this.cautionCooldownMs = (normalCautionCooldownMs * factor).toLong().coerceAtLeast(500L)
+        this.cautionEnabled = cautionEnabled
+    }
+    var urgentCooldownMs: Long = urgentCooldownMs
+        private set
+    var cautionCooldownMs: Long = cautionCooldownMs
+        private set
     companion object {
         const val URGENT_COOLDOWN_MS = 1_200L
         const val CAUTION_COOLDOWN_MS = 2_500L
@@ -49,6 +65,7 @@ class DistanceAlertPolicy(
                 }
             }
             DistanceRisk.CAUTION -> {
+                if (!cautionEnabled) { lastRisk = risk; return VibrationDecision.NONE }
                 val isEscalation = lastRisk == DistanceRisk.CLEAR || lastRisk == DistanceRisk.UNKNOWN
                 val cooldownPassed = (currentTimeMillis - lastVibrateTimestamp) >= cautionCooldownMs
                 if (isEscalation || cooldownPassed) {
@@ -91,6 +108,7 @@ class DistanceAlertVibrator(
         val CAUTION_AMPLITUDES = intArrayOf(0, 180)
     }
 
+    private val feedbackSettings = FeedbackSettingsClient(context)
     private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
         manager?.defaultVibrator
@@ -106,6 +124,7 @@ class DistanceAlertVibrator(
      */
     fun onRiskEvaluated(risk: DistanceRisk): Boolean {
         val now = timeProvider()
+        feedbackSettings.settings.value.let { policy.configure(it.alertFrequency, it.cautionEnabled) }
         val decision = policy.evaluate(risk, now)
         return when (decision) {
             VibrationDecision.URGENT -> {
@@ -165,5 +184,6 @@ class DistanceAlertVibrator(
 
     fun release() {
         cancel()
+        feedbackSettings.close()
     }
 }

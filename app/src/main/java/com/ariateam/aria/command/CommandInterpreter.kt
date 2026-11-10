@@ -11,6 +11,7 @@ sealed interface Interpretation {
     data class NavigateExternal(val provider: NavigationProvider, val destination: String) : Interpretation
     data class CloudTextQuestion(val question: String) : Interpretation
     data class CloudPhotoQuestion(val prompt: String) : Interpretation
+    data class Feedback(val command: FeedbackCommand) : Interpretation
     data class Clarify(val question: String) : Interpretation
     data object Unknown : Interpretation
 }
@@ -40,7 +41,7 @@ class RuleCommandInterpreter : CommandInterpreter {
         // Direct visual requests take precedence over navigation/provider substring matches.
         // The cloud parser still owns negation and unsupported-provider handling.
         val visualCue = listOf("앞에", "앞쪽", "전방", "눈앞", "글씨", "글자", "텍스트", "읽어", "표지판", "간판")
-            .any(value::contains)
+            .any(value::contains) || LocalIntentAnalysis.photoRequest(text) != null
         if (visualCue) {
             val visualInterpretation = com.ariateam.aria.cloud.CloudCommandParser.parse(text, context, now)
             if (visualInterpretation is Interpretation.CloudPhotoQuestion ||
@@ -49,6 +50,12 @@ class RuleCommandInterpreter : CommandInterpreter {
             ) {
                 return visualInterpretation
             }
+        }
+
+        when (val feedback = FeedbackCommandParser.parse(text)) {
+            is FeedbackParseResult.Command -> return Interpretation.Feedback(feedback.value)
+            is FeedbackParseResult.Clarify -> return Interpretation.Clarify(feedback.message)
+            FeedbackParseResult.NotFeedback -> Unit
         }
 
         val navInterpretation = NavigationCommandParser.parse(text, context, now)
@@ -61,12 +68,12 @@ class RuleCommandInterpreter : CommandInterpreter {
         }
         val candidates = mutableSetOf<AppCommand>()
         LocalIntentAnalysis.command(text)?.let(candidates::add)
-        if (value in setOf("홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동")) candidates += AppCommand.Home
-        if (value in setOf("설정", "설정열어", "설정열어줘", "설정으로가", "설정으로가줘", "설정으로이동", "설정화면열어")) candidates += AppCommand.Settings
+        if (value in setOf("홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동", "홈으로돌아가", "홈으로돌아가줘", "홈으로돌아와")) candidates += AppCommand.Home
+        if (value in setOf("설정", "설정열어", "설정열어줘", "설정으로가", "설정으로가줘", "설정으로이동", "설정화면열어", "설정화면열어주세요")) candidates += AppCommand.Settings
         if (value in setOf("현재상태", "현재상태알려줘", "상태알려줘", "지금상태", "상태")) candidates += AppCommand.Status
         if (value in setOf("보행상태", "보행상태알려줘", "걷기상태", "걷기상태알려줘")) candidates += AppCommand.WalkingStatus
-        if (value in setOf("정면보정", "정면보정해", "정면보정해줘", "앞방향보정", "방향보정")) candidates += AppCommand.ForwardCalibration
-        if (value in setOf("도움말", "도움말알려줘", "뭐할수있어", "사용법", "사용법알려줘")) candidates += AppCommand.Help
+        if (value in setOf("정면보정", "정면보정해", "정면보정해줘", "정면다시보정", "정면다시보정해줘", "앞방향보정", "방향보정")) candidates += AppCommand.ForwardCalibration
+        if (value in setOf("도움말", "도움말알려줘", "뭐할수있어", "사용법", "사용법알려줘", "명령어뭐있어", "명령어알려줘")) candidates += AppCommand.Help
         if (value in setOf("화면숨겨", "화면숨겨줘", "화면숨겨주세요", "화면꺼", "화면꺼줘", "화면끄기")) {
             candidates += AppCommand.HideScreen
         }

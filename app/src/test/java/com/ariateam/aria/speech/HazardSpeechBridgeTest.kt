@@ -23,7 +23,8 @@ class HazardSpeechBridgeTest {
         val session: Long,
         val sequence: Long,
         val timestampNanos: Long,
-        val message: String
+        val message: String,
+        val severity: AlertSeverity
     )
 
     private val recordedAlerts = mutableListOf<RecordedAlert>()
@@ -36,13 +37,14 @@ class HazardSpeechBridgeTest {
             IVoiceService::class.java.classLoader,
             arrayOf(IVoiceService::class.java)
         ) { _, method, args ->
-            if (method.name == "postHazardAlert" && args != null) {
+            if (method.name == "postHazardAlertWithSeverity" && args != null) {
                 recordedAlerts.add(
                     RecordedAlert(
                         session = args[0] as Long,
                         sequence = args[1] as Long,
                         timestampNanos = args[2] as Long,
-                        message = args[3] as String
+                        message = args[3] as String,
+                        severity = AlertSeverity.entries[args[4] as Int]
                     )
                 )
             }
@@ -121,7 +123,8 @@ class HazardSpeechBridgeTest {
                 session = 42L,
                 sequence = 1L,
                 timestampNanos = 100_000_000L,
-                message = "전방 1m 장애물 주의"
+                message = "전방 1m 장애물 주의",
+                severity = AlertSeverity.WARNING
             ),
             recordedAlerts[0]
         )
@@ -301,10 +304,11 @@ class HazardSpeechBridgeTest {
         conn1.onBindingDied(null)
 
         // Conn1 should be unbound, but conn2 must remain active
-        val event = HazardAlertEvent(42L, 2L, 200_000L, "주의", HazardLevel.NEAR_PATH_HAZARD)
+        val event = HazardAlertEvent(42L, 2L, 200_000L, "주의", HazardLevel.PATH_CAUTION, severity = AlertSeverity.CAUTION)
         bridge.onHazardAlert(event)
         assertEquals(1, recordedAlerts.size)
         assertEquals("주의", recordedAlerts[0].message)
+        assertEquals(AlertSeverity.CAUTION, recordedAlerts[0].severity)
 
         bridge.close()
     }
@@ -371,7 +375,7 @@ class HazardSpeechBridgeTest {
         ) { _, method, _ ->
             when (method.name) {
                 "preemptSpeech" -> invocationLog.add("preemptSpeech")
-                "postHazardAlert" -> invocationLog.add("postHazardAlert")
+                "postHazardAlertWithSeverity" -> invocationLog.add("postHazardAlertWithSeverity")
             }
             null
         } as IVoiceService
@@ -396,7 +400,7 @@ class HazardSpeechBridgeTest {
 
         assertEquals(
             "WARNING must preempt speech before posting hazard alert",
-            listOf("preemptSpeech", "postHazardAlert"),
+            listOf("preemptSpeech", "postHazardAlertWithSeverity"),
             invocationLog,
         )
 
@@ -416,7 +420,7 @@ class HazardSpeechBridgeTest {
 
         assertEquals(
             "CAUTION must not preempt speech",
-            listOf("postHazardAlert"),
+            listOf("postHazardAlertWithSeverity"),
             invocationLog,
         )
 

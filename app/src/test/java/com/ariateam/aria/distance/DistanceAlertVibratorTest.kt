@@ -2,11 +2,22 @@ package com.ariateam.aria.distance
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import com.ariateam.aria.settings.AlertFrequency
 
 /**
  * Tests the temporal cooldown and immediate escalation logic of production [DistanceAlertPolicy].
  */
 class DistanceAlertVibratorTest {
+
+    @Test
+    fun configuredFrequencyChangesCooldownAndCautionCanBeSuppressed() {
+        val policy = DistanceAlertPolicy()
+        policy.configure(AlertFrequency.QUIET, cautionEnabled = false)
+        assertEquals(VibrationDecision.NONE, policy.evaluate(DistanceRisk.CAUTION, 1_000L))
+        assertEquals(VibrationDecision.URGENT, policy.evaluate(DistanceRisk.URGENT, 1_001L))
+        assertEquals(VibrationDecision.NONE, policy.evaluate(DistanceRisk.URGENT, 3_000L))
+        assertEquals(VibrationDecision.URGENT, policy.evaluate(DistanceRisk.URGENT, 3_401L))
+    }
 
     @Test
     fun testUrgentTriggersImmediatelyAndRespectsCooldown() {

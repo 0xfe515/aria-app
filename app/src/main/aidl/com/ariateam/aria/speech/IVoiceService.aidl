@@ -19,6 +19,7 @@ interface IVoiceService {
     oneway void cancelCloudQuestion(long questionId);
     oneway void speakHazardWarning(String message);
     oneway void postHazardAlert(long session, long sequence, long timestampNanos, String message);
+    oneway void postHazardAlertWithSeverity(long session, long sequence, long timestampNanos, String message, int severityOrdinal);
     oneway void updateWalkingAssistState(long session, long sequence, long timestampNanos, String status, boolean announce, boolean stopped);
     oneway void reportForwardCalibrationResult(long requestId, boolean successful);
     oneway void preemptSpeech();

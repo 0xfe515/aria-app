@@ -8,6 +8,7 @@ import android.os.VibrationEffect
 import android.os.VibratorManager
 import android.util.Log
 import com.ariateam.aria.R
+import com.ariateam.aria.settings.FeedbackSettingsClient
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bundled sound cues also work when no TTS language pack is installed. */
@@ -18,6 +19,7 @@ class VoiceFeedback(context: Context) : AutoCloseable {
     ).build()
     @Volatile var audibleEnabled: Boolean = true
     private val loaded = ConcurrentHashMap.newKeySet<Int>()
+    private val feedbackSettings = FeedbackSettingsClient(context)
     private val vibrator = context.getSystemService(VibratorManager::class.java).defaultVibrator
     private val start: Int
     private val end: Int
@@ -47,12 +49,12 @@ class VoiceFeedback(context: Context) : AutoCloseable {
         }
         val playsSound = audible && audibleEnabled
         if (playsSound) {
-            val streamId = if (loaded.contains(id)) pool.play(id, 1f, 1f, 1, 0, rate) else 0
+            val streamId = if (loaded.contains(id)) (feedbackSettings.settings.value.volumePercent / 100f).let { pool.play(id, it, it, 1, 0, rate) } else 0
             if (streamId == 0) Log.w("AriaVoiceFeedback", "Cue unavailable: cue=$cue, loaded=${loaded.contains(id)}")
             else Log.d("AriaVoiceFeedback", "Cue playback requested: cue=$cue")
         }
         return if (playsSound) SystemClock.elapsedRealtime() + 1_500 else 0
     }
 
-    override fun close() { pool.release() }
+    override fun close() { feedbackSettings.close(); pool.release() }
 }

@@ -3,6 +3,8 @@ package com.ariateam.aria.command
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.Bundle
+import com.ariateam.aria.settings.FeedbackSettingsClient
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
@@ -69,6 +71,7 @@ internal class AndroidSpeechPlaybackEngine(
     context: Context?,
     private val onInit: (Boolean) -> Unit
 ) : CommandSpeechPlaybackEngine {
+    private val feedbackSettings = context?.let { FeedbackSettingsClient(it) }
     private var tts: TextToSpeech? = null
     private var ready = false
     private var listener: CommandSpeechPlaybackEngine.UtteranceListener? = null
@@ -121,7 +124,8 @@ internal class AndroidSpeechPlaybackEngine(
 
     override fun speak(text: String, utteranceId: String): Int {
         val localTts = tts ?: return CommandSpeechPlaybackEngine.ERROR
-        return localTts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        val params = Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, (feedbackSettings?.settings?.value?.volumePercent ?: 100) / 100f) }
+        return localTts.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
     }
 
     override fun stop() {
@@ -129,6 +133,7 @@ internal class AndroidSpeechPlaybackEngine(
     }
 
     override fun shutdown() {
+        feedbackSettings?.close()
         tts?.shutdown()
         tts = null
     }

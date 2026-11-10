@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import com.ariateam.aria.settings.AlertFrequency
 
 class HazardAlertPolicyTest {
 
@@ -363,5 +364,33 @@ class HazardAlertPolicyTest {
             }
             if (i < 2) mockClockMs += 100L
         }
+    }
+    @Test
+    fun cautionCanBeDisabledAndFrequencyOnlyChangesCooldown() {
+        policy.configure(AlertFrequency.QUIET, cautionEnabled = false)
+        assertEquals(5_000L, policy.alertCooldownMs)
+        assertEquals(12_000L, policy.cautionCooldownMs)
+        val result = policy.evaluate(
+            structuredAssessment(10_000_000_000L, AlertSeverity.CAUTION, HazardCause.NONE),
+            nowRealtimeMs = 10_000L,
+            nowElapsedNanos = 10_000_000_000L,
+        )
+        assertEquals(AlertSuppressionReason.CAUTION_DISABLED, (result as AlertDecision.Suppressed).reason)
+        val legacyCaution = assessment(10_100_000_000L, HazardLevel.PATH_CAUTION)
+        assertEquals(AlertSuppressionReason.CAUTION_DISABLED, (policy.evaluate(legacyCaution, 10_100L, 10_100_000_000L) as AlertDecision.Suppressed).reason)
+    }
+    @Test
+    fun warningRemainsImmediateWhenCautionIsDisabled() {
+        policy.configure(AlertFrequency.QUIET, cautionEnabled = false)
+        val first = policy.evaluate(
+            structuredAssessment(10_000_000_000L, AlertSeverity.WARNING, HazardCause.NONE),
+            10_000L, 10_000_000_000L,
+        )
+        assertEquals(AlertSuppressionReason.CONFIRMATION_PENDING, (first as AlertDecision.Suppressed).reason)
+        val second = policy.evaluate(
+            structuredAssessment(10_100_000_000L, AlertSeverity.WARNING, HazardCause.NONE),
+            10_100L, 10_100_000_000L,
+        )
+        assertTrue(second is AlertDecision.Fire)
     }
 }

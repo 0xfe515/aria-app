@@ -120,4 +120,13 @@ class WalkingAssistDiagnosticsTest {
         assertEquals(2, diagnostics.snapshot().size)
         assertEquals(WalkingDiagnosticStage.DECISION, diagnostics.snapshot().first().stage)
     }
+    @Test
+    fun userDisabledCautionHasDistinctReasonAndExistingReasonOrdinalsStayStable() {
+        assertEquals(WalkingDiagnosticReason.NO_FRESH_RESULT.ordinal + 1, WalkingDiagnosticReason.USER_CAUTION_DISABLED.ordinal)
+        val diagnostics = WalkingAssistDiagnostics()
+        assertTrue(diagnostics.startSession(3L, 1_000L, "GPU", "aria5"))
+        val frame = diagnostics.recordCapture(3L, 1_100L, 1_100L, "GPU", "aria5")!!
+        assertTrue(diagnostics.recordSuppression(3L, frame, 1_200L, WalkingDiagnosticReason.USER_CAUTION_DISABLED))
+        assertEquals(WalkingDiagnosticReason.USER_CAUTION_DISABLED, diagnostics.snapshot().last().reason)
+    }
 }

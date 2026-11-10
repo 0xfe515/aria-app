@@ -6,6 +6,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import com.ariateam.aria.settings.AlertFrequency
+import com.ariateam.aria.settings.FeedbackSettings
+import com.ariateam.aria.hazard.AlertSeverity
 
 class CommandCoordinatorBehaviorTest {
 
@@ -39,13 +42,27 @@ class CommandCoordinatorBehaviorTest {
     private val emittedSnapshots = mutableListOf<CommandSnapshot>()
     private var vibrationCount = 0
     private var suppressionState = false
+    private class FakeFeedbackSettings : FeedbackSettingsAccess {
+        var current = FeedbackSettings()
+        var fail = false
+        override val cachedSettings get() = current
+        override fun read() = if (fail) null else current
+        override fun setVolumePercent(value: Int) = if (fail) null else current.copy(volumePercent = value).also { current = it }
+        override fun adjustVolumePercent(delta: Int) = if (fail) null else current.copy(volumePercent = (current.volumePercent + delta).coerceIn(0, 100)).also { current = it }
+        override fun setAlertFrequency(value: AlertFrequency) = if (fail) null else current.copy(alertFrequency = value).also { current = it }
+        override fun setCautionEnabled(value: Boolean) = if (fail) null else current.copy(cautionEnabled = value).also { current = it }
+    }
+    private lateinit var feedbackSettings: FakeFeedbackSettings
     private val testNowMs = 10_000L
+    private var testClockMs = testNowMs
 
     @Before
     fun setUp() {
         emittedSnapshots.clear()
         vibrationCount = 0
         suppressionState = false
+        feedbackSettings = FakeFeedbackSettings()
+        testClockMs = testNowMs
         CommandCoordinator.resetGlobalEventIdForTesting(1_000L)
     }
 
@@ -62,8 +79,9 @@ class CommandCoordinatorBehaviorTest {
             vibrate = { vibrationCount++ },
             preferencesOverride = fakePrefs,
             notificationManagerOverride = null,
-            clockRealtimeMs = { testNowMs },
-            clockElapsedNanos = { testNowMs * 1_000_000L },
+            clockRealtimeMs = { testClockMs },
+            clockElapsedNanos = { testClockMs * 1_000_000L },
+            feedbackSettingsOverride = feedbackSettings,
         )
     }
 
@@ -314,6 +332,87 @@ class CommandCoordinatorBehaviorTest {
         assertEquals("질문을 처리하지 못했어요.", coordinator.snapshot.message)
         assertFalse(coordinator.snapshot.processing)
         assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+        coordinator.close()
+    }
+
+    @Test fun feedbackCommandsPersistAndReadBackActualSettings() {
+        val coordinator = createCoordinator()
+        coordinator.started()
+        coordinator.finalized("볼륨 50퍼센트")
+        assertEquals(50, feedbackSettings.current.volumePercent)
+        assertTrue(coordinator.snapshot.message.contains("50퍼센트"))
+        coordinator.finalized("볼륨 올려")
+        assertEquals(60, feedbackSettings.current.volumePercent)
+        coordinator.finalized("경고 빈도 덜 자주")
+        assertEquals(AlertFrequency.QUIET, feedbackSettings.current.alertFrequency)
+        coordinator.finalized("주의 알림 꺼")
+        assertEquals(false, feedbackSettings.current.cautionEnabled)
+        coordinator.finalized("현재 알림 설정 알려줘")
+        assertTrue(coordinator.snapshot.message.contains("60퍼센트"))
+        assertTrue(coordinator.snapshot.message.contains("덜 자주"))
+        assertTrue(coordinator.snapshot.message.contains("꺼져"))
+        assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+        feedbackSettings.current = feedbackSettings.current.copy(volumePercent = 95)
+        coordinator.finalized("음량 올려")
+        assertEquals(100, feedbackSettings.current.volumePercent)
+        assertTrue(coordinator.snapshot.message.contains("최대치인 100퍼센트"))
+        feedbackSettings.current = feedbackSettings.current.copy(volumePercent = 5)
+        coordinator.finalized("음량 낮춰")
+        assertEquals(0, feedbackSettings.current.volumePercent)
+        assertTrue(coordinator.snapshot.message.contains("최저치인 0퍼센트"))
+        coordinator.close()
+    }
+
+    @Test fun failedFeedbackMutationDoesNotClaimSuccessOrUseCloud() {
+        val coordinator = createCoordinator()
+        coordinator.started()
+        feedbackSettings.fail = true
+        coordinator.finalized("음량 45퍼센트")
+        assertTrue(coordinator.snapshot.message.contains("저장하거나 읽지 못했어요"))
+        assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+        assertEquals(100, feedbackSettings.current.volumePercent)
+        coordinator.finalized("경고 빈도")
+        assertTrue(coordinator.snapshot.message.contains("경고 빈도를 자주, 보통, 또는 덜 자주"))
+        assertEquals(0L, coordinator.snapshot.cloudQuestionId)
+        coordinator.close()
+    }
+
+    @Test fun disabledCautionDropsOnlyCautionSeverityBeforeAlertSideEffects() {
+        val coordinator = createCoordinator()
+        coordinator.started()
+        feedbackSettings.current = feedbackSettings.current.copy(cautionEnabled = false)
+        emittedSnapshots.clear()
+        vibrationCount = 0
+        val nowNanos = testNowMs * 1_000_000L
+        coordinator.postHazardAlert(1L, 1L, nowNanos, "주의 단계 알림", AlertSeverity.CAUTION)
+        assertTrue(emittedSnapshots.isEmpty())
+        assertEquals(0, vibrationCount)
+        coordinator.postHazardAlert(1L, 2L, nowNanos, "위험 경고", AlertSeverity.WARNING)
+        assertEquals("위험 경고", coordinator.snapshot.message)
+        assertEquals(1, vibrationCount)
+        coordinator.close()
+    }
+
+    @Test fun frequentSettingShortensRepeatCooldownForSameWarning() {
+        val coordinator = createCoordinator()
+        coordinator.started()
+        feedbackSettings.current = feedbackSettings.current.copy(alertFrequency = AlertFrequency.FREQUENT)
+        val timestamp = testClockMs * 1_000_000L
+        coordinator.postHazardAlert(5L, 1L, timestamp, "같은 위험", AlertSeverity.WARNING)
+        testClockMs += 1_300L
+        coordinator.postHazardAlert(5L, 2L, timestamp, "같은 위험", AlertSeverity.WARNING)
+        assertEquals(2, vibrationCount)
+        coordinator.close()
+    }
+
+    @Test fun warningEscalationBypassesPriorCautionCooldownForSameMessage() {
+        val coordinator = createCoordinator()
+        coordinator.started()
+        val timestamp = testClockMs * 1_000_000L
+        coordinator.postHazardAlert(6L, 1L, timestamp, "같은 위험", AlertSeverity.CAUTION)
+        coordinator.postHazardAlert(6L, 2L, timestamp, "같은 위험", AlertSeverity.WARNING)
+        assertEquals(2, vibrationCount)
+        assertEquals("같은 위험", coordinator.snapshot.message)
         coordinator.close()
     }
 }

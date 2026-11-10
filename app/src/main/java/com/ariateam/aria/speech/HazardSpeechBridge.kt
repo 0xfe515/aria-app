@@ -198,11 +198,12 @@ class HazardSpeechBridge(
 
         // Binder IPC executed safely outside synchronization lock
         try {
-            service.postHazardAlert(
+            service.postHazardAlertWithSeverity(
                 event.session,
                 event.sequence,
                 event.timestampNanos,
                 event.message,
+                event.severity.ordinal,
             )
         } catch (e: RemoteException) {
             Log.w(TAG, "RemoteException delivering hazard alert to VoiceService", e)

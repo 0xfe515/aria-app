@@ -61,6 +61,12 @@
             android:stopWithTask="false" />
 
         <provider
+            android:name=".settings.FeedbackSettingsProvider"
+            android:authorities="${applicationId}.feedback.settings"
+            android:exported="false"
+            android:initOrder="90" />
+
+        <provider
             android:name=".runtime.AriaRuntimeProvider"
             android:authorities="${applicationId}.runtime.provider"
             android:exported="false"

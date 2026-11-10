@@ -884,6 +884,7 @@ class VisionPipelineController(
         AlertSuppressionReason.CONFIRMATION_PENDING -> WalkingDiagnosticReason.CONFIRMATION_PENDING
         AlertSuppressionReason.NOT_A_HAZARD_CANDIDATE -> WalkingDiagnosticReason.NOT_A_HAZARD_CANDIDATE
         AlertSuppressionReason.SESSION_INACTIVE -> WalkingDiagnosticReason.ALERT_SESSION_INACTIVE
+        AlertSuppressionReason.CAUTION_DISABLED -> WalkingDiagnosticReason.USER_CAUTION_DISABLED
     }
 
     fun setHazardAlertEnabled(enabled: Boolean) {

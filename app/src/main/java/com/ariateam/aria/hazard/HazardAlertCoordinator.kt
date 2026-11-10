@@ -12,6 +12,7 @@ import android.util.Log
 import android.widget.Toast
 import com.ariateam.aria.R
 import com.ariateam.aria.walking.WalkingAssistCopy
+import com.ariateam.aria.settings.FeedbackSettingsClient
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -77,6 +78,7 @@ class HazardAlertCoordinator(
     private val mainHandler: Handler? by lazy {
         runCatching { Handler(Looper.getMainLooper()) }.getOrNull()
     }
+    private val feedbackSettings = context?.let { FeedbackSettingsClient(it) }
     private val generation = AtomicLong(0L)
     private val lock = Any()
     private var sessionStartElapsedNanos: Long = 0L
@@ -119,6 +121,7 @@ class HazardAlertCoordinator(
                 // Reject late or crossed-session frames older than session start
                 return AlertDecision.Suppressed(AlertSuppressionReason.DUPLICATE_OR_OUT_OF_ORDER_CAPTURE)
             }
+            feedbackSettings?.settings?.value?.let { policy.configure(it.alertFrequency, it.cautionEnabled) }
             val ticket = generation.get()
             val nowElapsedNanos = clockNanos()
             val nowRealtime = nowElapsedNanos / 1_000_000L
@@ -133,20 +136,7 @@ class HazardAlertCoordinator(
                     if (isFresh && isSessionActive && isEnabled && generation.get() == ticket) {
                         fireAlertLocked(decision.assessment, ticket, captureTimestampNanos)
                         val seq = ++alertSequence
-                        val effectiveSeverity = when {
-                            decision.assessment.severity == AlertSeverity.WARNING || decision.assessment.severity == AlertSeverity.CAUTION -> {
-                                decision.assessment.severity
-                            }
-                            decision.assessment.level == HazardLevel.PATH_BLOCKED || decision.assessment.level == HazardLevel.NEAR_PATH_HAZARD -> {
-                                AlertSeverity.WARNING
-                            }
-                            decision.assessment.level == HazardLevel.PATH_CAUTION -> {
-                                AlertSeverity.CAUTION
-                            }
-                            else -> {
-                                AlertSeverity.DEGRADED
-                            }
-                        }
+                        val effectiveSeverity = policy.effectiveSeverity(decision.assessment)
                         val alertMessage = if (decision.assessment.cause != HazardCause.DEGRADED && decision.assessment.cause != HazardCause.NONE) {
                             if (decision.assessment.messageKorean.isNotBlank()) {
                                 decision.assessment.messageKorean
@@ -187,7 +177,8 @@ class HazardAlertCoordinator(
         }
 
         // Dispatch to external sink safely OUTSIDE the synchronization lock
-        if (eventToDispatch != null && sinkToDispatch != null) {
+        if (eventToDispatch != null && sinkToDispatch != null &&
+            (eventToDispatch?.severity != AlertSeverity.CAUTION || feedbackSettings?.settings?.value?.cautionEnabled != false)) {
             try {
                 sinkToDispatch.onHazardAlert(eventToDispatch)
             } catch (t: Throwable) {
@@ -213,20 +204,7 @@ class HazardAlertCoordinator(
             vibrator?.let { vib ->
                 if (vib.hasVibrator()) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        val effectiveSeverity = when {
-                            assessment.severity == AlertSeverity.WARNING || assessment.severity == AlertSeverity.CAUTION -> {
-                                assessment.severity
-                            }
-                            assessment.level == HazardLevel.PATH_BLOCKED || assessment.level == HazardLevel.NEAR_PATH_HAZARD -> {
-                                AlertSeverity.WARNING
-                            }
-                            assessment.level == HazardLevel.PATH_CAUTION -> {
-                                AlertSeverity.CAUTION
-                            }
-                            else -> {
-                                AlertSeverity.DEGRADED
-                            }
-                        }
+                        val effectiveSeverity = policy.effectiveSeverity(assessment)
                         val effect = when (effectiveSeverity) {
                             AlertSeverity.WARNING -> {
                                 if (assessment.cause == HazardCause.W1_VEHICLE_APPROACH ||
@@ -265,7 +243,8 @@ class HazardAlertCoordinator(
         val staleExpiryNanos = policy.staleResultExpiryMs * 1_000_000L
         val toastTask = Runnable {
             synchronized(lock) {
-                if (!isSessionActive || !isEnabled || generation.get() != ticket) {
+                if (!isSessionActive || !isEnabled || generation.get() != ticket ||
+                    (policy.effectiveSeverity(assessment) == AlertSeverity.CAUTION && feedbackSettings?.settings?.value?.cautionEnabled == false)) {
                     return@synchronized
                 }
                 if (captureTimestampNanos < sessionStartElapsedNanos) {
@@ -307,6 +286,7 @@ class HazardAlertCoordinator(
 
     override fun close() {
         stop()
+        feedbackSettings?.close()
     }
 
     companion object {

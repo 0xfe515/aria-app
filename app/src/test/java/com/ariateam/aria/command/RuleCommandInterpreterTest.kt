@@ -18,6 +18,8 @@ class RuleCommandInterpreterTest {
             "화면 보여줘" to AppCommand.ShowScreen, "화면 켜" to AppCommand.ShowScreen,
             "조용히 해" to AppCommand.SoundOff, "현재 상태 알려줘" to AppCommand.Status,
             "보행 상태" to AppCommand.WalkingStatus, "정면 보정" to AppCommand.ForwardCalibration,
+            "홈으로 돌아가" to AppCommand.Home, "설정 화면 열어주세요" to AppCommand.Settings,
+            "정면 다시 보정해줘" to AppCommand.ForwardCalibration, "명령어 뭐 있어" to AppCommand.Help,
             "뭐 할 수 있어?" to AppCommand.Help, "아니요" to AppCommand.Cancel,
             "그만 들어" to AppCommand.Stop,
         ).forEach { (text, command) -> assertEquals(text, Interpretation.Execute(command), parse(text)) }
@@ -60,6 +62,14 @@ class RuleCommandInterpreterTest {
     @Test fun compoundCommandsRequireSeparateRequests() {
         assertTrue(parse("설정 열고 그리고 소리 꺼") is Interpretation.Clarify)
         assertTrue(parse("소리 켜고 다음에 홈으로 가") is Interpretation.Clarify)
+        assertTrue(parse("볼륨 50퍼센트 그리고 설정 열어") is Interpretation.Clarify)
+        assertTrue(parse("볼륨 오십 퍼센트 그리고 설정 열어") is Interpretation.Clarify)
+        assertTrue(parse("자주 알려줘 그리고 설정 열어") is Interpretation.Clarify)
+        assertTrue(parse("위험할 때만 알려줘 그리고 설정 열어") is Interpretation.Clarify)
+        assertTrue(parse("주의 단계 꺼 그리고 홈으로 가") is Interpretation.Clarify)
+        assertTrue(parse("주의 단계는 아예 끄고 볼륨 50") is Interpretation.Clarify)
+        assertTrue(parse("사진 찍고 확인하고 알림 좀 줄여") is Interpretation.Clarify)
+        assertTrue(parse("표지판 글씨 읽어줘 설정 열어") is Interpretation.Clarify)
     }
 
     @Test fun pronounOnlyResolvesALiveSoundTarget() {
@@ -135,6 +145,8 @@ class RuleCommandInterpreterTest {
         listOf("텍스트 읽지 마", "글씨 읽어주지 마", "앞에 사진 찍으면 안 돼").forEach { utterance ->
             assertTrue(utterance, parse(utterance) is Interpretation.Clarify)
         }
+        assertTrue(parse("사진 속 주의 문구 읽어줘") is Interpretation.CloudPhotoQuestion)
+        assertTrue(parse("앞에 경고 표지판 읽어줘") is Interpretation.CloudPhotoQuestion)
     }
 
     @Test fun visualNegationAndCancelFormsDoNotRouteToPhotoQuestion() {

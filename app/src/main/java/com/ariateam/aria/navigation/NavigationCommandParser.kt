@@ -18,6 +18,9 @@ object NavigationCommandParser {
     )
 
     private val COMPOUND_PATTERNS = listOf("그리고", "다음에")
+    private val UNSUPPORTED_TRANSPORT_MODE = Regex(
+        "(?:^|\\s)(?:자동차|차|택시|버스|자전거|대중교통)\\s*(?:(?:으)?로|(?:을|를)\\s*타고|타고)",
+    )
 
     private val APP_RESERVED_WORDS = setOf(
         "홈", "홈으로", "홈으로가", "홈으로가줘", "홈열어", "홈화면열어", "홈으로이동",
@@ -57,8 +60,14 @@ object NavigationCommandParser {
             return null
         }
 
-        // Check active conversational context (valid for 30s)
         val activeTarget = context.target(now)
+        val requestsUnsupportedTransport = UNSUPPORTED_TRANSPORT_MODE.containsMatchIn(trimmed)
+        if (requestsUnsupportedTransport &&
+            (containsNavigationKeyword(trimmed) || activeTarget?.startsWith(CONTEXT_DEST_PREFIX) == true)) {
+            return Interpretation.Clarify("현재는 도보 길안내만 지원해요. 목적지와 함께 도보로 안내해 달라고 말씀해 주세요.")
+        }
+
+        // Check active conversational context (valid for 30s)
         if (activeTarget != null) {
             if (activeTarget.startsWith(CONTEXT_DEST_PREFIX)) {
                 val pendingDest = activeTarget.substring(CONTEXT_DEST_PREFIX.length).trim()
@@ -151,7 +160,9 @@ object NavigationCommandParser {
             "가자", "가줘", "가 주세요", "가고 싶어", "가고싶어", "가고 싶어요", "가고싶어요",
             "가는길", "가는 길", "가는 길 좀 알려", "걸어서", "도보로",
         )
-        return keywords.any(text::contains)
+        if (keywords.any(text::contains)) return true
+        val compact = text.lowercase().filter { it.isLetterOrDigit() }
+        return Regex("(?:어떻게|어떡해).{0,8}(?:가|걸어가)|(?:가는방법|가는법|가는경로).{0,8}(?:알려|찾아)|(?:데려다줘|데려다주세요|모셔다줘|모셔다주세요)|걸어갈래|걸어가줘|길좀찾아줘|길찾아줘").containsMatchIn(compact)
     }
 
     private fun hasIndependentCommandAfterHago(text: String): Boolean {
@@ -206,6 +217,11 @@ object NavigationCommandParser {
 
         // Strip request language only at boundaries, so action-like substrings in names survive.
         val actions = listOf(
+            "도보로 안내해 주세요", "도보로 안내해주세요", "도보로 안내해줘", "도보로 안내해 주세요",
+            "길 좀 찾아줘", "길좀찾아줘", "가는 방법 알려 주세요", "가는 방법 알려주세요", "가는 방법 알려줘",
+            "가는법 알려줘", "가는 법 알려줘", "어떻게 가 주세요", "어떻게 가주세요", "어떻게 가줘", "어떻게 가",
+            "가는 경로 찾아줘", "가는경로찾아줘", "걸어갈래", "걸어 가고 싶어", "걸어가고싶어", "걸어가고 싶어",
+            "데려다 주세요", "데려다주세요", "데려다 줘", "데려다줘", "모셔다 주세요", "모셔다주세요", "모셔다 줘", "모셔다줘",
             "길 안내 해 주세요", "길 안내 해 줘", "길 안내 해줘", "길 안내해 주세요", "길 안내해줘", "길안내 해주세요", "길안내 해 주세요", "길안내해주세요", "길안내 해줘", "길안내해줘",
             "길안내", "길 안내", "길찾기 해주세요", "길찾기해주세요", "길찾아줘", "길찾기", "길찾아",
             "가는 길 좀 알려주세요", "가는 길 좀 알려줘", "가는길 알려줘", "가는 길 알려줘",

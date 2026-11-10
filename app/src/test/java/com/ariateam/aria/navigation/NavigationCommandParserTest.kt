@@ -272,4 +272,67 @@ class NavigationCommandParserTest {
         assertTrue(parse("충주시청 가고 길안내 해줘") is Interpretation.NavigateExternal)
         assertTrue(parse("충주시청 가고 소리 꺼") is Interpretation.Clarify)
     }
+
+    @Test
+    fun naturalWalkingRequestsExtractTargetBeforeOrAfterRequest() {
+        val cases = mapOf(
+            "충주시청으로 데려다줘" to "충주시청",
+            "충주시청까지 길 좀 찾아줘" to "충주시청",
+            "충주시청 가는 방법 알려줘" to "충주시청",
+            "충주시청 어떻게 가" to "충주시청",
+            "충주시청까지 걸어갈래" to "충주시청",
+            "충주시청까지 도보로 안내해 주세요" to "충주시청",
+            "충주시청 가는 경로 찾아줘" to "충주시청",
+            "길 좀 찾아줘 충주시청" to "충주시청",
+            "안내면사무소까지 길 좀 찾아줘" to "안내면사무소",
+            "백범로까지 도보로 안내해 주세요" to "백범로",
+        )
+        for ((utterance, expected) in cases) {
+            val result = parse(utterance)
+            assertTrue("Expected navigation for '$utterance', got $result", result is Interpretation.NavigateExternal)
+            assertEquals(expected, (result as Interpretation.NavigateExternal).destination)
+        }
+    }
+
+    @Test
+    fun unsupportedTransportClarifiesAndInformationOrNegationDoesNotNavigate() {
+        val unsupported = listOf(
+            "자동차로 충주시청 가줘",
+            "버스로 충주시청까지 안내해줘",
+            "택시 타고 충주시청 가줘",
+            "자전거로 충주시청 안내해줘",
+            "대중교통으로 충주시청까지 안내해줘",
+            "자동차를 타고 충주시청 가줘",
+        )
+        for (utterance in unsupported) {
+            val result = parse(utterance)
+            assertTrue("Expected transport clarification for '$utterance', got $result", result is Interpretation.Clarify)
+            assertTrue((result as Interpretation.Clarify).question.contains("목적지와 함께 도보로"))
+        }
+        assertNull(parse("충주시청 역사 알려줘"))
+        assertTrue(parse("충주시청까지 가지 마") is Interpretation.Clarify)
+    }
+
+    @Test
+    fun transportWordsInsideDestinationOrInformationQuestionAreNotModes() {
+        val cases = mapOf(
+            "버스터미널까지 안내해줘" to "버스터미널",
+            "자동차박물관 안내해줘" to "자동차박물관",
+            "택시승강장 길안내" to "택시승강장",
+        )
+        for ((utterance, destination) in cases) {
+            val result = parse(utterance)
+            assertTrue("Expected destination navigation for '$utterance', got $result", result is Interpretation.NavigateExternal)
+            assertEquals(destination, (result as Interpretation.NavigateExternal).destination)
+        }
+        assertNull(parse("버스가 뭐야"))
+    }
+
+    @Test
+    fun unsupportedTransportClarifiesEvenWithPendingDestination() {
+        val context = CommandContext("nav_dest:충주시청", expiresAt = 30_000)
+        val result = parse("버스로 안내해줘", context = context, now = 10_000)
+        assertTrue(result is Interpretation.Clarify)
+        assertTrue((result as Interpretation.Clarify).question.contains("목적지와 함께 도보로"))
+    }
 }

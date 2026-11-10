@@ -43,6 +43,7 @@ import com.ariateam.aria.speech.VoiceError
 import com.ariateam.aria.speech.VoicePhase
 import com.ariateam.aria.speech.VoiceState
 import com.ariateam.aria.ui.theme.AriaSlate
+import com.ariateam.aria.settings.FeedbackSettingsClient
 import kotlin.math.roundToInt
 
 private enum class SettingsPage {
@@ -86,6 +87,8 @@ fun SettingsScreen(
     var showCleanupDialog by rememberSaveable { mutableStateOf(false) }
 
     val profileStore = remember(context) { BodyMountProfileStore(context) }
+    val feedbackSettings = remember(context) { FeedbackSettingsClient(context) }
+    DisposableEffect(feedbackSettings) { onDispose { feedbackSettings.close() } }
     DisposableEffect(profileStore) {
         onDispose {
             profileStore.close()
@@ -121,6 +124,7 @@ fun SettingsScreen(
 
             SettingsPage.General -> GeneralSettings(
                 state = state,
+                feedbackSettings = feedbackSettings,
                 audibleFeedback = audibleFeedback,
                 onAudibleFeedbackChanged = onAudibleFeedbackChanged,
                 onStartWaiting = onStartWaiting,
@@ -269,6 +273,7 @@ private fun SettingsRoot(
 @Composable
 private fun GeneralSettings(
     state: VoiceState,
+    feedbackSettings: FeedbackSettingsClient,
     audibleFeedback: Boolean,
     onAudibleFeedbackChanged: (Boolean) -> Unit,
     onStartWaiting: () -> Unit,
@@ -283,6 +288,7 @@ private fun GeneralSettings(
 
     // 음성 및 알림
     SettingsSectionTitle(stringResource(R.string.settings_general_voice_section))
+    FeedbackSettingsControls(feedbackSettings)
     SettingsSwitchRow(
         title = stringResource(R.string.wake_setting),
         summary = stringResource(

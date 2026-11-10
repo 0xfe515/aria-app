@@ -45,7 +45,8 @@ object LocalFallbackPolicy {
 
     fun isIncompleteLocalIntent(text: String): Boolean {
         val normalized = RuleCommandInterpreter.normalize(text)
-        return normalized in INCOMPLETE_LOCAL_COMMAND_WORDS
+        return normalized in INCOMPLETE_LOCAL_COMMAND_WORDS ||
+            normalized in setOf("볼륨", "음량", "소리크기", "경고빈도", "알림빈도", "주의단계", "주의알림")
     }
 
     /**
@@ -64,7 +65,7 @@ object LocalFallbackPolicy {
         return when {
             isCancellation(text) -> "취소했어요."
             isNegation(text) -> "원하는 명령을 하나만 다시 말해 주세요."
-            isIncompleteLocalIntent(text) -> "명령을 구체적으로 말씀해 주세요. 홈으로 가, 설정 열어, 또는 길안내 등을 말할 수 있어요."
+            isIncompleteLocalIntent(text) -> "명령을 구체적으로 말씀해 주세요. 홈으로 가, 설정 열어, 앱 안내 음량이나 경고 빈도를 말할 수 있어요."
             else -> "명령을 이해하지 못했어요. 도움말이라고 말해 주세요."
         }
     }

@@ -14,6 +14,7 @@ enum class AlertSuppressionReason {
     NOT_A_HAZARD_CANDIDATE,
     CONFIRMATION_PENDING,
     COOLDOWN,
+    CAUTION_DISABLED,
 }
 
 data class CandidateKey(val severity: AlertSeverity, val cause: HazardCause, val targetKey: Int)
@@ -24,14 +25,41 @@ data class CandidateKey(val severity: AlertSeverity, val cause: HazardCause, val
  */
 class HazardAlertPolicy(
     val confirmationFramesRequired: Int = 2,
-    val alertCooldownMs: Long = 2_500L,
+    alertCooldownMs: Long = 2_500L,
     val staleResultExpiryMs: Long = 1_500L,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
     val cautionConfirmationFramesRequired: Int = 3,
-    val cautionCooldownMs: Long = 6_000L,
+    cautionCooldownMs: Long = 6_000L,
     val warningReleaseFrames: Int = 4,
     val cautionReleaseFrames: Int = 6,
 ) {
+    private val normalAlertCooldownMs = alertCooldownMs
+    private val normalCautionCooldownMs = cautionCooldownMs
+    var alertCooldownMs: Long = alertCooldownMs
+        private set
+    var cautionCooldownMs: Long = cautionCooldownMs
+        private set
+    var cautionEnabled: Boolean = true
+        private set
+
+    fun effectiveSeverity(assessment: HazardAssessment): AlertSeverity = when {
+        assessment.severity == AlertSeverity.WARNING || assessment.severity == AlertSeverity.CAUTION -> assessment.severity
+        assessment.level == HazardLevel.PATH_CAUTION -> AlertSeverity.CAUTION
+        assessment.level == HazardLevel.PATH_BLOCKED || assessment.level == HazardLevel.NEAR_PATH_HAZARD -> AlertSeverity.WARNING
+        else -> assessment.severity
+    }
+
+    fun configure(frequency: com.ariateam.aria.settings.AlertFrequency, cautionEnabled: Boolean) {
+        val multiplier = when (frequency) {
+            com.ariateam.aria.settings.AlertFrequency.FREQUENT -> 0.5
+            com.ariateam.aria.settings.AlertFrequency.NORMAL -> 1.0
+            com.ariateam.aria.settings.AlertFrequency.QUIET -> 2.0
+        }
+        alertCooldownMs = (normalAlertCooldownMs * multiplier).toLong().coerceAtLeast(500L)
+        cautionCooldownMs = (normalCautionCooldownMs * multiplier).toLong().coerceAtLeast(1_000L)
+        this.cautionEnabled = cautionEnabled
+    }
+
     private var lastAssessmentTimestampNanos: Long = 0L
     private var consecutiveRiskCount: Int = 0
     private var lastCandidateLevel: HazardLevel? = null
@@ -71,6 +99,7 @@ class HazardAlertPolicy(
         nowElapsedNanos: Long = nowRealtimeMs * 1_000_000L,
     ): AlertDecision {
         val captureNanos = assessment.timestampNanos
+        if (effectiveSeverity(assessment) == AlertSeverity.CAUTION && !cautionEnabled) return AlertDecision.Suppressed(AlertSuppressionReason.CAUTION_DISABLED)
         if (captureNanos <= 0L) return AlertDecision.Suppressed(AlertSuppressionReason.INVALID_CAPTURE)
 
         // Reject duplicate or out-of-order capture timestamps

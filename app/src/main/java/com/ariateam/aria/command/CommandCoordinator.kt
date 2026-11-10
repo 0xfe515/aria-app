@@ -16,6 +16,21 @@ import com.ariateam.aria.R
 import com.ariateam.aria.navigation.DestinationValidator
 import com.ariateam.aria.navigation.NavigationCommandParser
 import com.ariateam.aria.navigation.NavigationProvider
+import com.ariateam.aria.settings.AlertFrequency
+import com.ariateam.aria.settings.FeedbackSettings
+import com.ariateam.aria.settings.FeedbackSettingsClient
+import com.ariateam.aria.hazard.AlertSeverity
+
+/** Narrow settings seam for deterministic coordinator tests. */
+internal interface FeedbackSettingsAccess : AutoCloseable {
+    val cachedSettings: FeedbackSettings? get() = null
+    fun read(): FeedbackSettings?
+    fun setVolumePercent(value: Int): FeedbackSettings?
+    fun adjustVolumePercent(delta: Int): FeedbackSettings?
+    fun setAlertFrequency(value: AlertFrequency): FeedbackSettings?
+    fun setCautionEnabled(value: Boolean): FeedbackSettings?
+    override fun close() {}
+}
 
 enum class LanguageStatus(val wireValue: Int) {
     Missing(0),
@@ -103,11 +118,26 @@ class CommandCoordinator internal constructor(
         try { SystemClock.elapsedRealtimeNanos() } catch (_: Throwable) { System.nanoTime() }
     },
     speechOverride: CommandSpeech? = null,
+    feedbackSettingsOverride: FeedbackSettingsAccess? = null,
 ) : AutoCloseable {
     private val main: Handler? = try { Handler(Looper.getMainLooper()) } catch (_: Throwable) { null }
     private val preferences = preferencesOverride ?: context?.getSharedPreferences("voice_settings", Context.MODE_PRIVATE)
     private val notifications = notificationManagerOverride ?: context?.getSystemService(NotificationManager::class.java)
     private val rules = RuleCommandInterpreter()
+    private val feedbackSettingsClient = context?.takeIf { feedbackSettingsOverride == null }?.let { appContext ->
+        runCatching { FeedbackSettingsClient(appContext) }.getOrNull()
+    }
+    private val feedbackSettings = feedbackSettingsOverride ?: feedbackSettingsClient?.let { client ->
+        object : FeedbackSettingsAccess {
+            override val cachedSettings get() = client.settings.value
+            override fun read() = client.read()
+            override fun setVolumePercent(value: Int) = client.setVolumePercent(value)
+            override fun adjustVolumePercent(delta: Int) = client.adjustVolumePercent(delta)
+            override fun setAlertFrequency(value: AlertFrequency) = client.setAlertFrequency(value)
+            override fun setCautionEnabled(value: Boolean) = client.setCautionEnabled(value)
+            override fun close() = client.close()
+        }
+    }
     private val generation = CommandGeneration()
     private var commandContext = CommandContext()
     private var active = false
@@ -131,6 +161,7 @@ class CommandCoordinator internal constructor(
     private var lastHazardSequence: Long = 0L
     private var lastHazardMessage: String = ""
     private var lastHazardTimestamp: Long = 0L
+    private var lastHazardSeverity: AlertSeverity = AlertSeverity.NONE
     private var walkingSession: Long = 0L
     private var walkingSequence: Long = 0L
     private var walkingStatusTimestampNanos: Long = 0L
@@ -250,6 +281,7 @@ class CommandCoordinator internal constructor(
             is Interpretation.NavigateExternal -> navigateExternal(result.provider, result.destination)
             is Interpretation.CloudTextQuestion -> handleCloudTextQuestion(result.question)
             is Interpretation.CloudPhotoQuestion -> handleCloudPhotoQuestion(result.prompt)
+            is Interpretation.Feedback -> executeFeedback(result.command)
         }
     }
 
@@ -268,7 +300,7 @@ class CommandCoordinator internal constructor(
             AppCommand.Status -> announce("음성 명령 대기 중이에요. 안내 소리는 ${if (snapshot.audible) "켜져" else "꺼져"} 있어요. ${currentWalkingStatus()}")
             AppCommand.WalkingStatus -> announce(currentWalkingStatus())
             AppCommand.ForwardCalibration -> requestForwardCalibration(generateEventId())
-            AppCommand.Help -> announce("홈으로 가, 설정 열어, 네이버 지도 또는 카카오맵으로 길안내, 안내 소리 켜 또는 꺼, 화면 숨겨 또는 보여줘, 현재 상태, 보행 상태, 정면 보정, 취소, 전체 중지를 말할 수 있어요.")
+            AppCommand.Help -> announce("홈으로 돌아가, 설정 화면 열어, 네이버 지도 또는 카카오맵으로 길안내, 앞에 뭐가 있는지 또는 글씨 읽어줘, 앱 안내 음량 50퍼센트 또는 음량 낮춰, 경고 빈도 덜 자주, 주의 알림 켜기, 현재 알림 설정, 보행 상태, 정면 다시 보정, 취소, 전체 중지를 말할 수 있어요.")
             AppCommand.Cancel -> {
                 commandContext = CommandContext()
                 clearNavigation()
@@ -286,6 +318,52 @@ class CommandCoordinator internal constructor(
                 announce("듣기를 중지해요.") { finishStop() }
             }
         }
+    }
+
+    private fun executeFeedback(command: FeedbackCommand) {
+        val access = feedbackSettings
+        if (access == null) {
+            announce("알림 설정에 연결하지 못했어요. 설정 화면에서 다시 시도해 주세요.")
+            return
+        }
+        val updated = try {
+            when (command) {
+                is FeedbackCommand.SetVolume -> access.setVolumePercent(command.percent)
+                is FeedbackCommand.AdjustVolume -> access.adjustVolumePercent(command.deltaPercent)
+                is FeedbackCommand.SetFrequency -> access.setAlertFrequency(when (command.frequency) {
+                    FeedbackCommand.Frequency.FREQUENT -> AlertFrequency.FREQUENT
+                    FeedbackCommand.Frequency.NORMAL -> AlertFrequency.NORMAL
+                    FeedbackCommand.Frequency.QUIET -> AlertFrequency.QUIET
+                })
+                is FeedbackCommand.SetCaution -> access.setCautionEnabled(command.enabled)
+                else -> null
+            }
+        } catch (_: Throwable) { null }
+        val result = updated ?: if (command is FeedbackCommand.ReadSettings || command is FeedbackCommand.ReadVolume || command is FeedbackCommand.ReadFrequency || command is FeedbackCommand.ReadCaution) {
+            try { access.read() } catch (_: Throwable) { null }
+        } else null
+        if (result == null) {
+            announce("알림 설정을 저장하거나 읽지 못했어요. 다시 시도해 주세요.")
+            return
+        }
+        val message = when (command) {
+            is FeedbackCommand.SetVolume, FeedbackCommand.ReadVolume -> "앱 안내 음량은 ${result.volumePercent}퍼센트예요."
+            is FeedbackCommand.AdjustVolume -> when {
+                command.deltaPercent > 0 && result.volumePercent == 100 -> "앱 안내 음량이 최대치인 100퍼센트에 도달했어요."
+                command.deltaPercent < 0 && result.volumePercent == 0 -> "앱 안내 음량이 최저치인 0퍼센트에 도달했어요."
+                else -> "앱 안내 음량은 ${result.volumePercent}퍼센트예요."
+            }
+            is FeedbackCommand.SetFrequency, FeedbackCommand.ReadFrequency -> "경고 빈도는 ${frequencyLabel(result.alertFrequency)}예요."
+            is FeedbackCommand.SetCaution, FeedbackCommand.ReadCaution -> "주의 단계 알림은 ${if (result.cautionEnabled) "켜져" else "꺼져"} 있어요."
+            else -> "앱 안내 음량은 ${result.volumePercent}퍼센트, 경고 빈도는 ${frequencyLabel(result.alertFrequency)}, 주의 단계 알림은 ${if (result.cautionEnabled) "켜져" else "꺼져"} 있어요."
+        }
+        announce(message)
+    }
+
+    private fun frequencyLabel(frequency: AlertFrequency) = when (frequency) {
+        AlertFrequency.FREQUENT -> "자주"
+        AlertFrequency.NORMAL -> "보통"
+        AlertFrequency.QUIET -> "덜 자주"
     }
 
     private fun setScreenHidden(hidden: Boolean) {
@@ -471,8 +549,9 @@ class CommandCoordinator internal constructor(
     /**
      * Entry point for background hazard alert events with session/sequence dedup and timestamp freshness.
      */
-    fun postHazardAlert(session: Long, sequence: Long, timestampNanos: Long, message: String) {
+    fun postHazardAlert(session: Long, sequence: Long, timestampNanos: Long, message: String, severity: AlertSeverity = AlertSeverity.WARNING) {
         if (!active || message.isBlank()) return
+        if (severity == AlertSeverity.CAUTION && feedbackSettings?.cachedSettings?.cautionEnabled == false) return
 
         // 1. Freshness check: reject stale alerts older than 2.0 seconds
         if (timestampNanos > 0L) {
@@ -489,8 +568,15 @@ class CommandCoordinator internal constructor(
             if (sequence <= lastHazardSequence && sequence != 0L) {
                 return
             }
-            if (message == lastHazardMessage && (now - lastHazardTimestamp) < 2_500L) {
-                return
+            if (message == lastHazardMessage) {
+                val escalated = severity.rank > lastHazardSeverity.rank
+                val baseCooldownMs = if (severity == AlertSeverity.CAUTION) 6_000L else 2_500L
+                val frequencyScale = when (feedbackSettings?.cachedSettings?.alertFrequency) {
+                    AlertFrequency.FREQUENT -> 0.5
+                    AlertFrequency.QUIET -> 2.0
+                    else -> 1.0
+                }
+                if (!escalated && (now - lastHazardTimestamp) < (baseCooldownMs * frequencyScale).toLong()) return
             }
         }
 
@@ -498,6 +584,7 @@ class CommandCoordinator internal constructor(
         lastHazardSequence = sequence
         lastHazardMessage = message
         lastHazardTimestamp = now
+        lastHazardSeverity = severity
 
         // A hazard invalidates the in-flight question as well as its utterance; late ChatGPT
         // callbacks then fail the existing question-id check and cannot resume speech.
@@ -679,6 +766,7 @@ class CommandCoordinator internal constructor(
     override fun close() {
         stopped()
         speech.close()
+        runCatching { feedbackSettings?.close() }
     }
 
     companion object {

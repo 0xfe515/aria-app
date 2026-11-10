@@ -90,7 +90,7 @@ class LocalFallbackPolicyTest {
             assertTrue("Expected '$utterance' to be recognized as incomplete local intent", LocalFallbackPolicy.isIncompleteLocalIntent(utterance))
             assertTrue("Expected '$utterance' to be rejected before cloud fallback", LocalFallbackPolicy.shouldRejectBeforeCloudFallback(utterance))
             assertEquals(
-                "명령을 구체적으로 말씀해 주세요. 홈으로 가, 설정 열어, 또는 길안내 등을 말할 수 있어요.",
+                "명령을 구체적으로 말씀해 주세요. 홈으로 가, 설정 열어, 앱 안내 음량이나 경고 빈도를 말할 수 있어요.",
                 LocalFallbackPolicy.rejectionMessage(utterance)
             )
         }

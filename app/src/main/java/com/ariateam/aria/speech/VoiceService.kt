@@ -19,6 +19,8 @@ import com.ariateam.aria.R
 import com.ariateam.aria.command.CommandCoordinator
 import com.ariateam.aria.runtime.AriaRuntimeStateBridge
 import com.ariateam.aria.runtime.AriaUnifiedNotificationCoordinator
+import com.ariateam.aria.hazard.AlertSeverity
+import com.ariateam.aria.settings.FeedbackSettingsClient
 
 import java.util.UUID
 
@@ -41,6 +43,7 @@ class VoiceService : Service() {
     private lateinit var session: VoiceListeningSession
     private lateinit var coordinator: CommandCoordinator
     private lateinit var feedback: VoiceFeedback
+    private lateinit var feedbackSettings: FeedbackSettingsClient
     private lateinit var wakeLock: PowerManager.WakeLock
 
     private val binder = object : IVoiceService.Stub() {
@@ -62,7 +65,15 @@ class VoiceService : Service() {
         override fun cancelCloudQuestion(questionId: Long) { main.post { if (!destroyed) coordinator.cancelCloudQuestion(questionId) } }
         override fun speakHazardWarning(message: String) { main.post { if (!destroyed) coordinator.speakHazardWarning(message) } }
         override fun postHazardAlert(session: Long, sequence: Long, timestampNanos: Long, message: String) {
-            main.post { if (!destroyed) coordinator.postHazardAlert(session, sequence, timestampNanos, message) }
+            postHazardAlertWithSeverity(session, sequence, timestampNanos, message, AlertSeverity.WARNING.ordinal)
+        }
+        override fun postHazardAlertWithSeverity(session: Long, sequence: Long, timestampNanos: Long, message: String, severityOrdinal: Int) {
+            val severity = AlertSeverity.entries.getOrNull(severityOrdinal) ?: AlertSeverity.WARNING
+            main.post {
+                if (!destroyed && (severity != AlertSeverity.CAUTION || cautionCurrentlyEnabled())) {
+                    coordinator.postHazardAlert(session, sequence, timestampNanos, message, severity)
+                }
+            }
         }
         override fun updateWalkingAssistState(session: Long, sequence: Long, timestampNanos: Long, status: String, announce: Boolean, stopped: Boolean) {
             main.post { if (!destroyed) coordinator.updateWalkingAssistState(session, sequence, timestampNanos, status, announce, stopped) }
@@ -77,6 +88,7 @@ class VoiceService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        feedbackSettings = FeedbackSettingsClient(this)
         feedback = VoiceFeedback(this)
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aria:Voice").apply { setReferenceCounted(false) }
@@ -257,10 +269,16 @@ class VoiceService : Service() {
         )
     }
 
+    private fun cautionCurrentlyEnabled(): Boolean {
+        val cached = feedbackSettings.settings.value.cautionEnabled
+        return runCatching { feedbackSettings.read().cautionEnabled }.getOrDefault(cached)
+    }
+
     override fun onDestroy() {
         destroyed = true
         session.shutdown()
         coordinator.close()
+        feedbackSettings.close()
         releaseResources()
         feedback.close()
         callbacks.kill()

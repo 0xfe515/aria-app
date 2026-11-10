@@ -6,7 +6,7 @@ object LocalIntentAnalysis {
 
     private val politeEnding = "(?:해줘요?|해주세요|주세요|줘요?|십시오)?"
     private val commandPatterns = listOf(
-        AppCommand.Home to listOf("홈(?:으로)?(?:가|이동|열어)$politeEnding", "홈화면열어$politeEnding"),
+        AppCommand.Home to listOf("홈(?:으로)?(?:가|이동|열어|돌아가|돌아와)$politeEnding", "홈화면열어$politeEnding"),
         AppCommand.Settings to listOf("설정(?:을|으로)?(?:좀)?(?:가|이동|열어|열어주세요|열어줘)$politeEnding", "설정화면열어$politeEnding"),
         AppCommand.Status to listOf("(?:현재|지금)?상태(?:를)?(?:좀)?(?:알려|확인)(?:해)?$politeEnding", "상태$politeEnding"),
         AppCommand.WalkingStatus to listOf("(?:보행|걷기)(?:상태)?(?:를)?(?:좀)?(?:알려|확인)(?:해)?$politeEnding"),
@@ -27,6 +27,9 @@ object LocalIntentAnalysis {
         Regex("(?:현재|지금)?상태(?:를)?(?:좀)?(?:알려|확인)"),
         Regex("(?:보행|걷기)(?:상태)?(?:를)?(?:좀)?(?:알려|확인)"),
         Regex("(?:정면|앞방향|방향)보정(?:을)?(?:해)?"),
+        Regex("(?:볼륨|음량|소리크기|안내소리크기|피드백볼륨)(?:을|은|이)?(?:좀)?(?:[0-9]{1,3}(?:퍼센트|프로|%|으로)?|[영공일이삼사오육칠팔구십백]+(?:퍼센트|프로|으로)?|절반|반으로|(?:좀)?(?:더)?(?:크게|작게)|올려|낮춰|높여|줄여|얼마|몇)"),
+        Regex("(?:경고빈도|알림빈도|빈도|경고|알림|자주|덜자주)(?:를|은|을)?(?:좀)?(?:낮춰|높여|줄여|덜자주|자주|기본|보통|알려|어떻게)"),
+        Regex("(?:주의단계|주의알림|주의|위험할때만)(?:를|은|는|을)?(?:아예|그냥|좀)?(?:끄|꺼|켜|다시켜|도알려|위험할때만|알려)"),
     )
     private val negationPatterns = listOf("하지마", "하지말", "하지않", "안찍", "찍지", "안읽", "읽지마", "읽지말", "안보내", "보내지마", "보내지말")
     private val quotedCommandFrames = listOf("라는말", "라는표현", "라는문장", "라는단어", "라는뜻", "의미", "라고하면")
@@ -98,10 +101,22 @@ object LocalIntentAnalysis {
         val photoEvidence = photoRequest(text)
         val hasCapture = photoEvidence?.capturesImage == true || captureActionPattern.containsMatchIn(value)
         if (hasCapture && (value.contains("그리고") || value.contains("다음에"))) return true
+        val strongVisualQuestion = photoEvidence != null &&
+            listOf("앞에", "앞쪽", "전방", "눈앞", "주변", "글씨", "글자", "텍스트", "문구", "표지판", "간판", "사진속", "카메라앞", "화면속")
+                .any(value::contains) &&
+            listOf("알려", "설명", "뭐야", "뭔지", "읽어", "보여", "어떤", "무엇").any(value::contains)
+        val connector = Regex("(?:하고|그리고|다음에|열고|켜고|꺼고|찍고|촬영하고|읽고|확인하고)")
+        if (strongVisualQuestion) {
+            val questionEnd = listOf("알려", "설명", "뭐야", "뭔지", "읽어", "보여", "어떤", "무엇")
+                .map { value.lastIndexOf(it) }.maxOrNull() ?: -1
+            return merged.any { action ->
+                connector.find(value)?.range?.last?.let { it < action.first } == true ||
+                    (questionEnd >= 0 && action.first > questionEnd)
+            }
+        }
         if (merged.size > 1 || (hasCapture && merged.isNotEmpty())) return true
 
         // A visual question followed by an executable local command is also independent work.
-        val connector = Regex("(?:하고|그리고|다음에|열고|켜고|꺼고|찍고|촬영하고)")
         return photoEvidence != null && merged.any { action ->
             connector.find(value)?.range?.last?.let { it < action.first } == true
         }
