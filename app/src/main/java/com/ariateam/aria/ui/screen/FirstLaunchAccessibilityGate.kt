@@ -32,7 +32,7 @@ internal data class FirstLaunchAccessibilityGateState(
 
 internal object FirstLaunchAccessibilityPolicy {
     fun shouldShow(isHandled: Boolean, isEnabled: Boolean, isSettingsReturnPending: Boolean): Boolean =
-        !isEnabled && (!isHandled || isSettingsReturnPending)
+        isSettingsReturnPending || (!isEnabled && !isHandled)
 
     fun afterSettingsReturn(isEnabled: Boolean): FirstLaunchAccessibilityGateState =
         FirstLaunchAccessibilityGateState(showGate = false, accessibilityEnabled = isEnabled)

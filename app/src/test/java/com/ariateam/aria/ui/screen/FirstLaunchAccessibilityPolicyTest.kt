@@ -18,7 +18,13 @@ class FirstLaunchAccessibilityPolicyTest {
     }
 
     @Test fun pendingSettingsReturnKeepsGateAcrossRecreation() {
+        assertTrue(FirstLaunchAccessibilityPolicy.shouldShow(false, false, true))
         assertTrue(FirstLaunchAccessibilityPolicy.shouldShow(true, false, true))
+    }
+
+    @Test fun pendingSettingsReturnKeepsGateEvenWhenServiceEnabled() {
+        assertTrue(FirstLaunchAccessibilityPolicy.shouldShow(false, true, true))
+        assertTrue(FirstLaunchAccessibilityPolicy.shouldShow(true, true, true))
     }
 
     @Test fun settingsReturnReleasesGateRegardlessOfServiceState() {
