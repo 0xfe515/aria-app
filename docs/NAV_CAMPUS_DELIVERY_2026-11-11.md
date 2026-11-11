@@ -16,3 +16,19 @@ Pixel 3 / Android 12 is authorized and the user enabled Aria's accessibility ser
 - Debug APK version code 19 / `1.0.0-preview.20261111.3`. SHA-256 `3c0baf13c2811ab78d97bcbdae629a23d25654df34f7258ee6193b1cc4f779ef`.
 
 Source commit `717661e` was pushed to `main` and tagged `v1.0.0-preview.20261111.3`. GitHub reported the APK uploaded and its SHA-256 matched the local package. The existing root startup and vision edits were preserved during the fast-forward.
+
+## Pixel 3 emulator verification
+
+The user requested emulator verification after sideloading Naver Maps, and explicitly approved accepting its required terms without logging in. The existing Android 12 Pixel 3 AVD runs at 1080x2160, 440 dpi and 4 GB RAM. Aria is the released version 19 / 1.0.0-preview.20261111.3, and Naver Maps is 6.12.1.1. The AVD language was changed to ko-KR because the current selector expects Korean accessibility labels. The emulator accessibility service and location/activity permissions were configured for testing. Simulated GPS was set to 36.9710709, 127.8810399 near the campus. This command-input test supplies recognized text directly.
+
+The first instrumentation attempt failed its service-enabled prerequisite. Android instrumentation force-stops the target process, leaving its accessibility service in the crashed-service list. Subsequent runs explicitly rebound the service after the instrumented target started, and verified that it was bound before the handoff. The tests used UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES. No test clicked Naver route buttons.
+
+The initial Wi-Fi attempts failed to reach guidance. Forced NotFound returned an empty search screen, and the default resolver reached a walking route header with a temporary service error. Independent manual search submission and route retry also showed temporary service errors. Switching the emulator to its virtual mobile network produced populated campus search results. This observation does not establish the underlying network fault.
+
+- Default resolver on virtual mobile network passed, OK (1 test). The actual guidance screen contained the requested campus, 재탐색 and 전체경로, with no 안내시작 button. The route displayed 28 minutes and 1.7 km. Raw log is %TEMP%/aria-nav-campus-20261111/productionHandoffDefaultResolverReachesGuidance-cell.log. Screenshot is pixel3-avd-default-guidance.png in the same directory.
+- Forced NotFound on virtual mobile network failed twice. The destination text was sanitized and the correct campus search results loaded, but the assist did not proceed to 길찾기 or guidance within 45 seconds. The accessible result name included 한국교통대학교 충주캠퍼스대학교. Strict name matching is a candidate cause requiring a focused fix and validation. The raw tree collection limits and card boundaries also require review before attributing the failure to a single condition. Raw logs are productionHandoffForcedNotFoundFallbackReachesGuidance-cell.log and productionHandoffForcedNotFoundFallbackReachesGuidance-cell-fresh.log in the same directory. Screenshot is pixel3-avd-search-fallback.png.
+- Before the second forced-NotFound run, the successful guidance session was explicitly ended through the Naver notification's 안내종료 action, then the Naver home screen was confirmed. Thus the later run could not pass against existing guidance.
+- The adb process exit status was zero even for failed assertions. Results above use AndroidJUnitRunner's actual OK/FAILURES output.
+- The earlier selected suite result remains 15 passed / 2 failed out of 17. Its stale announcement and ambiguity expectations were not changed during this verification.
+
+Wi-Fi was restored, ko-KR remains configured, and Aria's accessibility service was rebound and confirmed healthy after instrumentation. No application source changes were made. Search fallback completion and acoustic recognition remain unverified.
