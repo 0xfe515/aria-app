@@ -33,7 +33,7 @@ class CommandCoordinatorNavigationTest {
         assertTrue(latestSnapshot.externalNavId > 0L)
         assertEquals("naver", latestSnapshot.externalNavProvider)
         assertEquals("강남역", latestSnapshot.externalNavDestination)
-        assertEquals("네이버 지도로 강남역 검색을 열어요.", latestSnapshot.message)
+        assertEquals("네이버 지도 도보 경로를 준비해요: 강남역.", latestSnapshot.message)
 
         // Consuming external navigation clears the event
         val navId = latestSnapshot.externalNavId

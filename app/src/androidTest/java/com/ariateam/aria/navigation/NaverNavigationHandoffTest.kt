@@ -132,10 +132,10 @@ class NaverNavigationHandoffTest {
     }
 
     @Test
-    fun ambiguousDestinationDoesNotArmAssistAndExplainsAmbiguity() = runBlocking {
+    fun ambiguousDestinationArmsSearchFallbackWithoutCoordinates() = runBlocking {
         val launcher = FakeLauncher()
-        var assistArmedCalled = false
-        var assistCancelledCalled = false
+        var armedToken: String? = null
+        var armedDest: String? = null
 
         val handoff = NaverNavigationHandoff(
             launcher = launcher,
@@ -143,12 +143,10 @@ class NaverNavigationHandoffTest {
                 DestinationResolution.Ambiguous
             },
             isAccessibilityEnabled = { true },
-            armAssist = { _, _, _ ->
-                assistArmedCalled = true
+            armAssist = { _, token, dest ->
+                armedToken = token
+                armedDest = dest
                 true
-            },
-            cancelAssist = {
-                assistCancelledCalled = true
             },
         )
 
@@ -159,12 +157,13 @@ class NaverNavigationHandoffTest {
             screenVisible = true,
         )
 
-        assertTrue(outcome is NaverHandoffOutcome.AmbiguousDestination)
-        assertFalse("Ambiguous destination should never arm assist", assistArmedCalled)
-        assertTrue("Assist should be explicitly cancelled", assistCancelledCalled)
+        assertTrue("Outcome should be SearchFallbackArmed", outcome is NaverHandoffOutcome.SearchFallbackArmed)
         assertTrue(launcher.launchCalled)
+        assertEquals("스타벅스", launcher.lastDestination)
+        assertEquals("스타벅스", armedDest)
+        assertTrue(armedToken?.startsWith("104-") == true)
         val msg = NaverNavigationHandoff.feedbackMessage(outcome)
-        assertTrue("Message should explain ambiguity to user", msg.contains("목적지가 여러 곳으로 확인되어"))
+        assertTrue("Feedback message should announce checking guidance start", msg.contains("도보 경로를 찾고 있어요"))
     }
 
     @Test

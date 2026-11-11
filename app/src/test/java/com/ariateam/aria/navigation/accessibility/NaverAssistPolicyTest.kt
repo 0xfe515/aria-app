@@ -521,4 +521,229 @@ class NaverAssistPolicyTest {
         assertTrue("After walking selection evidence, guidance can start", decision3 is AssistDecision.ClickStartGuidance)
         assertEquals(7, (decision3 as AssistDecision.ClickStartGuidance).targetId)
     }
+
+    @Test fun searchResultMergedCampusCardSelectsDirectionsButton() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        // Realistic search results:
+        // Card 1: 한국교통대학교 충주캠퍼스대학교 (merged title + category)
+        // Card 2: 한국교통대학교충주캠퍼스박물관박물관
+        // Card 3: 한국교통대학교 충주캠퍼스종합강의관부속건물
+        val tree = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            // Card 1: Target campus
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(2, 1, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(3, 1, "충북 충주시 대소원면 상세주소 열기", true, true, true, pkg, winId),
+            AssistTreeNode(4, 1, "", true, true, true, pkg, winId), // Button container
+            AssistTreeNode(5, 4, "길찾기", true, true, true, pkg, winId, className = "android.widget.Button"),
+            // Card 2: Museum
+            AssistTreeNode(6, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(7, 6, "한국교통대학교충주캠퍼스박물관박물관", true, true, true, pkg, winId),
+            AssistTreeNode(8, 6, "길찾기", true, true, true, pkg, winId),
+            // Card 3: Subbuilding
+            AssistTreeNode(9, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(10, 9, "한국교통대학교 충주캠퍼스종합강의관부속건물", true, true, true, pkg, winId),
+            AssistTreeNode(11, 9, "길찾기", true, true, true, pkg, winId),
+        )
+
+        val decision = NaverAssistPolicy.evaluate(
+            request, "token1", pkg, 600L, 1_000L, true, winId, winId, tree, false,
+        )
+        assertTrue("Decision should be ClickSearchDirections", decision is AssistDecision.ClickSearchDirections)
+        val click = decision as AssistDecision.ClickSearchDirections
+        assertEquals(5, click.targetId)
+        assertEquals("한국교통대학교 충주캠퍼스대학교", click.candidateName)
+    }
+
+    @Test fun searchResultMergedMuseumAndSubbuildingsRejected() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        val tree = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            // Card 1: Museum
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId),
+            AssistTreeNode(2, 1, "한국교통대학교충주캠퍼스박물관박물관", true, true, true, pkg, winId),
+            AssistTreeNode(3, 1, "길찾기", true, true, true, pkg, winId),
+            // Card 2: Subbuilding
+            AssistTreeNode(4, 0, "", true, true, false, pkg, winId),
+            AssistTreeNode(5, 4, "한국교통대학교 충주캠퍼스종합강의관부속건물", true, true, true, pkg, winId),
+            AssistTreeNode(6, 4, "길찾기", true, true, true, pkg, winId),
+            // Card 3: Wrong campus
+            AssistTreeNode(7, 0, "", true, true, false, pkg, winId),
+            AssistTreeNode(8, 7, "한국교통대학교 증평캠퍼스대학교", true, true, true, pkg, winId),
+            AssistTreeNode(9, 7, "길찾기", true, true, true, pkg, winId),
+        )
+
+        val decision = NaverAssistPolicy.evaluate(
+            request, "token1", pkg, 600L, 1_000L, true, winId, winId, tree, false,
+        )
+        assertEquals(AssistDecision.None, decision)
+    }
+
+    @Test fun searchResultDuplicateMergedCardsRejectedAsAmbiguous() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        val tree = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            // Card 1: Merged campus
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId),
+            AssistTreeNode(2, 1, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(3, 1, "길찾기", true, true, true, pkg, winId),
+            // Card 2: Duplicate merged campus
+            AssistTreeNode(4, 0, "", true, true, false, pkg, winId),
+            AssistTreeNode(5, 4, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(6, 4, "길찾기", true, true, true, pkg, winId),
+        )
+
+        val decision = NaverAssistPolicy.evaluate(
+            request, "token1", pkg, 600L, 1_000L, true, winId, winId, tree, false,
+        )
+        assertEquals(AssistDecision.None, decision)
+    }
+
+    @Test fun searchResultDirectionsButtonResolvedViaTargetSelectorParent() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        val tree = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId),
+            AssistTreeNode(2, 1, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.widget.Button"),
+            // Clickable parent containing unclickable text label
+            AssistTreeNode(3, 1, "", true, true, true, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(4, 3, "길찾기", true, true, false, pkg, winId, className = "android.widget.TextView"),
+        )
+
+        val decision = NaverAssistPolicy.evaluate(
+            request, "token1", pkg, 600L, 1_000L, true, winId, winId, tree, false,
+        )
+        assertTrue(decision is AssistDecision.ClickSearchDirections)
+        assertEquals(3, (decision as AssistDecision.ClickSearchDirections).targetId)
+    }
+
+    @Test fun searchResultMergedGenericViewRejectedWithoutButtonRole() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        // Merged campus text inside a generic View (not a Button) must be rejected
+        val tree = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(2, 1, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(3, 1, "길찾기", true, true, true, pkg, winId, className = "android.widget.Button"),
+        )
+
+        val decision = NaverAssistPolicy.evaluate(
+            request, "token1", pkg, 600L, 1_000L, true, winId, winId, tree, false,
+        )
+        assertEquals(AssistDecision.None, decision)
+    }
+
+    @Test fun searchResultHiddenDisabledStaleAndCancelledGuards() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        fun makeTree(titleVisible: Boolean = true, btnVisible: Boolean = true, btnEnabled: Boolean = true) = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId),
+            AssistTreeNode(2, 1, "한국교통대학교 충주캠퍼스대학교", titleVisible, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(3, 1, "길찾기", btnVisible, btnEnabled, true, pkg, winId),
+        )
+
+        // Hidden directions button
+        assertEquals(AssistDecision.None, NaverAssistPolicy.evaluate(request, "token1", pkg, 600L, 1_000L, true, winId, winId, makeTree(btnVisible = false), false))
+        // Disabled directions button
+        assertEquals(AssistDecision.None, NaverAssistPolicy.evaluate(request, "token1", pkg, 600L, 1_000L, true, winId, winId, makeTree(btnEnabled = false), false))
+        // Hidden title
+        assertEquals(AssistDecision.None, NaverAssistPolicy.evaluate(request, "token1", pkg, 600L, 1_000L, true, winId, winId, makeTree(titleVisible = false), false))
+        // Stale event (uptime 400 < armed 500)
+        assertEquals(AssistDecision.None, NaverAssistPolicy.evaluate(request, "token1", pkg, 400L, 1_000L, true, winId, winId, makeTree(), false))
+        // Expired (now 3000 >= expiresAt 3000)
+        assertEquals(AssistDecision.None, NaverAssistPolicy.evaluate(request, "token1", pkg, 600L, 3_000L, true, winId, winId, makeTree(), false))
+        // Consumed
+        assertEquals(AssistDecision.None, NaverAssistPolicy.evaluate(request, "token1", pkg, 600L, 1_000L, true, winId, winId, makeTree(), true))
+        // Wrong token
+        assertEquals(AssistDecision.None, NaverAssistPolicy.evaluate(request, "otherToken", pkg, 600L, 1_000L, true, winId, winId, makeTree(), false))
+    }
+
+    @Test fun searchResultDuplicateLabelAndParentAcrossTwoCardsRejected() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        // Two cards where each card has an unlabeled clickable parent container
+        // wrapping an unclickable "길찾기" TextView label.
+        // Canonical target calculation must bound cards correctly and reject ambiguity.
+        val tree = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            // Card 1
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(2, 1, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(3, 1, "", true, true, true, pkg, winId, className = "android.view.View"), // Canonical clickable parent 1
+            AssistTreeNode(4, 3, "길찾기", true, true, false, pkg, winId, className = "android.widget.TextView"),
+            // Card 2
+            AssistTreeNode(5, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(6, 5, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(7, 5, "", true, true, true, pkg, winId, className = "android.view.View"), // Canonical clickable parent 2
+            AssistTreeNode(8, 7, "길찾기", true, true, false, pkg, winId, className = "android.widget.TextView"),
+        )
+
+        val decision = NaverAssistPolicy.evaluate(
+            request, "token1", pkg, 600L, 1_000L, true, winId, winId, tree, false,
+        )
+        // Must reject duplicate matching cards even when targets are unlabeled clickable parents
+        assertEquals(AssistDecision.None, decision)
+    }
+
+    @Test fun searchResultRealCapturedTreeShapeSelectsExactCampus() {
+        val dest = "한국교통대학교 충주캠퍼스"
+        val request = NaverAssistRequest("token1", dest, 3_000L, 500L, 500L)
+        val pkg = NaverAssistPolicy.NAVER_PACKAGE
+        val winId = 10
+
+        // Realistic tree modeled directly after captured card-tree-instrumented.xml (757 nodes, max depth 29)
+        val tree = listOf(
+            AssistTreeNode(0, null, "", true, true, false, pkg, winId, className = "android.widget.ListView"),
+            // First card (depth 24 equivalent)
+            AssistTreeNode(1, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            // Depth 25: Image thumbnail button with exact campus name
+            AssistTreeNode(2, 1, "한국교통대학교 충주캠퍼스", true, true, true, pkg, winId, className = "android.widget.Button"),
+            // Depth 26: Title button with merged place name + 대학교
+            AssistTreeNode(3, 1, "한국교통대학교 충주캠퍼스대학교", true, true, true, pkg, winId, className = "android.widget.Button"),
+            // Address button
+            AssistTreeNode(4, 1, "충북 충주시 대소원면 상세주소 열기", true, true, true, pkg, winId, className = "android.widget.Button"),
+            // Depth 28/29: Action buttons
+            AssistTreeNode(5, 1, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(6, 5, "전화", true, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(7, 5, "길찾기", true, true, true, pkg, winId, className = "android.widget.Button"),
+            // Second card: Museum
+            AssistTreeNode(8, 0, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(9, 8, "한국교통대학교충주캠퍼스박물관박물관", true, true, true, pkg, winId, className = "android.widget.Button"),
+            AssistTreeNode(10, 8, "", true, true, false, pkg, winId, className = "android.view.View"),
+            AssistTreeNode(11, 10, "길찾기", true, true, true, pkg, winId, className = "android.widget.Button"),
+        )
+
+        val decision = NaverAssistPolicy.evaluate(
+            request, "token1", pkg, 600L, 1_000L, true, winId, winId, tree, false,
+        )
+        assertTrue(decision is AssistDecision.ClickSearchDirections)
+        assertEquals(7, (decision as AssistDecision.ClickSearchDirections).targetId)
+    }
 }

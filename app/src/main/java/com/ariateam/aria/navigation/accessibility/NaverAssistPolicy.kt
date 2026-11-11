@@ -62,6 +62,18 @@ internal object NaverAssistPolicy {
         return c == d
     }
 
+    /** Positive search-card matching: exact place/image matches normal; merged destination+대학교 restricted to clickable Button. */
+    fun isSearchCardMatch(node: AssistTreeNode, destination: String): Boolean {
+        if (!node.visible || !node.enabled) return false
+        if (isDestinationMatch(node.label, destination)) return true
+        val norm = normalize(node.label)
+        val normDest = normalize(destination)
+        if (norm == normDest + "대학교") {
+            return node.clickable && node.className?.contains("Button") == true
+        }
+        return false
+    }
+
     /** Legacy single-step entry point preserved for backward compatibility. */
     fun shouldClick(
         request: NaverAssistRequest?,
@@ -235,11 +247,18 @@ internal object NaverAssistPolicy {
         packageName: String,
         windowId: Int,
     ): AssistDecision? {
-        val navButtons = tree.filter {
-            it.visible && it.enabled && it.clickable && it.packageName == packageName &&
+        val candidateLabelNodes = tree.filter {
+            it.visible && it.enabled && it.packageName == packageName &&
                 it.windowId == windowId && normalize(it.label) == "길찾기"
         }
+        if (candidateLabelNodes.isEmpty()) return null
+
+        val navButtons = candidateLabelNodes.mapNotNull { labelNode ->
+            NaverAssistTargetSelector.findClickableTarget(labelNode, byId, packageName, windowId)
+        }.distinctBy { it.id }
         if (navButtons.isEmpty()) return null
+
+        val canonicalNavTargetIds = navButtons.map { it.id }.toSet()
 
         val childrenMap = mutableMapOf<Int?, MutableList<AssistTreeNode>>()
         for (n in tree) {
@@ -279,8 +298,8 @@ internal object NaverAssistPolicy {
                     break
                 }
 
-                val pButtons = getDescendants(p.id).filter { it.clickable && normalize(it.label) == "길찾기" }
-                if (pButtons.size > 1) {
+                val pCanonicalCount = (listOf(p) + getDescendants(p.id)).count { it.id in canonicalNavTargetIds }
+                if (pCanonicalCount > 1) {
                     // Exceeded single-card boundary to multi-card parent; curr is the card
                     cardNode = curr
                     break
@@ -295,16 +314,17 @@ internal object NaverAssistPolicy {
             // Never search outside the card boundary (never search global root or list container)
             if (cardNode.parentId != null) {
                 val cardDescendants = listOf(cardNode) + getDescendants(cardNode.id)
-                val matchingTexts = cardDescendants.filter { it.visible && isDestinationMatch(it.label, destination) }
-                if (matchingTexts.isNotEmpty()) {
-                    matchingCards.add(btn to matchingTexts.first().label)
+                val matchingNodes = cardDescendants.filter { isSearchCardMatch(it, destination) }
+                if (matchingNodes.isNotEmpty()) {
+                    matchingCards.add(btn to matchingNodes.first().label)
                 }
             }
         }
 
+        val distinctMatchingCards = matchingCards.distinctBy { it.first.id }
         // Must be unambiguous: exactly 1 matching card
-        if (matchingCards.size == 1) {
-            val (targetBtn, matchedLabel) = matchingCards.single()
+        if (distinctMatchingCards.size == 1) {
+            val (targetBtn, matchedLabel) = distinctMatchingCards.single()
             return AssistDecision.ClickSearchDirections(targetBtn.id, matchedLabel)
         }
 
