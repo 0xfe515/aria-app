@@ -64,7 +64,7 @@ enum class NavigationProvider(
         return when (this) {
             Google -> "https://www.google.com/maps/search/?api=1&query=$encoded"
             Naver -> "https://m.map.naver.com/search2/search.naver?query=$encoded"
-            Kakao -> "https://map.kakao.com/link/search/${encoded.replace("+", "%20")}"
+            Kakao -> "https://map.kakao.com/link/search/$encoded"
         }
     }
 
@@ -74,7 +74,9 @@ enum class NavigationProvider(
         fun fromId(id: String?): NavigationProvider? =
             entries.firstOrNull { it.id.equals(id, ignoreCase = true) }
 
-        fun safeEncode(value: String): String =
-            URLEncoder.encode(value.trim(), StandardCharsets.UTF_8.name())
+        fun safeEncode(value: String): String {
+            val sanitized = value.trim().replace(Regex("""\s+"""), " ")
+            return URLEncoder.encode(sanitized, StandardCharsets.UTF_8.name()).replace("+", "%20")
+        }
     }
 }

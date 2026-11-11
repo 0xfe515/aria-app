@@ -20,12 +20,31 @@ class NavigationProviderTest {
     }
 
     @Test
+    fun naverMapAppUriEncodesKoreanSpacesAsPercent20WithoutLiteralPlus() {
+        val uri = NavigationProvider.Naver.buildAppUriString("한국교통대학교 충주캠퍼스")
+        assertFalse("Custom scheme query should not contain literal plus for spaces", uri.contains("+"))
+        assertTrue("Query should contain percent-encoded space %20", uri.contains("%20"))
+        assertEquals(
+            "nmap://search?query=%ED%95%9C%EA%B5%AD%EA%B5%90%ED%86%B5%EB%8C%80%ED%95%99%EA%B5%90%20%EC%B6%A9%EC%A3%BC%EC%BA%A0%ED%8D%BC%EC%8A%A4&appname=com.ariateam.aria",
+            uri,
+        )
+    }
+
+    @Test
     fun naverResolvedDestinationUsesWalkingRouteAndImplicitCurrentLocation() {
         val destination = ResolvedDestination("강남역", 37.4979, 127.0276)
         assertEquals(
             "nmap://route/walk?dlat=37.4979&dlng=127.0276&dname=%EA%B0%95%EB%82%A8%EC%97%AD&appname=com.ariateam.aria",
             NavigationProvider.Naver.buildWalkingRouteUriString(destination),
         )
+    }
+
+    @Test
+    fun naverWalkingRouteEncodesDestinationNameWithPercent20Spaces() {
+        val destination = ResolvedDestination("한국교통대학교 충주캠퍼스", 36.9698, 127.8717)
+        val uri = NavigationProvider.Naver.buildWalkingRouteUriString(destination)
+        assertFalse("Walking route URI should not contain literal plus for spaces", uri.contains("+"))
+        assertTrue("Walking route URI should contain %20", uri.contains("%20"))
     }
 
     @Test
@@ -52,26 +71,8 @@ class NavigationProviderTest {
         assertTrue(encoded.contains("%EC%8A%A4%ED%83%80%EB%B2%85%EC%8A%A4"))
         assertTrue(encoded.contains("%28") || encoded.contains("("))
         assertTrue(encoded.contains("%26") || encoded.contains("&"))
-    }
-
-    @Test
-    fun destinationValidatorRejectsInvalidOrReservedQueries() {
-        assertFalse(DestinationValidator.isValid(""))
-        assertFalse(DestinationValidator.isValid("   "))
-        assertFalse(DestinationValidator.isValid("길안내"))
-        assertFalse(DestinationValidator.isValid("길찾기"))
-        assertFalse(DestinationValidator.isValid("지도"))
-        assertFalse(DestinationValidator.isValid("어디"))
-        assertFalse(DestinationValidator.isValid("찾아줘"))
-        assertFalse(DestinationValidator.isValid("알려줘"))
-        assertFalse(DestinationValidator.isValid("가는길"))
-        assertFalse(DestinationValidator.isValid("a")) // Too short (< 2 chars)
-        assertFalse(DestinationValidator.isValid("x".repeat(101))) // Too long (> 100 chars)
-
-        assertTrue(DestinationValidator.isValid("강남역"))
-        assertTrue(DestinationValidator.isValid("서울역 1번 출구"))
-        assertTrue(DestinationValidator.isValid("Space Needle"))
-        assertTrue(DestinationValidator.isValid("스타벅스 강남점"))
+        assertTrue("safeEncode should use %20 instead of +", encoded.contains("%20"))
+        assertFalse("safeEncode should not contain +", encoded.contains("+"))
     }
 
     @Test

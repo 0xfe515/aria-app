@@ -1,16 +1,19 @@
 package com.ariateam.aria.navigation.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 
-/** Opt-in one-action assist; non-Naver window events are used only to detect handoff/exit. */
+/** Opt-in multi-step assist; non-Naver window events are used only to detect handoff/exit. */
 class NaverWalkingAccessibilityService : AccessibilityService() {
     private var consumed = false
     private var naverSeen = false
@@ -81,26 +84,67 @@ class NaverWalkingAccessibilityService : AccessibilityService() {
             val modes = mutableListOf<Pair<String, Boolean>>()
             collect(root, texts, modes, nodes, tree, nodeById, parentId = null, isRoot = true)
             if (!treeComplete) return
-            val destinationMatch = texts.firstOrNull { NaverAssistPolicy.normalize(it) == NaverAssistPolicy.normalize(active.destination) }
-            val mode = NaverAssistPolicy.modeEvidence(modes)
-            val targetIds = NaverAssistTargetSelector.select(tree, NaverAssistPolicy.NAVER_PACKAGE, root.windowId)
-            val eligible = targetIds.mapNotNull { id -> nodeById[id]?.let { it to AssistButton("안내시작", it.isVisibleToUser, it.isEnabled) } }
-            if (NaverAssistPolicy.shouldClick(
-                    active, active.token, pkg, event.eventTime, SystemClock.elapsedRealtime(),
-                    root.isVisibleToUser && naverSeen, root.windowId, event.windowId, destinationMatch,
-                    mode.walkingSelected, mode.drivingOrTransitSelected, eligible.map { it.second }, consumed,
-                )
-            ) {
-                consumed = true
-                val node = eligible.single().first
-                val actionResult = NaverAssistBridge.consume(active.token) {
-                    runCatching { node.isVisibleToUser && node.isEnabled && node.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
-                        .getOrDefault(false)
+
+            val decision = NaverAssistPolicy.evaluate(
+                active, active.token, pkg, event.eventTime, SystemClock.elapsedRealtime(),
+                root.isVisibleToUser && naverSeen, root.windowId, event.windowId, tree,
+                consumed,
+            )
+
+            when (decision) {
+                is AssistDecision.ClickSearchDirections -> {
+                    val node = nodeById[decision.targetId]
+                    NaverAssistBridge.tryStep(active.token, AssistStage.SEARCH_RESULTS, AssistStage.ORIGIN_INPUT) {
+                        runCatching {
+                            node?.isVisibleToUser == true && node.isEnabled &&
+                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        }.getOrDefault(false)
+                    }
                 }
-                disarm(active.token)
-                if (actionResult) {
-                    Toast.makeText(this, "안내 시작을 눌렀어요. 실제 안내 상태를 확인해 주세요.", Toast.LENGTH_LONG).show()
-                } else Toast.makeText(this, "안내 시작을 누르지 못했어요. 네이버 지도에서 직접 시작해 주세요.", Toast.LENGTH_LONG).show()
+                is AssistDecision.ClickOriginEntry -> {
+                    val node = nodeById[decision.targetId]
+                    NaverAssistBridge.tryStep(active.token, active.stage, AssistStage.ORIGIN_PICKER) {
+                        runCatching {
+                            node?.isVisibleToUser == true && node.isEnabled &&
+                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        }.getOrDefault(false)
+                    }
+                }
+                is AssistDecision.ClickMyLocation -> {
+                    val node = nodeById[decision.targetId]
+                    NaverAssistBridge.tryStep(active.token, AssistStage.ORIGIN_PICKER, AssistStage.START_GUIDANCE) {
+                        runCatching {
+                            node?.isVisibleToUser == true && node.isEnabled &&
+                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        }.getOrDefault(false)
+                    }
+                }
+                is AssistDecision.ClickWalkingTab -> {
+                    val node = nodeById[decision.targetId]
+                    NaverAssistBridge.tryStep(active.token, active.stage, AssistStage.AWAITING_WALKING_SELECTION) {
+                        runCatching {
+                            node?.isVisibleToUser == true && node.isEnabled &&
+                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        }.getOrDefault(false)
+                    }
+                }
+                is AssistDecision.ClickStartGuidance -> {
+                    consumed = true
+                    val node = nodeById[decision.targetId]
+                    val actionResult = NaverAssistBridge.consume(active.token) {
+                        runCatching {
+                            node?.isVisibleToUser == true && node.isEnabled &&
+                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        }.getOrDefault(false)
+                    }
+                    disarm(active.token)
+                    if (actionResult) {
+                        Toast.makeText(this, "안내 시작을 눌렀어요. 실제 안내 상태를 확인해 주세요.", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this, "안내 시작을 누르지 못했어요. 네이버 지도에서 직접 시작해 주세요.", Toast.LENGTH_LONG).show()
+                    }
+                }
+                AssistDecision.None -> Unit
             }
         } catch (_: RuntimeException) {
             disarm(active.token)
@@ -134,13 +178,37 @@ class NaverWalkingAccessibilityService : AccessibilityService() {
         if (!isRoot) nodes += node
         nodeById[id] = node
         val text = node.text?.toString().orEmpty().ifBlank { node.contentDescription?.toString().orEmpty() }
-        tree += AssistTreeNode(id, parentId, text, node.isVisibleToUser, node.isEnabled, node.isClickable,
-            node.packageName?.toString(), node.windowId)
-        if (text.isNotBlank() && node.isVisibleToUser) {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        val isZeroBounds = bounds.isEmpty || (bounds.left == 0 && bounds.top == 0 && bounds.right == 0 && bounds.bottom == 0)
+        val isVisible = node.isVisibleToUser && !isZeroBounds
+        val isSelected = node.isSelected || node.isChecked
+
+        tree += AssistTreeNode(
+            id = id,
+            parentId = parentId,
+            label = text,
+            visible = isVisible,
+            enabled = node.isEnabled,
+            clickable = node.isClickable,
+            packageName = node.packageName?.toString(),
+            windowId = node.windowId,
+            selected = isSelected,
+            className = node.className?.toString(),
+            viewIdResourceName = node.viewIdResourceName,
+        )
+        if (text.isNotBlank() && isVisible) {
             texts += text
-            modes += text to (node.isSelected || node.isChecked)
+            modes += text to isSelected
         }
-        for (i in 0 until node.childCount) {
+
+        // Skip deep child subtrees of completely off-screen zero-bounds containers
+        if (isZeroBounds && !node.isVisibleToUser && depth > 5) {
+            return
+        }
+
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
             if (nodes.size >= MAX_TREE_NODES) { treeComplete = false; break }
             val child = node.getChild(i)
             if (child == null) treeComplete = false
@@ -168,10 +236,23 @@ class NaverWalkingAccessibilityService : AccessibilityService() {
 
     companion object {
         const val TIMEOUT_MS = 20_000L
-        private const val MAX_TREE_DEPTH = 30
-        private const val MAX_TREE_NODES = 600
+        private const val MAX_TREE_DEPTH = 35
+        private const val MAX_TREE_NODES = 1200
 
         fun arm(context: Context, token: String, destination: String) = NaverAssistBridge.arm(context, token, destination)
         fun cancel(context: Context) = NaverAssistBridge.cancel(context)
+
+        fun isEnabled(context: Context): Boolean {
+            return runCatching {
+                context.getSystemService(AccessibilityManager::class.java)
+                    ?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                    ?.any { info ->
+                        info.resolveInfo.serviceInfo.let { service ->
+                            service.packageName == context.packageName &&
+                                service.name == NaverWalkingAccessibilityService::class.java.name
+                        }
+                    } == true
+            }.getOrDefault(false)
+        }
     }
 }

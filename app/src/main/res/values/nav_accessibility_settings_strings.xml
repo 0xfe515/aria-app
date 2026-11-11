@@ -1,6 +1,6 @@
 <resources>
     <string name="nav_accessibility_settings_title">네이버 지도 도보 안내</string>
-    <string name="nav_accessibility_settings_disclosure">접근성 서비스는 기본적으로 꺼져 있습니다. 사용하려면 Android 접근성 설정의 설치된 앱 목록에서 ‘Aria 네이버 도보 안내 보조’를 직접 선택해 켜 주세요. 사용자가 음성으로 요청한 네이버 도보 경로에서만 지도 화면을 확인하고 안내시작을 누릅니다. 화면 변경에 따라 동작하지 않을 수 있으며 언제든 네이버 지도에서 직접 조작할 수 있습니다. 화면의 글자나 내용은 저장하거나 전송하지 않습니다. 서비스를 켜도 안내가 자동으로 시작되지는 않습니다.</string>
+    <string name="nav_accessibility_settings_disclosure">접근성 서비스는 기본적으로 꺼져 있습니다. 사용하려면 Android 접근성 설정의 설치된 앱 목록에서 ‘Aria 네이버 도보 안내 보조’를 직접 선택해 켜 주세요. 사용자가 음성으로 요청한 목적지에 대해 네이버 지도 검색 결과와 도보 경로를 확인하고 안내시작을 누릅니다. 화면 변경에 따라 동작하지 않을 수 있으며 언제든 네이버 지도에서 직접 조작할 수 있습니다. 화면의 글자나 내용은 저장하거나 전송하지 않습니다. 서비스를 켜도 안내가 자동으로 시작되지는 않습니다.</string>
     <string name="nav_accessibility_settings_enabled">접근성 서비스 사용 중</string>
     <string name="nav_accessibility_settings_disabled">접근성 서비스 사용 안 함</string>
     <string name="nav_accessibility_settings_open">접근성 설정 열기</string>

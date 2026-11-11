@@ -50,8 +50,8 @@ class DestinationResolverTest {
         assertEquals(query, destination.name)
         assertEquals(37.5547, destination.latitude, 0.00001)
         val routeUri = NavigationProvider.Naver.buildWalkingRouteUriString(destination)
-        assertTrue(routeUri.contains("dname=%EC%84%9C%EC%9A%B8%EC%97%AD+1%EB%B2%88+%EC%B6%9C%EA%B5%AC"))
-        assertTrue(NavigationProvider.Naver.buildAppUriString(destination.name).contains("query=%EC%84%9C%EC%9A%B8%EC%97%AD+1%EB%B2%88+%EC%B6%9C%EA%B5%AC"))
-        assertTrue(NavigationProvider.Naver.buildWebFallbackUriString(destination.name).contains("query=%EC%84%9C%EC%9A%B8%EC%97%AD+1%EB%B2%88+%EC%B6%9C%EA%B5%AC"))
+        assertTrue(routeUri.contains("dname=%EC%84%9C%EC%9A%B8%EC%97%AD%201%EB%B2%88%20%EC%B6%9C%EA%B5%AC"))
+        assertTrue(NavigationProvider.Naver.buildAppUriString(destination.name).contains("query=%EC%84%9C%EC%9A%B8%EC%97%AD%201%EB%B2%88%20%EC%B6%9C%EA%B5%AC"))
+        assertTrue(NavigationProvider.Naver.buildWebFallbackUriString(destination.name).contains("query=%EC%84%9C%EC%9A%B8%EC%97%AD%201%EB%B2%88%20%EC%B6%9C%EA%B5%AC"))
     }
 }

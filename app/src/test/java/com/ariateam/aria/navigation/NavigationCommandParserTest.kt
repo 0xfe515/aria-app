@@ -237,6 +237,10 @@ class NavigationCommandParserTest {
             "충주시청 가는 길 좀 알려줘" to "충주시청",
             "걸어서 충주시청까지" to "충주시청",
             "  충주시청 까지 길안내 해주세요! " to "충주시청",
+            "충주시청 안내해 줘" to "충주시청",
+            "충주시청 안내 해 줘" to "충주시청",
+            "충주시청 까지 안내해 줘" to "충주시청",
+            "충주시청 까지 안내 해 줘" to "충주시청",
         )
 
         for ((utterance, destination) in cases) {
@@ -334,5 +338,80 @@ class NavigationCommandParserTest {
         val result = parse("버스로 안내해줘", context = context, now = 10_000)
         assertTrue(result is Interpretation.Clarify)
         assertTrue((result as Interpretation.Clarify).question.contains("목적지와 함께 도보로"))
+    }
+
+    @Test
+    fun koreaTransportationUniversityChungjuCampusUtteranceAndAsrVariantsExtractExactDestination() {
+        val expectedDest = "한국교통대학교 충주캠퍼스"
+
+        // 1. Spacing and particle variants without explicit provider (defaults to Naver)
+        val variants = listOf(
+            // User report exact text (preexisting baseline pass)
+            "한국교통대학교 충주캠퍼스 까지 안내해줘",
+            // ASR spacing variations where previous implementation failed by not stripping action or particle
+            "한국교통대학교 충주캠퍼스 까지 안내해 줘",
+            "한국교통대학교 충주캠퍼스 까지 안내 해 줘",
+            "한국교통대학교 충주캠퍼스 까지 안내 해줘",
+            "한국교통대학교 충주캠퍼스까지 안내해줘",
+            "한국교통대학교 충주캠퍼스까지 안내해 줘",
+            "한국교통대학교 충주캠퍼스까지 안내 해 줘",
+            "한국교통대학교 충주캠퍼스까지 안내 해줘",
+            "한국교통대학교 충주캠퍼스 안내해줘",
+            "한국교통대학교 충주캠퍼스 안내해 줘",
+            "한국교통대학교 충주캠퍼스 안내 해 줘",
+            "한국교통대학교 충주캠퍼스 안내 해줘",
+            "한국교통대학교 충주캠퍼스 까지 안내해 주세요",
+            "한국교통대학교 충주캠퍼스 까지 안내해줘요",
+            "한국교통대학교 충주캠퍼스 까지 안내해 줘요",
+            "한국교통대학교 충주캠퍼스 까지 안내 해 줘요",
+            "한국교통대학교 충주캠퍼스 까지 길안내해줘",
+            "한국교통대학교 충주캠퍼스 까지 길안내 해 줘",
+            "한국교통대학교 충주캠퍼스 까지 길 안내해 줘",
+            "한국교통대학교 충주캠퍼스 까지 길 안내 해 줘",
+            "한국교통대학교 충주캠퍼스까지 길 안내 해 줘",
+            "한국교통대학교 충주캠퍼스 까지 도보로 안내해 줘",
+            "한국교통대학교 충주캠퍼스까지 걸어서 안내해 줘",
+            // Punctuation and whitespace formatting
+            "한국교통대학교 충주캠퍼스 까지 안내해줘.",
+            "한국교통대학교 충주캠퍼스 까지 안내해 줘!",
+            "한국교통대학교 충주캠퍼스, 까지 안내해 줘",
+            "  한국교통대학교 충주캠퍼스 까지 안내해 줘  ",
+        )
+
+        for (utterance in variants) {
+            val result = parse(utterance)
+            assertTrue("Expected NavigateExternal for '$utterance', got $result", result is Interpretation.NavigateExternal)
+            val nav = result as Interpretation.NavigateExternal
+            assertEquals(expectedDest, nav.destination)
+            assertEquals(NavigationProvider.Naver, nav.provider)
+        }
+
+        // 2. Explicit providers
+        val providerCases = mapOf(
+            "네이버 지도로 한국교통대학교 충주캠퍼스 까지 안내해 줘" to NavigationProvider.Naver,
+            "카카오맵으로 한국교통대학교 충주캠퍼스 까지 안내해 줘" to NavigationProvider.Kakao,
+            "구글 지도로 한국교통대학교 충주캠퍼스 까지 안내해 줘" to NavigationProvider.Google,
+        )
+        for ((utterance, provider) in providerCases) {
+            val result = parse(utterance)
+            assertTrue("Expected NavigateExternal for '$utterance'", result is Interpretation.NavigateExternal)
+            val nav = result as Interpretation.NavigateExternal
+            assertEquals(expectedDest, nav.destination)
+            assertEquals(provider, nav.provider)
+        }
+
+        // 3. Pending context target extraction
+        assertEquals("nav_dest:$expectedDest", NavigationCommandParser.extractPendingTarget("한국교통대학교 충주캠퍼스 까지 안내해 줘"))
+
+        // 4. Two-turn conversation
+        val pendingContext = CommandContext("nav_prov:naver", expiresAt = 30_000)
+        val twoTurnResult = parse("한국교통대학교 충주캠퍼스 까지", context = pendingContext, now = 10_000)
+        assertTrue(twoTurnResult is Interpretation.NavigateExternal)
+        assertEquals(expectedDest, (twoTurnResult as Interpretation.NavigateExternal).destination)
+
+        // 5. Negation and compound safety preserved
+        assertTrue(parse("한국교통대학교 충주캠퍼스 까지 안내하지 마") is Interpretation.Clarify)
+        assertTrue(parse("한국교통대학교 충주캠퍼스 가지 마") is Interpretation.Clarify)
+        assertTrue(parse("한국교통대학교 충주캠퍼스 까지 안내해 줘 그리고 홈으로 가") is Interpretation.Clarify)
     }
 }
